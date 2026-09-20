@@ -40,7 +40,7 @@ function run(command, args, env = process.env) {
   return result.stdout;
 }
 
-check(pkg.name === "ccagent", "package name is ccagent");
+check(pkg.name === "ccdagent", "package name is ccdagent");
 check(
   JSON.stringify(pkg.bin) ===
     JSON.stringify({ ccagent: "dist/ccagent.js", "ccagent": "dist/ccagent.js" }),

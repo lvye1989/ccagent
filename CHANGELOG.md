@@ -16,8 +16,9 @@ All notable changes to CCAGENT are documented in this file.
 
 - Updated package metadata and documentation for the
   `lvye1989/ccagent` repository.
-- Prepared the package for direct global installation with
-  `npm install -g ccagent`.
+- Renamed the npm package to `ccdagent` while retaining `ccagent` as the
+  installed terminal command, enabling direct global installation with
+  `npm install -g ccdagent`.
 
 ## [0.1.1] - 2026-09-04
 

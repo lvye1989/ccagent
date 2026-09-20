@@ -67,20 +67,23 @@ Requirements: Node.js 22 or newer, npm, and credentials for at least one support
 Install CCAGENT globally from the npm Registry:
 
 ```bash
-npm install -g ccagent
+npm install -g ccdagent
 ccagent --version
 ```
+
+The npm package is named `ccdagent`; the installed terminal command remains
+`ccagent`.
 
 To upgrade later, install the latest Registry release again:
 
 ```bash
-npm install -g ccagent@latest
+npm install -g ccdagent@latest
 ```
 
 You can also run a one-off session without keeping a global installation:
 
 ```bash
-npx --yes ccagent@latest
+npx --yes ccdagent@latest
 ```
 
 The npm Registry package is built from the public
@@ -281,13 +284,13 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 Upgrade the global package, or re-run the installer:
 
 ```bash
-npm install -g --ignore-scripts ccagent@latest
+npm install -g --ignore-scripts ccdagent@latest
 ```
 
 Remove it with:
 
 ```bash
-npm uninstall -g ccagent
+npm uninstall -g ccdagent
 ```
 
 User configuration and sessions under `~/.ccagent/` are intentionally preserved when the npm package is removed.

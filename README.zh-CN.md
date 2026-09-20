@@ -67,20 +67,22 @@ CCAGENT 采用 37 阶段路线图，从模型通信开始，逐步构建到最�
 从 npm Registry 直接全局安装 CCAGENT：
 
 ```bash
-npm install -g ccagent
+npm install -g ccdagent
 ccagent --version
 ```
+
+npm 包名为 `ccdagent`，安装后的终端命令仍为 `ccagent`。
 
 以后升级到 Registry 最新版本可执行：
 
 ```bash
-npm install -g ccagent@latest
+npm install -g ccdagent@latest
 ```
 
 也可以不保留全局安装，直接运行一次：
 
 ```bash
-npx --yes ccagent@latest
+npx --yes ccdagent@latest
 ```
 
 npm Registry 包由公开的
@@ -277,13 +279,13 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 升级全局包，或重新运行安装脚本：
 
 ```bash
-npm install -g --ignore-scripts ccagent@latest
+npm install -g --ignore-scripts ccdagent@latest
 ```
 
 卸载：
 
 ```bash
-npm uninstall -g ccagent
+npm uninstall -g ccdagent
 ```
 
 卸载 npm 包时，`~/.ccagent/` 下的用户配置与会话会被有意保留。
@@ -356,4 +358,4 @@ npm publish --dry-run
 cd C:\Users\Windows11\Desktop\ccagent-0.1.1
 npm run build
 npm pack
-npm install -g --force .\ccagent-0.1.1.tgz
+npm install -g --force .\ccdagent-0.1.2.tgz

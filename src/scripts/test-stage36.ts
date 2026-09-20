@@ -121,7 +121,7 @@ const packageJson = JSON.parse(await fs.readFile(path.join(PROJECT_ROOT, "packag
 };
 
 section("[1] package contract");
-assert(packageJson.name === "ccagent", "package name is ccagent");
+assert(packageJson.name === "ccdagent", "package name is ccdagent");
 assert(
   JSON.stringify(packageJson.bin) === JSON.stringify({ ccagent: "dist/ccagent.js" }),
   "only ccagent is registered",
@@ -236,7 +236,7 @@ try {
       : run(ccagentBin, ["--version"]);
     assert(installed.stdout.trim() === `ccagent ${packageJson.version}`, "installed ccagent reports the release version", installed.stderr);
 
-    const installedPackage = path.join(installPrefix, "lib", "node_modules", "ccagent");
+    const installedPackage = path.join(installPrefix, "lib", "node_modules", packageJson.name);
     const nestedDependencies = path.join(installedPackage, "node_modules");
     const hasNestedDependencies = await fs.access(nestedDependencies).then(() => true, () => false);
     assert(!hasNestedDependencies, "installed package has no nested dependency tree");
@@ -275,7 +275,7 @@ try {
     const npmCalls = (await fs.readFile(npmLog, "utf-8")).trim().split("\n");
     assert(npmCalls.length === 2, "idempotent install invokes npm once per run");
     assert(
-      npmCalls.every((call) => call === "install -g --ignore-scripts ccagent@next"),
+      npmCalls.every((call) => call === "install -g --ignore-scripts ccdagent@next"),
       "installer honors CCAGENT_VERSION and disables lifecycle scripts",
       npmCalls.join(" | "),
     );
