@@ -45,5 +45,5 @@ fi
 
 installed_version="$(ccagent --version 2>/dev/null || true)"
 printf '\nInstalled %s successfully.\n' "${installed_version:-$package_spec}"
-printf 'Next: set ANTHROPIC_AUTH_TOKEN (or configure a model profile), then run ccagent.\n'
+printf 'Next: create one .env file, set DEEPSEEK_API_KEY, point CCAGENT_ENV_FILE to it, then run ccagent.\n'
 printf 'Upgrade: run this installer again.  Uninstall: npm uninstall -g ccagent\n'

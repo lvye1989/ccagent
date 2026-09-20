@@ -194,6 +194,7 @@ try {
   );
 
   const expectedFiles = [
+    ".env.example",
     "LICENSE",
     "README.md",
     "README.zh-CN.md",

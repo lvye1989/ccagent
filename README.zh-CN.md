@@ -2,7 +2,7 @@
 
 一个使用 TypeScript 和 Node.js 构建的开源终端 Coding Agent。
 
-![CCAGENT banner](https://raw.githubusercontent.com/ConardLi/ccagent/main/public/img/banner.png)
+![CCAGENT banner](https://raw.githubusercontent.com/lvye1989/ccagent/main/public/img/banner.png)
 
 CCAGENT 在一套可阅读、可扩展的代码中提供类 Claude Code 工作流：流式模型对话、本地文件与 Shell 工具、权限模式、会话、MCP、Skills、Sub-Agent、Agent Teams、多模态输入、Windows Computer Use 和插件系统。
 
@@ -58,41 +58,84 @@ CCAGENT 采用 37 阶段路线图，从模型通信开始，逐步构建到最�
 | 35 | Plugins 与 Marketplace | [`step/step35.js`](./step/step35.js) | ✅ 已完成 |
 | 36 | 打包发布与文档 | [`step/step36.js`](./step/step36.js) | ✅ 已完成 |
 
-阶段 36 已通过本地类型检查、单文件打包、tarball 边界检查、隔离全局安装、安装器测试、真实 PTY 启动、`npm publish --dry-run`、npm 发布及冷缓存 `npx ccagent@latest` 验证。
+阶段 36 已通过本地类型检查、单文件打包、tarball 边界检查、隔离全局安装、安装器测试、真实 PTY 启动及 `npm publish --dry-run` 验证。
 
 ## 快速开始
 
 运行要求：Node.js 22 或更高版本、npm，以及至少一个受支持模型服务的凭证。
 
-无需安装即可试用：
+从 npm Registry 直接全局安装 CCAGENT：
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN="your-token"
+npm install -g ccagent
+ccagent --version
+```
+
+以后升级到 Registry 最新版本可执行：
+
+```bash
+npm install -g ccagent@latest
+```
+
+也可以不保留全局安装，直接运行一次：
+
+```bash
 npx --yes ccagent@latest
 ```
 
-也可以全局安装：
+npm Registry 包由公开的
+[`lvye1989/ccagent`](https://github.com/lvye1989/ccagent) 仓库构建。通过
+Registry 安装会下载已经打包的 CLI，不会在本地留下可编辑的源码仓库。
+
+安装后，按照[通过 `.env` 配置 DeepSeek](#通过-env-配置-deepseek)创建唯一的
+`.env`，然后运行：
 
 ```bash
-npm install -g --ignore-scripts ccagent
 ccagent
-```
-
-同时提供长命令名：
-
-```bash
-ccagent --help
 ```
 
 macOS 和 Linux 可以使用基于 npm 的安装脚本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ConardLi/ccagent/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lvye1989/ccagent/main/install.sh | sh
 ```
 
-安装脚本只会检查 Node.js、使用 `--ignore-scripts` 安装同一个 npm 包、确认 `ccagent` 已进入 `PATH`；它不会替你安装 Node.js，也不会执行包生命周期脚本。
+安装脚本会检查 Node.js、让 npm 在不执行包生命周期脚本的情况下安装
+Registry 最新版本，并确认 `ccagent` 已进入 `PATH`；它不会替你安装 Node.js。
 
 ## 模型配置
+
+### 通过 `.env` 配置 DeepSeek
+
+从本项目源码目录运行 CCAGENT 时，先复制示例文件，再在项目根目录的
+`.env` 中填写 DeepSeek API Key：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+```dotenv
+DEEPSEEK_API_KEY=
+DEEPSEEK_PROTOCOL=openai-responses
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+程序会从启动 `ccagent` 时所在的目录加载 `.env`，该文件已被 Git 忽略，
+请勿提交填写了真实 Key 的 `.env`。如果 `DEEPSEEK_API_KEY=` 为空，
+DeepSeek 身份验证将不可用。
+
+如果希望全局安装的 `ccagent` 能在任意目录使用，请让
+`CCAGENT_ENV_FILE` 指向这一个唯一的 `.env` 文件。例如在仓库根目录的
+Windows PowerShell 中执行：
+
+```powershell
+[Environment]::SetEnvironmentVariable("CCAGENT_ENV_FILE", (Resolve-Path ".env").Path, "User")
+```
+
+设置 Windows 用户环境变量后需要打开一个新终端，已经打开的终端不会
+自动继承新值。CCAGENT 会主动忽略操作系统/进程环境以及 settings 文件
+`env` 块中的 `DEEPSEEK_API_KEY`；选定的 `.env` 是 DeepSeek Key 的唯一来源。
 
 使用原始 Anthropic 模型名时，只配置环境变量即可：
 
@@ -106,8 +149,14 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 
 ```json
 {
-  "defaultModel": "gpt",
+  "defaultModel": "deepseek",
   "models": {
+    "deepseek": {
+      "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
+      "model": "${DEEPSEEK_MODEL:-deepseek-flash}",
+      "baseURL": "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}",
+      "apiKey": "${DEEPSEEK_API_KEY}"
+    },
     "gpt": {
       "protocol": "openai-chat",
       "model": "gpt-5.1",
@@ -128,13 +177,19 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 }
 ```
 
-通过 `ccagent --model gpt` 启动，或在 REPL 中执行 `/model gpt` 选择 Profile。
+通过 `ccagent --model deepseek` 启动，或在 REPL 中执行 `/model deepseek`
+选择 Profile。未显式选择模型时，`defaultModel` 会将该 Profile 设为默认模型。
 
 | 环境变量 | 用途 |
 |---|---|
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic API Token 或兼容网关 Token |
 | `ANTHROPIC_BASE_URL` | 可选的 Anthropic 兼容端点 |
 | `ANTHROPIC_MODEL` | 默认原始 Anthropic 模型名 |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key；只接受选定 `.env` 文件中的值 |
+| `DEEPSEEK_PROTOCOL` | 可选的 DeepSeek 协议覆盖；示例 Profile 默认为 `openai-responses` |
+| `DEEPSEEK_MODEL` | 可选的 DeepSeek 模型覆盖；示例 Profile 默认为 `deepseek-flash` |
+| `DEEPSEEK_BASE_URL` | 可选的 DeepSeek API 地址覆盖；默认为 `https://api.deepseek.com` |
+| `CCAGENT_ENV_FILE` | 指向唯一 `.env` 的可选绝对路径，用于从其他目录启动 |
 | `OPENAI_API_KEY` | OpenAI 兼容 Profile 引用的 Key |
 | `GEMINI_API_KEY` | Gemini Profile 引用的 Key |
 | `TAVILY_API_KEY` | Tavily API Key；配置后内置 `WebSearch` 将直接调用 Tavily |
@@ -239,7 +294,7 @@ npm uninstall -g ccagent
 2. 在 CCAGENT 中运行 `/doctor`，检查凭证、Settings、MCP、Plugins、Sandbox 支持和目录写入权限。
 3. 运行 `/status` 和 `/config list`，确认当前模型与配置来源。
 4. 如果全局安装成功但找不到 `ccagent`，请把 `npm prefix -g` 对应的全局 bin 目录加入 `PATH`，然后打开一个新 Shell。
-5. 可复现的问题请提交到 [GitHub Issues](https://github.com/ConardLi/ccagent/issues)。
+5. 可复现的问题请提交到 [GitHub Issues](https://github.com/lvye1989/ccagent/issues)。
 
 提交 Issue 时不要包含 API Key、`.env` 内容或私密 Prompt。
 
@@ -266,11 +321,16 @@ Provider API 与流式适配
 ## 本地开发
 
 ```bash
-git clone https://github.com/ConardLi/ccagent.git
+git clone https://github.com/lvye1989/ccagent.git
 cd ccagent
 npm install
+cp .env.example .env
 npm run dev
 ```
+
+Windows PowerShell 请将 `cp .env.example .env` 替换为
+`Copy-Item .env.example .env`。启动前请打开 `.env` 填写
+`DEEPSEEK_API_KEY`，完整配置参见[通过 `.env` 配置 DeepSeek](#通过-env-配置-deepseek)。
 
 常用检查：
 

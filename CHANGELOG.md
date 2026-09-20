@@ -4,6 +4,21 @@ All notable changes to CCAGENT are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-20
+
+### Added
+
+- Canonical `.env` configuration for the DeepSeek API key, including a
+  cross-directory `CCAGENT_ENV_FILE` pointer and regression coverage.
+- `.env.example` in the published npm package.
+
+### Changed
+
+- Updated package metadata and documentation for the
+  `lvye1989/ccagent` repository.
+- Prepared the package for direct global installation with
+  `npm install -g ccagent`.
+
 ## [0.1.1] - 2026-09-04
 
 ### Changed

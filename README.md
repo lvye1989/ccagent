@@ -2,7 +2,7 @@
 
 An open-source, terminal-native coding agent built with TypeScript and Node.js.
 
-![CCAGENT banner](https://raw.githubusercontent.com/ConardLi/ccagent/main/public/img/banner.png)
+![CCAGENT banner](https://raw.githubusercontent.com/lvye1989/ccagent/main/public/img/banner.png)
 
 CCAGENT provides a Claude Code-style workflow in a readable, extensible codebase: streaming model conversations, local file and shell tools, permission modes, sessions, MCP, skills, sub-agents, Agent Teams, multimodal input, Windows Computer Use, and plugins.
 
@@ -58,41 +58,87 @@ CCAGENT follows a 37-stage roadmap that builds the system progressively from mod
 | 35 | Plugins and Marketplace | [`step/step35.js`](./step/step35.js) | ✅ Done |
 | 36 | Packaging, publishing, and documentation | [`step/step36.js`](./step/step36.js) | ✅ Done |
 
-Stage 36 has passed local typechecking, bundling, tarball boundary checks, isolated global installation, installer tests, real PTY startup, `npm publish --dry-run`, npm publication, and cold-cache `npx ccagent@latest` verification.
+Stage 36 has passed local typechecking, bundling, tarball boundary checks, isolated global installation, installer tests, real PTY startup, and `npm publish --dry-run` verification.
 
 ## Quick start
 
 Requirements: Node.js 22 or newer, npm, and credentials for at least one supported model provider.
 
-Try it without installing:
+Install CCAGENT globally from the npm Registry:
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN="your-token"
+npm install -g ccagent
+ccagent --version
+```
+
+To upgrade later, install the latest Registry release again:
+
+```bash
+npm install -g ccagent@latest
+```
+
+You can also run a one-off session without keeping a global installation:
+
+```bash
 npx --yes ccagent@latest
 ```
 
-Or install it globally:
+The npm Registry package is built from the public
+[`lvye1989/ccagent`](https://github.com/lvye1989/ccagent) repository. Installing
+from the Registry downloads the packaged CLI; it does not leave an editable
+source checkout on disk.
+
+After installation, create the canonical `.env` described in
+[DeepSeek with `.env`](#deepseek-with-env), then run:
 
 ```bash
-npm install -g --ignore-scripts ccagent
 ccagent
-```
-
-The long command name is also available:
-
-```bash
-ccagent --help
 ```
 
 An npm-backed installer is available for macOS and Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ConardLi/ccagent/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lvye1989/ccagent/main/install.sh | sh
 ```
 
-The installer checks Node.js, installs the same npm package with `--ignore-scripts`, verifies `ccagent` on `PATH`, and does not install Node.js or run package lifecycle scripts for you.
+The installer checks Node.js, asks npm to install the latest Registry package
+without running package lifecycle scripts, and verifies `ccagent` on `PATH`.
+It does not install Node.js for you.
 
 ## Model configuration
+
+### DeepSeek with `.env`
+
+When running CCAGENT from this source checkout, copy the example file and set
+the DeepSeek key in the project-root `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+```dotenv
+DEEPSEEK_API_KEY=
+DEEPSEEK_PROTOCOL=openai-responses
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+The `.env` file is loaded from the directory where `ccagent` is launched and
+is ignored by Git. Never commit a populated `.env`. An empty
+`DEEPSEEK_API_KEY=` leaves DeepSeek authentication unavailable.
+
+If the globally installed `ccagent` command must work from every directory,
+point `CCAGENT_ENV_FILE` at this one canonical `.env` file. For example, from
+the repository root in Windows PowerShell:
+
+```powershell
+[Environment]::SetEnvironmentVariable("CCAGENT_ENV_FILE", (Resolve-Path ".env").Path, "User")
+```
+
+Open a new terminal after setting a Windows user environment variable. Existing
+terminals do not inherit the new value. CCAGENT intentionally ignores
+`DEEPSEEK_API_KEY` inherited from the OS/process and from settings-file `env`
+blocks; the selected `.env` is the only accepted source for the DeepSeek key.
 
 For a raw Anthropic model name, environment variables are enough:
 
@@ -106,8 +152,14 @@ CCAGENT also supports named Anthropic, OpenAI-compatible, Gemini, and local prof
 
 ```json
 {
-  "defaultModel": "gpt",
+  "defaultModel": "deepseek",
   "models": {
+    "deepseek": {
+      "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
+      "model": "${DEEPSEEK_MODEL:-deepseek-flash}",
+      "baseURL": "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}",
+      "apiKey": "${DEEPSEEK_API_KEY}"
+    },
     "gpt": {
       "protocol": "openai-chat",
       "model": "gpt-5.1",
@@ -128,13 +180,20 @@ CCAGENT also supports named Anthropic, OpenAI-compatible, Gemini, and local prof
 }
 ```
 
-Select a profile with `ccagent --model gpt` or `/model gpt` inside the REPL.
+Select a profile with `ccagent --model deepseek` or `/model deepseek` inside
+the REPL. `defaultModel` makes that profile the default when no explicit model
+is selected.
 
 | Environment variable | Purpose |
 |---|---|
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic API token or compatible gateway token |
 | `ANTHROPIC_BASE_URL` | Optional Anthropic-compatible endpoint |
 | `ANTHROPIC_MODEL` | Default raw Anthropic model name |
+| `DEEPSEEK_API_KEY` | DeepSeek API key; accepted only from the selected `.env` file |
+| `DEEPSEEK_PROTOCOL` | Optional DeepSeek protocol override; defaults to `openai-responses` in the example profile |
+| `DEEPSEEK_MODEL` | Optional DeepSeek model override; defaults to `deepseek-flash` in the example profile |
+| `DEEPSEEK_BASE_URL` | Optional DeepSeek endpoint override; defaults to `https://api.deepseek.com` |
+| `CCAGENT_ENV_FILE` | Optional absolute path to the one canonical `.env`, used when launching from other directories |
 | `OPENAI_API_KEY` | Referenced by OpenAI-compatible profiles |
 | `GEMINI_API_KEY` | Referenced by Gemini profiles |
 | `TAVILY_API_KEY` | Tavily API key; makes built-in `WebSearch` call Tavily directly |
@@ -239,7 +298,7 @@ User configuration and sessions under `~/.ccagent/` are intentionally preserved 
 2. Run `/doctor` inside CCAGENT to inspect credentials, settings, MCP, plugins, sandbox support, and writable paths.
 3. Run `/status` and `/config list` to verify the active model and configuration sources.
 4. If a global install succeeds but `ccagent` is not found, add the npm global bin directory associated with `npm prefix -g` to `PATH`, then open a new shell.
-5. Report reproducible problems through [GitHub Issues](https://github.com/ConardLi/ccagent/issues).
+5. Report reproducible problems through [GitHub Issues](https://github.com/lvye1989/ccagent/issues).
 
 Never include API keys, `.env` contents, or private prompts in an issue.
 
@@ -266,11 +325,16 @@ The implementation and tutorial snapshot series are complete through Stage 35. S
 ## Development
 
 ```bash
-git clone https://github.com/ConardLi/ccagent.git
+git clone https://github.com/lvye1989/ccagent.git
 cd ccagent
 npm install
+cp .env.example .env
 npm run dev
 ```
+
+On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
+Before starting, open `.env` and set `DEEPSEEK_API_KEY`; see
+[DeepSeek with `.env`](#deepseek-with-env) for the complete model setup.
 
 Useful checks:
 
