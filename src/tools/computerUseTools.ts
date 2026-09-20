@@ -245,7 +245,7 @@ async function mergedModelRoles(cwd: string): Promise<Record<string, string>> {
 
 function envPerceptionProfile(): ModelProfile | null {
   const model = process.env.QWEN_MODEL?.trim();
-  const rawProtocol = process.env.QWEN_PROTOCOL?.trim() || "openai-responses";
+  const rawProtocol = process.env.QWEN_PROTOCOL?.trim() || "openai-chat";
   if (!model) return null;
   if (!["openai-chat", "openai-responses", "gemini"].includes(rawProtocol)) return null;
   const baseURL = process.env.QWEN_BASE_URL?.trim() || process.env.DASHSCOPE_BASE_URL?.trim();

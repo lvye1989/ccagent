@@ -89,12 +89,18 @@ npm Registry 包由公开的
 [`lvye1989/ccagent`](https://github.com/lvye1989/ccagent) 仓库构建。通过
 Registry 安装会下载已经打包的 CLI，不会在本地留下可编辑的源码仓库。
 
-安装后，按照[通过 `.env` 配置 DeepSeek](#通过-env-配置-deepseek)创建唯一的
-`.env`，然后运行：
+安装后先运行首次配置向导，再启动 CCAGENT：
 
 ```bash
+ccagent init
 ccagent
 ```
+
+`ccagent init` 会根据当前账户自动创建 `~/.ccagent/.env` 和
+`~/.ccagent/settings.json`，交互式配置 DeepSeek 与可选的 Qwen 视觉模型，
+并分别执行文本、图片连接测试。API Key 只写入私有 `.env`，不会写入
+`settings.json`。重新运行向导会保留不相关的已有配置；离线环境可使用
+`ccagent init --skip-test`。
 
 macOS 和 Linux 可以使用基于 npm 的安装脚本：
 
@@ -106,6 +112,17 @@ curl -fsSL https://raw.githubusercontent.com/lvye1989/ccagent/main/install.sh | 
 Registry 最新版本，并确认 `ccagent` 已进入 `PATH`；它不会替你安装 Node.js。
 
 ## 模型配置
+
+### 推荐：首次配置向导
+
+```bash
+ccagent init
+```
+
+Windows、macOS 和 Linux 都使用当前账户的主目录，不需要手工填写固定用户名。
+Windows 的典型路径为 `%USERPROFILE%\.ccagent`，macOS/Linux 为
+`~/.ccagent`。如已有无法解析的 `settings.json`，向导会停止且保留原文件，
+避免静默覆盖。
 
 ### 通过 `.env` 配置 DeepSeek
 
@@ -204,7 +221,7 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 | `CLASSIC_WORDS_TIMEOUT_MS` | 可选 CNKGraph 请求超时毫秒数，默认为 `15000` |
 | `CCAGENT_BASH` | 可选 Bash 可执行文件；Windows 检测到 Git Bash 时会优先使用，以兼容原生盘符路径 |
 | `MCP_TOOL_TIMEOUT_MS` | MCP 工具调用默认超时，默认为 `300000`；服务级 `toolTimeoutMs` 优先 |
-| `QWEN_PROTOCOL` | 可选 Computer Use 感知协议：`openai-responses`、`openai-chat` 或 `gemini` |
+| `QWEN_PROTOCOL` | 可选 Computer Use 感知协议；DashScope 推荐并默认使用已验证的 `openai-chat`，也支持 `openai-responses` 或 `gemini` |
 | `QWEN_MODEL` | 用于理解 Computer Use 截图的 Qwen/视觉模型 |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope 或兼容 Qwen 截图感知端点 |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Computer Use 感知模型的 API Key |
@@ -238,6 +255,7 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 ## 常用方式
 
 ```bash
+ccagent init                    # 首次创建用户配置并测试模型连接
 ccagent                         # 交互式 REPL
 ccagent --model gpt             # 选择模型 Profile
 ccagent --plan                  # 只读计划模式

@@ -27,12 +27,19 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (process.argv[2] === "init") {
+    const { runInitCommand } = await import("./init.js");
+    process.exitCode = await runInitCommand(process.argv.slice(3));
+    return;
+  }
+
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     console.log(`
 CCAGENT v${VERSION} — Terminal-native agentic coding system
 
 Usage:
   ccagent [options]            (long alias: ccagent)
+  ccagent init [--skip-test]   Create user settings, store keys, test models
 
 Options:
   -v, --version               Print version and exit

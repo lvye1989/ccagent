@@ -4,11 +4,19 @@ All notable changes to CCAGENT are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added `ccagent init`, an interactive first-run setup that creates private
+  user-level environment and settings files, safely preserves existing
+  configuration, and verifies DeepSeek text plus optional Qwen vision access.
+
 ### Fixed
 
 - Routed `classic_words.author_writings` through the JSON writing-search API,
   added full-name person search, and fall back from a failed alias/surname
   lookup to `person_scope=Name`.
+- Defaulted Qwen Computer Use perception to the DashScope-compatible
+  `openai-chat` protocol instead of accepting a zero-token Responses result.
 
 ## [0.1.2] - 2026-09-20
 

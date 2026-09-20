@@ -91,12 +91,19 @@ The npm Registry package is built from the public
 from the Registry downloads the packaged CLI; it does not leave an editable
 source checkout on disk.
 
-After installation, create the canonical `.env` described in
-[DeepSeek with `.env`](#deepseek-with-env), then run:
+After installation, run the first-use setup and then start CCAGENT:
 
 ```bash
+ccagent init
 ccagent
 ```
+
+`ccagent init` creates `~/.ccagent/.env` and
+`~/.ccagent/settings.json` for the current account, prompts for DeepSeek and
+optional Qwen vision access, and performs text and image connection tests. API
+keys are stored only in the private `.env`, never in `settings.json`. Re-running
+the command preserves unrelated existing configuration. Use
+`ccagent init --skip-test` when setup must be completed offline.
 
 An npm-backed installer is available for macOS and Linux:
 
@@ -109,6 +116,16 @@ without running package lifecycle scripts, and verifies `ccagent` on `PATH`.
 It does not install Node.js for you.
 
 ## Model configuration
+
+### Recommended: first-use setup
+
+```bash
+ccagent init
+```
+
+The command derives the current user's home directory on Windows, macOS, and
+Linux, so no hard-coded username is needed. It refuses to overwrite an existing
+malformed `settings.json`, leaving the original file available for recovery.
 
 ### DeepSeek with `.env`
 
@@ -209,7 +226,7 @@ is selected.
 | `CLASSIC_WORDS_TIMEOUT_MS` | Optional CNKGraph request timeout; defaults to `15000` |
 | `CCAGENT_BASH` | Optional Bash executable; Windows defaults to Git Bash when installed so native drive paths remain valid |
 | `MCP_TOOL_TIMEOUT_MS` | Default timeout for MCP tool calls; defaults to `300000` (server-level `toolTimeoutMs` takes precedence) |
-| `QWEN_PROTOCOL` | Optional Computer Use perception protocol: `openai-responses`, `openai-chat`, or `gemini` |
+| `QWEN_PROTOCOL` | Optional Computer Use perception protocol; the verified DashScope default is `openai-chat`, with `openai-responses` and `gemini` also supported |
 | `QWEN_MODEL` | Qwen/vision model used to interpret Computer Use screenshots |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope or compatible Qwen endpoint for screenshot perception |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | API key for the Computer Use perception model |
@@ -246,6 +263,7 @@ Run `/config list`, `/model list`, or `/doctor` to inspect the effective setup.
 ## Common usage
 
 ```bash
+ccagent init                    # create user config and test model access
 ccagent                         # interactive REPL
 ccagent --model gpt             # select a model profile
 ccagent --plan                  # read-only planning mode
