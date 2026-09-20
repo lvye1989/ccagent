@@ -14,6 +14,12 @@ const TOOL_BLOCK_OVERHEAD_TOKENS = 24;
 const FIXED_BINARY_BLOCK_TOKENS = 2_000;
 
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  // DeepSeek V4 API models expose a 1 Mi-token context window. Keep the
+  // concrete model names here; named profiles can override this explicitly
+  // with models.<id>.contextWindow.
+  "deepseek-flash": 1_048_576,
+  "deepseek-v4-flash": 1_048_576,
+  "deepseek-v4-pro": 1_048_576,
   "claude-opus-4-20250514": 200_000,
   "claude-sonnet-4-20250514": 200_000,
   "claude-haiku-3-20250307": 200_000,
@@ -22,7 +28,7 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-3-opus-20240229": 200_000,
 };
 
-export function getContextWindowForModel(model: string): number {
+export function getContextWindowForModel(model: string, configuredContextWindow?: number): number {
   // CCAGENT_MAX_CONTEXT_TOKENS is the project name; CLAUDE_CODE_MAX_CONTEXT_TOKENS
   // is honored too for parity with source (matches getMaxRetries' alias pattern).
   const envOverride =
@@ -30,6 +36,14 @@ export function getContextWindowForModel(model: string): number {
   if (envOverride) {
     const parsed = parseInt(envOverride, 10);
     if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  if (
+    configuredContextWindow !== undefined &&
+    Number.isFinite(configuredContextWindow) &&
+    configuredContextWindow > 0
+  ) {
+    return Math.floor(configuredContextWindow);
   }
 
   if (MODEL_CONTEXT_WINDOWS[model]) {
@@ -43,8 +57,8 @@ export function getContextWindowForModel(model: string): number {
   return MODEL_CONTEXT_WINDOW_DEFAULT;
 }
 
-export function getEffectiveContextWindowSize(model: string): number {
-  const contextWindow = getContextWindowForModel(model);
+export function getEffectiveContextWindowSize(model: string, configuredContextWindow?: number): number {
+  const contextWindow = getContextWindowForModel(model, configuredContextWindow);
   const reserved = Math.min(MAX_OUTPUT_TOKENS_FOR_SUMMARY, Math.floor(contextWindow * 0.2));
   return contextWindow - reserved;
 }
@@ -136,18 +150,26 @@ export interface TokenBudgetSnapshot {
 
 function scaleBuffer(buffer: number, effectiveWindow: number): number {
   const referenceWindow = 180_000;
-  if (effectiveWindow >= referenceWindow) return buffer;
-  return Math.round(buffer * (effectiveWindow / referenceWindow));
+  // Scale in both directions. Fixed 13K/20K buffers become dangerously small
+  // on 1M-token models, leaving too little room for estimation error, tool
+  // schemas, and the compaction request itself.
+  return Math.max(1, Math.round(buffer * (effectiveWindow / referenceWindow)));
 }
 
 export function buildTokenBudgetSnapshot(
   messages: readonly MessageParam[],
-  options?: { usage?: Usage; usageAnchorIndex?: number; systemPrompt?: string; model?: string },
+  options?: {
+    usage?: Usage;
+    usageAnchorIndex?: number;
+    systemPrompt?: string;
+    model?: string;
+    contextWindow?: number;
+  },
 ): TokenBudgetSnapshot {
   const estimatedConversationTokens = tokenCountWithEstimation(messages, options);
   const model = options?.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
-  const contextWindow = getContextWindowForModel(model);
-  const effectiveContextWindow = getEffectiveContextWindowSize(model);
+  const contextWindow = getContextWindowForModel(model, options?.contextWindow);
+  const effectiveContextWindow = getEffectiveContextWindowSize(model, options?.contextWindow);
   return {
     estimatedConversationTokens,
     contextWindow,

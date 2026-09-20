@@ -129,6 +129,7 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
                                  (executed → trusted sources only)
   cleanupPeriodDays: 30          Transcript retention in days; 0 disables session persistence
   additionalDirectories: ["..."] Extra dirs the file tools may access beyond cwd (trusted sources only)
+  models.<id>.contextWindow: N  Provider context capacity used for warnings and auto-compaction
   disableAllHooks: true          Master switch — turns off every hook AND the statusLine
   respectGitignore: false        Let Glob/Grep search files .gitignore would hide (default: true)
   syntaxHighlightingDisabled: true   Render code blocks as plain text (no ANSI colors)
@@ -139,7 +140,7 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   enabledMcpjsonServers: ["name"]    Approve specific .mcp.json servers
   disabledMcpjsonServers: ["name"]   Reject specific .mcp.json servers
 
-  /compact                    Compact conversation context
+  /compact [focus]            Compact context now, optionally preserving a stated focus
   /exit, /quit, /bye          Exit the REPL
 `);
     process.exit(0);

@@ -193,6 +193,7 @@ export function buildUserSettings(
     model: "${DEEPSEEK_MODEL:-deepseek-flash}",
     baseURL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}",
     apiKey: "${DEEPSEEK_API_KEY}",
+    contextWindow: 1_048_576,
   };
   const nextModels: Record<string, unknown> = { ...models, deepseek };
   const roles: Record<string, unknown> = { ...objectValue(existing.modelRoles) };

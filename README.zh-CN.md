@@ -175,7 +175,8 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
       "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
       "model": "${DEEPSEEK_MODEL:-deepseek-flash}",
       "baseURL": "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}",
-      "apiKey": "${DEEPSEEK_API_KEY}"
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "contextWindow": 1048576
     },
     "gpt": {
       "protocol": "openai-chat",
@@ -200,6 +201,16 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 通过 `ccagent --model deepseek` 启动，或在 REPL 中执行 `/model deepseek`
 选择 Profile。未显式选择模型时，`defaultModel` 会将该 Profile 设为默认模型。
 
+`contextWindow` 表示模型服务商提供的输入与输出总 Token 容量。CCAGENT
+会用它计算预警与自动压缩阈值，但不会凭空扩大模型本身的容量。内置的
+`deepseek-flash` Profile 使用 `1048576`（1 Mi Token）；自定义网关或本地
+模型应填写服务商公布的真实数值。也可以使用
+`CCAGENT_MAX_CONTEXT_TOKENS` 对当前进程统一覆盖。
+
+CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步骤工具循环
+执行期间也会先压缩再继续，而不是直接中断。需要提前压缩或指定总结重点时，
+仍可运行 `/compact [重点说明]`；运行 `/context` 可查看最终生效的窗口和估算占用。
+
 | 环境变量 | 用途 |
 |---|---|
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic API Token 或兼容网关 Token |
@@ -210,6 +221,7 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 | `DEEPSEEK_MODEL` | 可选的 DeepSeek 模型覆盖；示例 Profile 默认为 `deepseek-flash` |
 | `DEEPSEEK_BASE_URL` | 可选的 DeepSeek API 地址覆盖；默认为 `https://api.deepseek.com` |
 | `CCAGENT_ENV_FILE` | 指向唯一 `.env` 的可选绝对路径，用于从其他目录启动 |
+| `CCAGENT_MAX_CONTEXT_TOKENS` | 可选的进程级上下文窗口覆盖；通常优先使用 Profile 的 `contextWindow` |
 | `OPENAI_API_KEY` | OpenAI 兼容 Profile 引用的 Key |
 | `GEMINI_API_KEY` | Gemini Profile 引用的 Key |
 | `TAVILY_API_KEY` | Tavily API Key；配置后内置 `WebSearch` 将直接调用 Tavily |

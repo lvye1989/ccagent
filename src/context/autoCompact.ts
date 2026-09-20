@@ -30,31 +30,31 @@ export function resetAutoCompactFailures(): void {
 }
 
 function scaleBuffer(buffer: number, effectiveWindow: number): number {
-  // For large windows (>=200K), use the original fixed buffer.
-  // For smaller windows, scale proportionally so ratios stay sensible.
+  // Scale for both small and large windows so a 1M-token model does not wait
+  // until the final ~1% before attempting compaction.
   const referenceWindow = 180_000; // effectiveContextWindow at 200K
-  if (effectiveWindow >= referenceWindow) return buffer;
-  return Math.round(buffer * (effectiveWindow / referenceWindow));
+  return Math.max(1, Math.round(buffer * (effectiveWindow / referenceWindow)));
 }
 
-export function getAutoCompactThreshold(model: string): number {
-  const effective = getEffectiveContextWindowSize(model);
+export function getAutoCompactThreshold(model: string, contextWindow?: number): number {
+  const effective = getEffectiveContextWindowSize(model, contextWindow);
   return Math.max(0, effective - scaleBuffer(AUTOCOMPACT_BUFFER_TOKENS, effective));
 }
 
-export function getBlockingLimit(model: string): number {
-  const effective = getEffectiveContextWindowSize(model);
+export function getBlockingLimit(model: string, contextWindow?: number): number {
+  const effective = getEffectiveContextWindowSize(model, contextWindow);
   return Math.max(0, effective - scaleBuffer(MANUAL_COMPACT_BUFFER_TOKENS, effective));
 }
 
 export function calculateTokenWarningState(
   estimatedTokens: number,
   model: string,
+  configuredContextWindow?: number,
 ): TokenWarningResult {
-  const contextWindow = getContextWindowForModel(model);
-  const effective = getEffectiveContextWindowSize(model);
-  const blockingLimit = getBlockingLimit(model);
-  const autoCompactThreshold = getAutoCompactThreshold(model);
+  const contextWindow = getContextWindowForModel(model, configuredContextWindow);
+  const effective = getEffectiveContextWindowSize(model, configuredContextWindow);
+  const blockingLimit = getBlockingLimit(model, configuredContextWindow);
+  const autoCompactThreshold = getAutoCompactThreshold(model, configuredContextWindow);
   const warningThreshold = Math.max(0, effective - scaleBuffer(WARNING_THRESHOLD_BUFFER_TOKENS, effective));
 
   let state: TokenWarningState = "normal";
@@ -75,14 +75,15 @@ export function calculateTokenWarningState(
   };
 }
 
-export function isAtBlockingLimit(estimatedTokens: number, model: string): boolean {
-  return estimatedTokens >= getBlockingLimit(model);
+export function isAtBlockingLimit(estimatedTokens: number, model: string, contextWindow?: number): boolean {
+  return estimatedTokens >= getBlockingLimit(model, contextWindow);
 }
 
 export function shouldAutoCompact(
   estimatedTokens: number,
   model: string,
   querySource?: string,
+  contextWindow?: number,
 ): boolean {
   if (querySource === "compact" || querySource === "session_memory") {
     return false;
@@ -93,7 +94,7 @@ export function shouldAutoCompact(
     });
     return false;
   }
-  return estimatedTokens >= getAutoCompactThreshold(model);
+  return estimatedTokens >= getAutoCompactThreshold(model, contextWindow);
 }
 
 export async function autoCompactIfNeeded(
@@ -104,11 +105,12 @@ export async function autoCompactIfNeeded(
     usageAnchorIndex?: number;
     systemPrompt?: string;
     querySource?: string;
+    contextWindow?: number;
   },
 ): Promise<{ result: CompactionResult; didAutoCompact: boolean }> {
   const estimatedTokens = tokenCountWithEstimation(messages, options);
 
-  if (!shouldAutoCompact(estimatedTokens, model, options.querySource)) {
+  if (!shouldAutoCompact(estimatedTokens, model, options.querySource, options.contextWindow)) {
     return {
       result: { messages, didCompact: false, didMicroCompact: false },
       didAutoCompact: false,
@@ -117,7 +119,7 @@ export async function autoCompactIfNeeded(
 
   debugLog("autoCompact", "triggering", {
     estimatedTokens,
-    threshold: getAutoCompactThreshold(model),
+    threshold: getAutoCompactThreshold(model, options.contextWindow),
     consecutiveFailures: consecutiveAutoCompactFailures,
   });
 
@@ -127,6 +129,7 @@ export async function autoCompactIfNeeded(
       usageAnchorIndex: options.usageAnchorIndex,
       systemPrompt: options.systemPrompt,
       model,
+      contextWindow: options.contextWindow,
       force: true,
     });
     consecutiveAutoCompactFailures = 0;

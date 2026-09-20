@@ -75,6 +75,7 @@ async function main(): Promise<void> {
             model: "${MP_TEST_MODEL:-deepseek-flash}",
             baseURL: "${MP_TEST_BASE_URL:-https://api.deepseek.com}",
             apiKey: "${MP_TEST_KEY}",
+            contextWindow: 1_048_576,
           },
           leaky: {
             protocol: "gemini",
@@ -102,8 +103,9 @@ async function main(): Promise<void> {
   assert(
     loaded.profiles.envDefaults?.protocol === "openai-responses" &&
       loaded.profiles.envDefaults?.model === "deepseek-flash" &&
-      loaded.profiles.envDefaults?.baseURL === "https://api.deepseek.com",
-    "${ENV:-fallback} expands in protocol, model, and baseURL",
+      loaded.profiles.envDefaults?.baseURL === "https://api.deepseek.com" &&
+      loaded.profiles.envDefaults?.contextWindow === 1_048_576,
+    "${ENV:-fallback} expands profile fields and contextWindow is preserved",
   );
   assert(
     loaded.profiles.leaky?.apiKey === undefined,

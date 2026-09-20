@@ -81,6 +81,10 @@ const mergedSettings = buildUserSettings(
 );
 assert(Boolean((mergedSettings.customFeature as { enabled?: boolean }).enabled), "unknown settings survive the merge");
 assert(Boolean((mergedSettings.models as Record<string, unknown>).local), "unrelated model profiles survive the merge");
+assert(
+  ((mergedSettings.models as Record<string, { contextWindow?: number }>).deepseek?.contextWindow === 1_048_576),
+  "DeepSeek init profile records the provider context window",
+);
 
 console.log("\n[2] First-run files and connection orchestration");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-init-"));
@@ -122,6 +126,10 @@ try {
   assert(env.QWEN_TTS_MODEL === "qwen-audio-3.1-tts-flash" && env.QWEN_TTS_VOICE === "longanhuan_v3.1", "init writes Workfriend Qwen TTS defaults");
   assert((settings.env as Record<string, unknown>).CCAGENT_ENV_FILE === envPath, "settings point at the current user's canonical dotenv file");
   assert(settings.agentTeams === true, "init enables Agent Teams for a new user by default");
+  assert(
+    ((settings.models as Record<string, { contextWindow?: number }>).deepseek?.contextWindow === 1_048_576),
+    "first-run settings enable the 1 Mi-token DeepSeek window",
+  );
   assert(testedDeepseek && testedQwen, "both configured providers are connection-tested");
   assert(!firstOutput.text().includes("deep-test-key") && !firstOutput.text().includes("qwen-test-key"), "command output does not reveal API keys");
 

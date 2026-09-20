@@ -23,11 +23,12 @@ import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
 } from "../services/skills/conditional.js";
-import { tokenCountWithEstimation } from "../utils/tokens.js";
+import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
+import { resolveProfile } from "../services/api/providers/profile.js";
 import { fileHistoryTrackEdit } from "../session/fileHistory.js";
 import { setToolStatus } from "../state/toolStatusStore.js";
 import * as path from "node:path";
-import { isAtBlockingLimit, calculateTokenWarningState, type TokenWarningResult } from "../context/autoCompact.js";
+import { calculateTokenWarningState, type TokenWarningResult } from "../context/autoCompact.js";
 import type { ContentBlock, TextBlock, ToolUseBlock, Usage } from "../types/message.js";
 import {
   runPreToolUseHooks,
@@ -89,6 +90,12 @@ export type AgenticLoopEvent =
   | { type: "turn_complete"; reason: LoopTerminationReason; turnCount: number }
   | { type: "token_warning"; warning: TokenWarningResult }
   | {
+      type: "context_compacted";
+      messages: MessageParam[];
+      summary?: string;
+      trigger: "auto";
+    }
+  | {
       /**
        * Stage 27: surfaced while the API layer is backing off before
        * re-issuing a request after a transient failure (429 / 5xx / network).
@@ -145,6 +152,8 @@ export interface QueryParams {
   /** Dynamic tool list getter — called on each API iteration to reflect mode changes. */
   getTools?: () => Anthropic.Tool[];
   model: string;
+  /** Resolved profile window. When omitted the loop resolves it itself. */
+  contextWindow?: number;
   abortSignal?: AbortSignal;
   toolContext: ToolContext;
   maxTurns?: number;
@@ -687,6 +696,16 @@ export async function* query(
   let maxOutputTokensOverride: number | undefined = undefined;
   let maxOutputTokensRecoveryCount = 0;
   let hasAttemptedReactiveCompact = false;
+  let consecutiveProactiveCompactFailures = 0;
+  let activeContextWindow = params.contextWindow;
+  if (activeContextWindow === undefined) {
+    try {
+      const profile = await resolveProfile(params.model, params.toolContext.cwd);
+      activeContextWindow = getContextWindowForModel(profile.model, profile.contextWindow);
+    } catch {
+      activeContextWindow = getContextWindowForModel(params.model);
+    }
+  }
 
   while (state.turnCount < maxTurns) {
     if (params.abortSignal?.aborted) {
@@ -697,30 +716,75 @@ export async function* query(
 
     const nextTurnCount = state.turnCount + 1;
 
-    // Token budget check before API call (skip first turn — let the API decide)
-    if (state.turnCount > 0) {
-      const estimatedTokens = tokenCountWithEstimation(state.messages, {
-        usage: lastCallUsage.input_tokens > 0 ? lastCallUsage : undefined,
-        usageAnchorIndex: lastCallUsage.input_tokens > 0 ? state.messages.length - 1 : undefined,
-        systemPrompt: params.systemPrompt,
-      });
-      const warningState = calculateTokenWarningState(estimatedTokens, params.model);
+    // Token budget check and recovery before every API call.
+    let estimatedTokens = tokenCountWithEstimation(state.messages, {
+      usage: lastCallUsage.input_tokens > 0 ? lastCallUsage : undefined,
+      usageAnchorIndex: lastCallUsage.input_tokens > 0 ? state.messages.length - 1 : undefined,
+      systemPrompt: params.systemPrompt,
+    });
+    let warningState = calculateTokenWarningState(
+      estimatedTokens,
+      params.model,
+      activeContextWindow,
+    );
+    let compactError: unknown;
 
-      if (warningState.state !== "normal") {
-        yield { type: "token_warning", warning: warningState };
+    // A large user message or tool result can cross the threshold after the
+    // between-turn check. Compact here before blocking, including turn one.
+    if (
+      (warningState.state === "error" || warningState.state === "blocking") &&
+      consecutiveProactiveCompactFailures < 3 &&
+      state.messages.length > 0
+    ) {
+      try {
+        const compactResult = await compactMessages(state.messages, undefined, {
+          systemPrompt: params.systemPrompt,
+          model: params.model,
+          contextWindow: activeContextWindow,
+          force: true,
+        });
+        if (compactResult.didCompact) {
+          state = { ...state, messages: [...compactResult.messages] };
+          lastCallUsage = { input_tokens: 0, output_tokens: 0 };
+          consecutiveProactiveCompactFailures = 0;
+          yield {
+            type: "context_compacted",
+            messages: [...state.messages],
+            summary: compactResult.summary,
+            trigger: "auto",
+          };
+          estimatedTokens = tokenCountWithEstimation(state.messages, {
+            systemPrompt: params.systemPrompt,
+          });
+          warningState = calculateTokenWarningState(
+            estimatedTokens,
+            params.model,
+            activeContextWindow,
+          );
+        }
+      } catch (error) {
+        compactError = error;
+        consecutiveProactiveCompactFailures++;
       }
+    }
 
-      if (warningState.state === "blocking") {
-        yield {
-          type: "error",
-          error: new Error(
-            `Context window limit reached (${estimatedTokens} tokens estimated, blocking limit ${warningState.blockingLimit}, window ${warningState.contextWindow}). ` +
-            `Use /compact to free space.`,
-          ),
-        };
-        yield { type: "turn_complete", reason: "blocking_limit", turnCount: nextTurnCount };
-        return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, lastCallUsage, reason: "blocking_limit" };
-      }
+    if (warningState.state !== "normal") {
+      yield { type: "token_warning", warning: warningState };
+    }
+
+    if (warningState.state === "blocking") {
+      const failureDetail = compactError instanceof Error
+        ? ` Automatic compaction failed (${compactError.message}).`
+        : " Automatic compaction could not free enough space.";
+      yield {
+        type: "error",
+        error: new Error(
+          `Context window limit reached (${estimatedTokens} tokens estimated, blocking limit ${warningState.blockingLimit}, window ${warningState.contextWindow}).` +
+          `${failureDetail} Run /compact with a focus instruction, or /clear to start fresh.`,
+        ),
+      };
+      yield { type: "turn_complete", reason: "blocking_limit", turnCount: nextTurnCount };
+      return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, lastCallUsage, reason: "blocking_limit" };
     }
 
     const currentTools = params.getTools ? params.getTools() : params.tools;
@@ -815,6 +879,7 @@ export async function* query(
           const compactResult = await compactMessages(state.messages, undefined, {
             systemPrompt: params.systemPrompt,
             model: params.model,
+            contextWindow: activeContextWindow,
             force: true,
           });
           if (compactResult.didCompact) {
@@ -825,6 +890,12 @@ export async function* query(
             };
             // Clear any partially-streamed text and reset token override.
             maxOutputTokensOverride = undefined;
+            yield {
+              type: "context_compacted",
+              messages: [...state.messages],
+              summary: compactResult.summary,
+              trigger: "auto",
+            };
             yield { type: "stream_restart", reason: "reactive_compact" };
             continue;
           }

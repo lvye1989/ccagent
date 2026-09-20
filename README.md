@@ -179,7 +179,8 @@ CCAGENT also supports named Anthropic, OpenAI-compatible, Gemini, and local prof
       "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
       "model": "${DEEPSEEK_MODEL:-deepseek-flash}",
       "baseURL": "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}",
-      "apiKey": "${DEEPSEEK_API_KEY}"
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "contextWindow": 1048576
     },
     "gpt": {
       "protocol": "openai-chat",
@@ -205,6 +206,17 @@ Select a profile with `ccagent --model deepseek` or `/model deepseek` inside
 the REPL. `defaultModel` makes that profile the default when no explicit model
 is selected.
 
+`contextWindow` is the provider's total input/output token capacity. CCAGENT
+uses it for warnings and automatic compaction; it does not invent extra model
+capacity. The bundled `deepseek-flash` profile uses `1048576` (1 Mi tokens).
+For a custom gateway or local model, set the value advertised by that provider.
+`CCAGENT_MAX_CONTEXT_TOKENS` remains available as a process-wide override.
+
+CCAGENT automatically micro-compacts old tool output and summarizes history
+before the active profile reaches its limit, including while a multi-step tool
+loop is running. `/compact [focus]` remains available when you want an earlier
+manual summary, and `/context` shows the resolved window and current estimate.
+
 | Environment variable | Purpose |
 |---|---|
 | `ANTHROPIC_AUTH_TOKEN` | Anthropic API token or compatible gateway token |
@@ -215,6 +227,7 @@ is selected.
 | `DEEPSEEK_MODEL` | Optional DeepSeek model override; defaults to `deepseek-flash` in the example profile |
 | `DEEPSEEK_BASE_URL` | Optional DeepSeek endpoint override; defaults to `https://api.deepseek.com` |
 | `CCAGENT_ENV_FILE` | Optional absolute path to the one canonical `.env`, used when launching from other directories |
+| `CCAGENT_MAX_CONTEXT_TOKENS` | Optional process-wide context-window override; per-profile `contextWindow` is preferred |
 | `OPENAI_API_KEY` | Referenced by OpenAI-compatible profiles |
 | `GEMINI_API_KEY` | Referenced by Gemini profiles |
 | `TAVILY_API_KEY` | Tavily API key; makes built-in `WebSearch` call Tavily directly |

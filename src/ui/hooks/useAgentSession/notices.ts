@@ -133,21 +133,21 @@ export function tokenWarningNotice(warning: TokenWarningResult): SystemNotice | 
     return {
       tone: "info",
       title: "Context window filling up",
-      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Consider using /compact.`,
+      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Automatic compaction is enabled.`,
     };
   }
   if (warning.state === "error") {
     return {
       tone: "error",
       title: "Context window nearly full",
-      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Auto-compaction will trigger.`,
+      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Auto-compaction is running before the next model call.`,
     };
   }
   if (warning.state === "blocking") {
     return {
       tone: "error",
       title: "Context window limit reached",
-      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Use /compact to free space.`,
+      body: `${pct}% used (${warning.estimatedTokens} / ${warning.contextWindow} tokens). Automatic compaction could not free enough space; try /compact with a focus instruction or /clear.`,
     };
   }
   return null;
@@ -172,7 +172,7 @@ export function turnCompleteNotice(
     return {
       tone: "error",
       title: "Context window limit reached",
-      body: "Cannot continue — context is full. Use /compact to free space.",
+      body: "Automatic compaction was attempted but could not free enough space. Try /compact with a focus instruction or /clear.",
     };
   }
   return null;

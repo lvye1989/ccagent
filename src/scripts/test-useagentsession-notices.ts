@@ -153,21 +153,21 @@ check('"warning" → info tone, "filling up", correct percent', () => {
   assert.equal(n.tone, "info");
   assert.equal(n.title, "Context window filling up");
   assert.ok(n.body.startsWith("80% used (80000 / 100000 tokens)"));
-  assert.ok(n.body.includes("Consider using /compact."));
+  assert.ok(n.body.includes("Automatic compaction is enabled."));
 });
 
 check('"error" → error tone, "nearly full"', () => {
   const n = tokenWarningNotice(warn("error"))!;
   assert.equal(n.tone, "error");
   assert.equal(n.title, "Context window nearly full");
-  assert.ok(n.body.includes("Auto-compaction will trigger."));
+  assert.ok(n.body.includes("Auto-compaction is running"));
 });
 
 check('"blocking" → error tone, "limit reached"', () => {
   const n = tokenWarningNotice(warn("blocking"))!;
   assert.equal(n.tone, "error");
   assert.equal(n.title, "Context window limit reached");
-  assert.ok(n.body.includes("Use /compact to free space."));
+  assert.ok(n.body.includes("Automatic compaction could not free enough space"));
 });
 
 check('"normal" → null (no notice)', () => {

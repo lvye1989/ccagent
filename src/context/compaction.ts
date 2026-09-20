@@ -1,6 +1,9 @@
 import { createMessage } from "../services/api/streaming.js";
 import { debugLog } from "../utils/log.js";
-import { buildTokenBudgetSnapshot } from "../utils/tokens.js";
+import {
+  buildTokenBudgetSnapshot,
+  estimateMessageTokens,
+} from "../utils/tokens.js";
 import type { MessageParam, ContentBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
 import type { Usage } from "../types/message.js";
 
@@ -14,34 +17,18 @@ const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any too
 - Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
 - You already have all the context you need in the conversation above.
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+- Return only the durable continuation summary. Do not include hidden analysis,
+  preambles, or an <analysis> section.
 `;
-
-const DETAILED_ANALYSIS_INSTRUCTION_BASE = `Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
-
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.`;
 
 const BASE_COMPACT_PROMPT = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
-
-${DETAILED_ANALYSIS_INSTRUCTION_BASE}
 
 Your summary should include the following sections:
 
 1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
 2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
+3. Files and Code Sections: Enumerate specific files and important symbols examined, modified, or created. Include only short code excerpts essential for continuation.
 4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
 6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
@@ -49,7 +36,9 @@ Your summary should include the following sections:
 8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing.
 
-Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.`;
+Keep the summary concise but complete. Prefer exact paths, decisions, test
+results, and pending work over narration. Target 2,000-4,000 tokens and never
+exceed 6,000 tokens.`;
 
 export interface CompactBoundaryMetadata {
   compactType: "auto" | "manual" | "micro";
@@ -75,8 +64,12 @@ export interface CompactionCheckOptions {
   usageAnchorIndex?: number;
   systemPrompt?: string;
   force?: boolean;
+  /** Clear old tool payloads without making a summarization API call. */
+  microOnly?: boolean;
   /** Model handle used for the summarization call. Falls back to the default model when omitted. */
   model?: string;
+  /** Resolved provider context window for named model profiles. */
+  contextWindow?: number;
 }
 
 function isContentBlocks(content: unknown): content is ContentBlockParam[] {
@@ -210,13 +203,32 @@ function findPreservedTailStart(messages: MessageParam[], desiredCount: number):
   return 0;
 }
 
+/**
+ * Preserve recent messages only while they fit a bounded token budget.
+ * Previously, a very large Read/Bash result could survive solely because it
+ * was among the last eight messages and immediately refill compacted context.
+ */
+export function selectCompactionTail(
+  messages: MessageParam[],
+  desiredCount: number,
+  maxTailTokens: number,
+): MessageParam[] {
+  for (let count = Math.min(desiredCount, messages.length); count > 0; count--) {
+    const start = findPreservedTailStart(messages, count);
+    const tail = messages.slice(start);
+    const tokens = tail.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+    if (tokens <= maxTailTokens) return tail;
+  }
+  return [];
+}
+
 async function summarizeMessages(messages: MessageParam[], focus?: string, model?: string): Promise<string> {
   const extraInstruction = focus ? `\n\n## Compact Instructions\n${focus}` : "";
   debugLog("compact", "summary_request", { messageCount: messages.length, focus: focus ?? null, model: model ?? null });
 
   const response = await createMessage({
     model: model ?? process.env.ANTHROPIC_MODEL,
-    maxTokens: 8000,
+    maxTokens: 6000,
     system: NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT + extraInstruction,
     messages: [
       {
@@ -231,6 +243,10 @@ async function summarizeMessages(messages: MessageParam[], focus?: string, model
     .map((block) => block.text)
     .join("\n")
     .trim();
+
+  if (!text) {
+    throw new Error("Compaction model returned an empty summary.");
+  }
 
   debugLog("compact", "summary_response", {
     stopReason: response.stopReason,
@@ -255,6 +271,8 @@ export async function compactMessages(
     usage: options.usage,
     usageAnchorIndex: options.usageAnchorIndex,
     systemPrompt: options.systemPrompt,
+    model: options.model,
+    contextWindow: options.contextWindow,
   });
 
   debugLog("compact", "budget_check", {
@@ -268,9 +286,12 @@ export async function compactMessages(
     manualCompactThreshold: budget.manualCompactThreshold,
   });
 
-  if (!options.force && budget.estimatedConversationTokens < budget.autoCompactThreshold) {
+  if (
+    options.microOnly ||
+    (!options.force && budget.estimatedConversationTokens < budget.autoCompactThreshold)
+  ) {
     debugLog("compact", "skip_full_compact", {
-      reason: "below_auto_threshold",
+      reason: options.microOnly ? "micro_only" : "below_auto_threshold",
       estimatedConversationTokens: budget.estimatedConversationTokens,
       autoCompactThreshold: budget.autoCompactThreshold,
     });
@@ -293,10 +314,13 @@ export async function compactMessages(
 
   const summary = await summarizeMessages(microCompacted, focus, options.model);
   const desiredTailCount = 8;
-  const tailStart = microCompacted.length <= desiredTailCount
-    ? microCompacted.length               // short conversation: summary covers everything, no tail
-    : findPreservedTailStart(microCompacted, desiredTailCount);
-  const tail = microCompacted.slice(tailStart);
+  const maxTailTokens = Math.max(
+    2_000,
+    Math.min(20_000, Math.floor(budget.effectiveContextWindow * 0.1)),
+  );
+  const tail = microCompacted.length <= desiredTailCount
+    ? [] // short conversation: the summary covers everything
+    : selectCompactionTail(microCompacted, desiredTailCount, maxTailTokens);
   const compacted: MessageParam[] = [
     {
       role: "user",
@@ -313,8 +337,8 @@ export async function compactMessages(
 
   debugLog("compact", "full_compact_applied", {
     focus: focus ?? null,
-    tailStart,
     preservedTailCount: tail.length,
+    preservedTailTokens: tail.reduce((sum, message) => sum + estimateMessageTokens(message), 0),
     originalMessageCount: messages.length,
     compactedMessageCount: compacted.length,
   });

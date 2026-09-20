@@ -15,14 +15,14 @@ import {
 import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
 import { compactMessages } from "../context/compaction.js";
 import { autoCompactIfNeeded, calculateTokenWarningState } from "../context/autoCompact.js";
-import { tokenCountWithEstimation } from "../utils/tokens.js";
+import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
 import { formatProjectSessionHistory } from "../session/history.js";
 import { fileHistoryMakeSnapshot } from "../session/fileHistory.js";
 import { getToolsApiParams } from "../tools/index.js";
 import { buildUserMessageContent } from "./attachImages.js";
 import type { ToolContext } from "../tools/Tool.js";
 import type { Usage } from "../types/message.js";
-import type { ModelProfile } from "../services/api/providers/profile.js";
+import { resolveProfile, type ModelProfile } from "../services/api/providers/profile.js";
 import { getPlanFilePath, planExists as checkPlanExists } from "../context/plans.js";
 import { getPlanModeAttachment, getPlanModeExitAttachment } from "../context/planAttachments.js";
 import { getTaskMode, setTaskMode } from "../state/taskModeStore.js";
@@ -591,6 +591,7 @@ export class QueryEngine {
       userQuery: promptToSubmit,
     });
     const previewSystemPrompt = renderSystemPrompt(previewSystemParts);
+    const activeContextWindow = await this.getActiveContextWindow();
 
     // Only run compaction when there's meaningful conversation history
     if (this.messages.length > 0) {
@@ -600,6 +601,8 @@ export class QueryEngine {
         usageAnchorIndex: this.usageAnchorIndex,
         systemPrompt: previewSystemPrompt,
         model: this.getActiveModel(),
+        contextWindow: activeContextWindow,
+        microOnly: true,
       });
       if (microResult.didMicroCompact || microResult.didCompact) {
         this.messages = [...microResult.messages];
@@ -620,6 +623,7 @@ export class QueryEngine {
           usage: this.lastCallUsage,
           usageAnchorIndex: this.usageAnchorIndex,
           systemPrompt: previewSystemPrompt,
+          contextWindow: activeContextWindow,
         },
       );
       if (didAutoCompact) {
@@ -635,7 +639,11 @@ export class QueryEngine {
         usageAnchorIndex: this.usageAnchorIndex,
         systemPrompt: previewSystemPrompt,
       });
-      const warningState = calculateTokenWarningState(estimatedTokens, this.getActiveModel());
+      const warningState = calculateTokenWarningState(
+        estimatedTokens,
+        this.getActiveModel(),
+        activeContextWindow,
+      );
       if (warningState.state !== "normal") {
         yield { type: "token_warning", warning: warningState };
       }
@@ -746,6 +754,7 @@ export class QueryEngine {
         systemPrompt,
         getTools: () => getToolsApiParams(this.currentPermissionMode),
         model: this.getActiveModel(),
+        contextWindow: activeContextWindow,
         abortSignal: abortController.signal,
         toolContext: enrichedToolContext,
         permissionMode: this.currentPermissionMode,
@@ -778,6 +787,18 @@ export class QueryEngine {
           return { handled: true, reason: value.reason };
         }
 
+        if (value.type === "context_compacted") {
+          this.messages = [...value.messages];
+          this.invalidateUsageAnchor();
+          yield { type: "messages_updated", messages: [...this.messages] };
+          yield {
+            type: "compacted",
+            summary: value.summary,
+            trigger: value.trigger,
+          };
+          continue;
+        }
+
         yield value;
 
         switch (value.type) {
@@ -801,6 +822,16 @@ export class QueryEngine {
   private invalidateUsageAnchor(): void {
     this.usageAnchorIndex = -1;
     this.lastCallUsage = { input_tokens: 0, output_tokens: 0 };
+  }
+
+  private async getActiveContextWindow(): Promise<number> {
+    const handle = this.getActiveModel();
+    try {
+      const profile = await resolveProfile(handle, this.toolContext.cwd);
+      return getContextWindowForModel(profile.model, profile.contextWindow);
+    } catch {
+      return getContextWindowForModel(handle);
+    }
   }
 
   private getActiveModel(): string {
@@ -1067,7 +1098,7 @@ export class QueryEngine {
         const focus = args.join(" ").trim();
         const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd });
         const manualSystemPrompt = renderSystemPrompt(manualSystemParts);
-        const result = await compactMessages(this.messages, focus || undefined, { usage: this.lastCallUsage, usageAnchorIndex: this.usageAnchorIndex, systemPrompt: manualSystemPrompt, model: this.getActiveModel(), force: true });
+        const result = await compactMessages(this.messages, focus || undefined, { usage: this.lastCallUsage, usageAnchorIndex: this.usageAnchorIndex, systemPrompt: manualSystemPrompt, model: this.getActiveModel(), contextWindow: await this.getActiveContextWindow(), force: true });
         this.messages = [...result.messages];
         if (result.didCompact || result.didMicroCompact) {
           this.invalidateUsageAnchor();

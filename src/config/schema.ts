@@ -45,6 +45,7 @@ export const SettingsSchema = z.looseObject({
         baseURL: z.string().optional(),
         apiKey: z.string().optional(),
         maxTokens: z.number().optional(),
+        contextWindow: z.number().int().positive().optional(),
         headers: z.record(z.string(), z.string()).optional(),
       }),
     )

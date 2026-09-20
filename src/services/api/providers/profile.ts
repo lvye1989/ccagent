@@ -53,6 +53,8 @@ export interface ModelProfile {
   apiKey?: string;
   /** Per-profile max output tokens override. */
   maxTokens?: number;
+  /** Provider context-window size used by warnings and auto-compaction. */
+  contextWindow?: number;
   /** Extra HTTP headers merged into the upstream request. */
   headers?: Record<string, string>;
 }
@@ -63,6 +65,7 @@ interface RawProfile {
   baseURL?: unknown;
   apiKey?: unknown;
   maxTokens?: unknown;
+  contextWindow?: unknown;
   headers?: unknown;
 }
 
@@ -185,6 +188,13 @@ function buildProfile(
   }
   if (typeof raw.maxTokens === "number" && Number.isFinite(raw.maxTokens) && raw.maxTokens > 0) {
     profile.maxTokens = raw.maxTokens;
+  }
+  if (
+    typeof raw.contextWindow === "number" &&
+    Number.isFinite(raw.contextWindow) &&
+    raw.contextWindow > 0
+  ) {
+    profile.contextWindow = Math.floor(raw.contextWindow);
   }
   if (raw.headers && typeof raw.headers === "object" && !Array.isArray(raw.headers)) {
     const out: Record<string, string> = {};

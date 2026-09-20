@@ -19,6 +19,7 @@ import {
   roughTokenCountEstimationForMessages,
   getContextWindowForModel,
 } from "../../../utils/tokens.js";
+import { resolveProfile } from "../../../services/api/providers/profile.js";
 import {
   isPlatformSupported as isSandboxPlatformSupported,
   isSandboxRuntimeReady,
@@ -94,11 +95,19 @@ export async function* handleContextCommand(
   const toolTokens = roughJson(toolsJson);
   const historyTokens = roughTokenCountEstimationForMessages(messages);
 
-  const contextWindow = getContextWindowForModel(model);
+  const profile = await resolveProfile(model, cwd).catch(() => undefined);
+  const contextWindow = getContextWindowForModel(
+    profile?.model ?? model,
+    profile?.contextWindow,
+  );
   const used = systemCoreTokens + memoryTokens + toolTokens + historyTokens;
   const free = Math.max(0, contextWindow - used);
 
-  const snapshot = buildTokenBudgetSnapshot(messages, { systemPrompt, model });
+  const snapshot = buildTokenBudgetSnapshot(messages, {
+    systemPrompt,
+    model,
+    contextWindow,
+  });
 
   const fmt = (n: number): string => n.toLocaleString("en-US");
   const pct = (n: number): string => `${((n / contextWindow) * 100).toFixed(1)}%`;
