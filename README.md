@@ -241,6 +241,8 @@ is selected.
 
 `WebSearch` calls Tavily and Bocha through their REST APIs directly; neither integration uses a Skill or MCP. Tavily remains the preferred configured provider, while Bocha supplements it on errors or empty results and can be selected explicitly with `provider: "bocha"`. Without either key, CCAGENT falls back to Anthropic server-side search (for first-party Anthropic profiles) or Bing.
 
+Shell commands receive a private per-process temporary directory at `~/.ccagent/tmp/process-<pid>` through `TEMP`, `TMP`, `TMPDIR`, and `CCAGENT_TMPDIR`. Files created there—such as Word content checks produced by PowerShell—can be consumed by `Read`, `Grep`, or `Glob` without granting those tools access to the entire operating-system temp directory.
+
 `classic_words` is a built-in, read-only CNKGraph REST tool rather than a Skill or MCP integration. It needs no API key and supports poetry/prose search, exact works, author collections, rhymes, couplets, tonal patterns, ancient books and volumes, allusions, and historical people. It validates inputs and JSON responses, limits large results, isolates HTTP failures, and applies a configurable timeout. CNKGraph's open resources are intended for research and learning; confirm authorization before commercial use.
 
 For author collections, `author_writings` is normalized through CNKGraph's JSON

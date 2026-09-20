@@ -11,6 +11,7 @@ import { formatTeamSystemReminder } from "../agents/teamPromptInjection.js";
 import { getAllAgents } from "../agents/registry.js";
 import { getActiveOutputStyleConfig } from "../styles/registry.js";
 import { readMergedStringSetting } from "../utils/settings.js";
+import { getToolTempRoot } from "../utils/paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +22,7 @@ export const SYSTEM_PROMPT_DYNAMIC_END = "</SYSTEM_DYNAMIC_CONTEXT>";
 
 export interface RuntimeEnvironmentContext {
   cwd: string;
+  toolTempRoot: string;
   date: string;
   os: string;
   gitBranch?: string;
@@ -81,6 +83,7 @@ export async function getRuntimeEnvironmentContext(cwd: string): Promise<Runtime
   const git = await getGitContext(cwd);
   return {
     cwd,
+    toolTempRoot: getToolTempRoot(),
     date: new Date().toISOString(),
     os:       os.platform() + " " + os.release() + " (" + os.arch() + ")",
     ...git,
@@ -91,6 +94,7 @@ function formatEnvironmentContext(context: RuntimeEnvironmentContext): string {
   const lines = [
     "Environment:",
     "- Current working directory: " + context.cwd,
+    "- CCAGENT temporary directory: " + context.toolTempRoot + " (shell TEMP/TMP/TMPDIR; readable by file tools)",
     "- Current date: " + context.date,
     "- Operating system: " + context.os,
   ];

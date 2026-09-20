@@ -119,6 +119,18 @@ export function getStreamDebugLogPath(): string {
   return getCCAgentPath("stream-debug.log");
 }
 
+/**
+ * Returns the private temporary directory for this CCAGENT process.
+ *
+ * Shell tools point TEMP/TMP/TMPDIR here so an artifact created by a shell
+ * command can be consumed by Read/Grep/Glob without granting file tools access
+ * to the whole operating-system temp directory. The process id separates
+ * concurrent CCAGENT sessions; callers create the directory lazily.
+ */
+export function getToolTempRoot(): string {
+  return getCCAgentPath("tmp", `process-${process.pid}`);
+}
+
 // ─── Project (<cwd>/.ccagent/...) ─────────────────────────────────
 
 /** Returns `<cwd>/.ccagent`. */

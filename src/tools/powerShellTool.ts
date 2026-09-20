@@ -6,6 +6,7 @@ import {
   terminateProcessTree,
   validateCommandTimeout,
 } from "../utils/subprocess.js";
+import { prepareToolTempEnvironment } from "../utils/toolTemp.js";
 
 /**
  * PowerShell — execute a PowerShell command on Windows.
@@ -33,7 +34,8 @@ function resolveExecutable(): string {
 export const powerShellTool: Tool = {
   name: "PowerShell",
   description:
-    "Execute a PowerShell command on Windows and return stdout/stderr. Use this instead of Bash on Windows. Note: not sandboxed.",
+    "Execute a PowerShell command on Windows and return stdout/stderr. Use this instead of Bash on Windows. " +
+    "$env:TEMP, $env:TMP, and $env:CCAGENT_TMPDIR point to a private CCAGENT directory that Read can access. Note: not sandboxed.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -66,12 +68,26 @@ export const powerShellTool: Tool = {
       settingsEnv = {};
     }
 
+    let toolTempEnv: Record<string, string>;
+    try {
+      toolTempEnv = await prepareToolTempEnvironment();
+    } catch (error) {
+      return {
+        content: `Failed to prepare CCAGENT temporary directory: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+
     const exe = resolveExecutable();
     return await new Promise<ToolResult>((resolve) => {
       const child = spawn(
         exe,
         ["-NoProfile", "-NonInteractive", "-Command", input.command],
-        { cwd: context.cwd, env: { ...process.env, ...settingsEnv }, windowsHide: true },
+        {
+          cwd: context.cwd,
+          env: { ...process.env, ...settingsEnv, ...toolTempEnv },
+          windowsHide: true,
+        },
       );
 
       const stdout = new BoundedTextBuffer(MAX_OUTPUT_CHARS);

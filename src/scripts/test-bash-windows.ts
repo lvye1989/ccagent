@@ -12,6 +12,7 @@ import { toolResultText } from "../tools/Tool.js";
 import { resolveBashExecutable } from "../utils/bashExecutable.js";
 import { readTrustedStringArraySetting } from "../utils/settings.js";
 import { setAdditionalAllowedRoots } from "../tools/pathUtils.js";
+import { getToolTempRoot } from "../utils/paths.js";
 
 const failures: string[] = [];
 
@@ -93,6 +94,51 @@ async function main(): Promise<void> {
       { cwd: process.cwd(), abortSignal: aborted.signal },
     );
     assert(psPreAborted.isError === true, "PowerShell does not spawn a pre-aborted command");
+
+    const previousHome = process.env.CCAGENT_HOME;
+    const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-shell-temp-home-"));
+    process.env.CCAGENT_HOME = path.join(isolatedHome, ".ccagent");
+    try {
+      const tempProbe = await powerShellTool.call(
+        {
+          command:
+            "$p = Join-Path $env:TEMP 'word_content_check.txt'; " +
+            "Set-Content -LiteralPath $p -Value 'word temp bridge'; " +
+            "Write-Output $p",
+        },
+        { cwd: process.cwd() },
+      );
+      const expectedPath = path.join(getToolTempRoot(), "word_content_check.txt");
+      assert(tempProbe.isError !== true && await fs.access(expectedPath).then(() => true).catch(() => false),
+        "PowerShell redirects $env:TEMP into the private CCAGENT temp directory");
+      const readable = await fileReadTool.call(
+        { file_path: expectedPath },
+        { cwd: process.cwd() },
+      );
+      assert(
+        readable.isError !== true && toolResultText(readable.content).includes("word temp bridge"),
+        "Read can consume a temporary Word inspection artifact created by PowerShell",
+      );
+
+      const unrelatedTemp = path.join(os.tmpdir(), `ccagent-unrelated-${process.pid}.txt`);
+      await fs.writeFile(unrelatedTemp, "must stay outside the boundary", "utf-8");
+      try {
+        const blocked = await fileReadTool.call(
+          { file_path: unrelatedTemp },
+          { cwd: process.cwd() },
+        );
+        assert(
+          blocked.isError === true,
+          "Read still blocks unrelated files in the operating-system temp directory",
+        );
+      } finally {
+        await fs.rm(unrelatedTemp, { force: true });
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env.CCAGENT_HOME;
+      else process.env.CCAGENT_HOME = previousHome;
+      await fs.rm(isolatedHome, { recursive: true, force: true });
+    }
   }
 
   console.log("\n[4] Grep, Glob, Read, and no-ripgrep fallback");

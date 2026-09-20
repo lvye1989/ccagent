@@ -28,6 +28,7 @@ import {
   getCCAgentPath,
   getProjectCCAgentDir,
   getProjectSettingsPath,
+  getToolTempRoot,
   getUserSettingsPath,
 } from "../utils/paths.js";
 import type { ResolvedSandboxSettings } from "./settings.js";
@@ -134,6 +135,7 @@ export function buildSandboxProfile(params: {
     canonicalize(path.resolve(cwd)),
     canonicalize(os.tmpdir()),
     canonicalize(path.join(os.tmpdir(), "ccagent")),
+    canonicalize(getToolTempRoot()),
   ]);
 
   const denyWrite = new Set<string>(SYSTEM_DENY_PATHS_RAW.map(canonicalize));

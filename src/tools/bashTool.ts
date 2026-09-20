@@ -20,6 +20,7 @@ import {
   terminateProcessTree,
   validateCommandTimeout,
 } from "../utils/subprocess.js";
+import { prepareToolTempEnvironment } from "../utils/toolTemp.js";
 
 interface BashInput {
   command: string;
@@ -179,10 +180,21 @@ export const bashTool: Tool = {
       settingsEnv = {};
     }
 
+    let toolTempEnv: Record<string, string>;
+    try {
+      toolTempEnv = await prepareToolTempEnvironment();
+    } catch (error) {
+      if (progressId) completeBashProgress(progressId);
+      return {
+        content: `Failed to prepare CCAGENT temporary directory: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+
     return await new Promise<ToolResult>((resolve) => {
       const child = spawn(resolveBashExecutable(), ["-lc", executedCommand], {
         cwd: context.cwd,
-        env: { ...process.env, ...settingsEnv },
+        env: { ...process.env, ...settingsEnv, ...toolTempEnv },
         windowsHide: true,
       });
 

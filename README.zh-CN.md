@@ -236,6 +236,8 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 
 `WebSearch` 会直接调用 Tavily 与博查 REST API，两者都不经过 Skill 或 MCP。Tavily 仍为优先后端；请求失败或无结果时自动尝试博查，也可以通过 `provider: "bocha"` 明确调用博查。两种 Key 都未配置时，Anthropic 官方 Profile 使用服务端搜索，其他模型回退到 Bing。
 
+Shell 命令会通过 `TEMP`、`TMP`、`TMPDIR` 和 `CCAGENT_TMPDIR` 获得进程专用临时目录 `~/.ccagent/tmp/process-<pid>`。PowerShell 生成的 Word 内容检查文件等临时产物可以继续交给 `Read`、`Grep` 或 `Glob`，但不会因此放开整个操作系统 Temp 目录。
+
 `classic_words` 是只读的内置 CNKGraph REST 工具，不经过 Skill 或 MCP，也不需要 API Key。它支持诗词文章检索、作品详情、作者作品集、同韵作品、对偶句、平仄、古籍与卷次、典故以及历史人物查询，并包含输入与 JSON 结构校验、结果限流、错误隔离和可配置超时。CNKGraph 开放资源用于研究学习；商业使用前请另行确认授权。
 
 查询作者作品集时，`author_writings` 会统一改走 CNKGraph 的 JSON 作品检索接口，因为旧作者接口返回 CSV。人物检索中，完整姓名请使用 `person_scope: "Name"`，姓氏请使用 `person_scope: "Xing"`；非姓名范围返回 404 时会自动按完整姓名重试。
