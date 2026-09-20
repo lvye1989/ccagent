@@ -222,6 +222,11 @@ is selected.
 
 `classic_words` is a built-in, read-only CNKGraph REST tool rather than a Skill or MCP integration. It needs no API key and supports poetry/prose search, exact works, author collections, rhymes, couplets, tonal patterns, ancient books and volumes, allusions, and historical people. It validates inputs and JSON responses, limits large results, isolates HTTP failures, and applies a configurable timeout. CNKGraph's open resources are intended for research and learning; confirm authorization before commercial use.
 
+For author collections, `author_writings` is normalized through CNKGraph's JSON
+writing-search endpoint because the legacy author URL returns CSV. For people,
+use `person_scope: "Name"` with a full name and `person_scope: "Xing"` with a
+surname; a 404 from a non-name scope is retried as a full-name lookup.
+
 ### Windows Computer Use
 
 `ComputerObserve` and `ComputerAction` provide a built-in, non-MCP desktop-control loop on Windows:

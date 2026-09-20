@@ -63,6 +63,42 @@ async function main(): Promise<void> {
   );
   assert(requestHeaders.get("accept-language") === "zh-hant", "traditional mode sends Accept-Language: zh-hant");
 
+  const authorWritings = buildClassicWordsRequest(
+    {
+      action: "author_writings",
+      author: "李白",
+      dynasty: "唐",
+      author_id: 15188,
+      writing_type: "QiLv",
+      page: 1,
+    },
+    "https://api.cnkgraph.com",
+  );
+  const authorBody = JSON.parse(String(authorWritings.init.body)) as Record<string, unknown>;
+  assert(
+    authorWritings.url === "https://api.cnkgraph.com/api/writing/find" &&
+      authorWritings.init.method === "POST",
+    "author_writings uses the JSON writing-search endpoint instead of the CSV export route",
+  );
+  assert(
+    authorBody.author === "李白" &&
+      authorBody.dynasty === "唐" &&
+      authorBody.authorId === 15188 &&
+      authorBody.writingType === "QiLv" &&
+      authorBody.pageNo === 1,
+    "author_writings preserves author filters and the known author ID",
+  );
+
+  const personByName = buildClassicWordsRequest(
+    { action: "search_people", person_scope: "Name", query: "李白" },
+    "https://api.cnkgraph.com",
+  );
+  const personByNameBody = JSON.parse(String(personByName.init.body)) as Record<string, unknown>;
+  assert(
+    personByNameBody.scope === "Name" && personByNameBody.key === "李白",
+    "search_people accepts Name for a full-name lookup",
+  );
+
   const volume = buildClassicWordsRequest(
     { action: "get_volume", volume_id: "KR4h0140_024" },
     "https://api.cnkgraph.com",
@@ -111,6 +147,33 @@ async function main(): Promise<void> {
     "major result arrays are limited by max_results",
   );
   assert(resultText.includes("Source API:"), "result preserves source traceability");
+
+  const peopleBodies: Array<Record<string, unknown>> = [];
+  const peopleTool = createClassicWordsTool((async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    peopleBodies.push(body);
+    if (body.scope === "Xing") return jsonResponse({ Message: "人物不存在" }, 404);
+    return jsonResponse({ People: [{ Id: 15188, Name: "李白", Dynasty: "盛唐" }] });
+  }) as typeof fetch);
+  const peopleResult = await peopleTool.call(
+    { action: "search_people", person_scope: "Xing", query: "李白" },
+    { cwd: process.cwd() },
+  );
+  const peopleText = toolResultText(peopleResult.content);
+  assert(
+    !peopleResult.isError &&
+      peopleBodies.length === 2 &&
+      peopleBodies[0]?.scope === "Xing" &&
+      peopleBodies[1]?.scope === "Name",
+    "search_people retries a failed surname lookup as a full-name lookup",
+  );
+  assert(
+    peopleText.includes("15188") && peopleText.includes("person_scope=Name"),
+    "person fallback returns the resolved ID and explains the compatibility retry",
+  );
 
   let fetchCount = 0;
   const neverFetch = (async () => {
@@ -167,6 +230,50 @@ async function main(): Promise<void> {
   } finally {
     if (savedTimeout === undefined) delete process.env.CLASSIC_WORDS_TIMEOUT_MS;
     else process.env.CLASSIC_WORDS_TIMEOUT_MS = savedTimeout;
+  }
+
+  if (process.env.LIVE_CLASSIC_WORDS === "1") {
+    console.log("\n[4] Live CNKGraph compatibility checks");
+    const liveTool = createClassicWordsTool();
+    const liveAuthor = await liveTool.call(
+      {
+        action: "author_writings",
+        author: "李白",
+        dynasty: "唐",
+        author_id: 15188,
+        max_results: 2,
+      },
+      { cwd: process.cwd() },
+    );
+    const liveAuthorText = toolResultText(liveAuthor.content);
+    assert(
+      !liveAuthor.isError &&
+        liveAuthorText.includes("AuthorWritings") &&
+        liveAuthorText.includes('"Id": 15188'),
+      "live author_writings returns JSON AuthorWritings for 李白",
+    );
+
+    const livePersonSearch = await liveTool.call(
+      { action: "search_people", person_scope: "Xing", query: "李白", max_results: 2 },
+      { cwd: process.cwd() },
+    );
+    const livePersonSearchText = toolResultText(livePersonSearch.content);
+    assert(
+      !livePersonSearch.isError &&
+        livePersonSearchText.includes('"Id": 15188') &&
+        livePersonSearchText.includes("person_scope=Name"),
+      "live Xing+李白 lookup recovers through Name and resolves author ID 15188",
+    );
+
+    const livePerson = await liveTool.call(
+      { action: "get_person", person_id: 15188, max_results: 1, max_content_chars: 500 },
+      { cwd: process.cwd() },
+    );
+    const livePersonText = toolResultText(livePerson.content);
+    assert(
+      !livePerson.isError && livePersonText.includes('"Id": 15188') && livePersonText.includes('"Name": "李白"'),
+      "live get_person resolves 李白 from person ID 15188",
+    );
   }
 
   if (failures.length > 0) {

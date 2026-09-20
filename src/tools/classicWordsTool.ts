@@ -44,7 +44,7 @@ interface ClassicWordsInput {
   glossary_type?: "词典" | "典故" | "佛典";
   entry_id?: number;
   char_index?: "begin" | "end";
-  person_scope?: "Xing" | "Zi" | "Hao" | "ShiHao" | "FengJue" | "HomeTown";
+  person_scope?: "Name" | "Xing" | "Zi" | "Hao" | "ShiHao" | "FengJue" | "HomeTown";
   person_id?: number;
   begin_year?: number;
   end_year?: number;
@@ -60,6 +60,7 @@ export interface ClassicWordsRequest {
   language: "simplified" | "traditional";
   maxResults: number;
   maxContentChars: number;
+  compatibilityNotes: string[];
 }
 
 class InputError extends Error {}
@@ -174,11 +175,13 @@ export function buildClassicWordsRequest(
 
   let url: URL;
   let init: RequestInit = { method: "GET" };
+  const compatibilityNotes: string[] = [];
 
   switch (action) {
     case "search_writings": {
       const query = optionalText(rawInput, "query", 500);
       const author = optionalText(rawInput, "author", 100);
+      const authorId = integer(rawInput, "author_id", { min: 1 });
       const dynasty = optionalText(rawInput, "dynasty", 100);
       const writingType = optionalText(rawInput, "writing_type", 100);
       const rhyme = optionalText(rawInput, "rhyme", 20);
@@ -191,6 +194,7 @@ export function buildClassicWordsRequest(
       const body: Record<string, unknown> = { pageNo: page };
       if (query) body.key = query;
       if (author) body.author = author;
+      if (authorId !== undefined) body.authorId = authorId;
       if (dynasty) body.dynasty = dynasty;
       if (writingType) body.writingType = writingType;
       if (rhyme) body.rhyme = rhyme;
@@ -215,14 +219,14 @@ export function buildClassicWordsRequest(
       const author = requiredText(rawInput, "author", 100);
       const authorId = integer(rawInput, "author_id", { min: 1 });
       const writingType = optionalText(rawInput, "writing_type", 100);
-      if (writingType && authorId === undefined) {
-        throw new InputError("author_writings with writing_type also requires author_id");
-      }
-      const segments: Array<string | number> = ["writing", dynasty, author];
-      if (authorId !== undefined) segments.push(authorId);
-      if (writingType) segments.push(writingType);
-      url = endpoint(baseUrl, segments);
-      addPage(url, page);
+      const body: Record<string, unknown> = { author, dynasty, pageNo: page };
+      if (authorId !== undefined) body.authorId = authorId;
+      if (writingType) body.writingType = writingType;
+      url = endpoint(baseUrl, ["writing", "find"]);
+      init = requestBody(body);
+      compatibilityNotes.push(
+        "author_writings was routed through POST /api/writing/find because the legacy author URL returns CSV instead of JSON.",
+      );
       break;
     }
     case "same_rhymes": {
@@ -276,7 +280,7 @@ export function buildClassicWordsRequest(
       const scope = oneOf(
         rawInput,
         "person_scope",
-        ["Xing", "Zi", "Hao", "ShiHao", "FengJue", "HomeTown"] as const,
+        ["Name", "Xing", "Zi", "Hao", "ShiHao", "FengJue", "HomeTown"] as const,
       );
       if (!scope) throw new InputError("person_scope is required for search_people");
       const body: Record<string, unknown> = {
@@ -302,7 +306,7 @@ export function buildClassicWordsRequest(
   headers.set("User-Agent", "ccagent/0.1.1 classic_words");
   init.headers = headers;
 
-  return { action, url: url.toString(), init, language, maxResults, maxContentChars };
+  return { action, url: url.toString(), init, language, maxResults, maxContentChars, compatibilityNotes };
 }
 
 function timeoutMs(): number {
@@ -370,12 +374,16 @@ function formatResult(request: ClassicWordsRequest, payload: unknown): string {
   const notes = pruned.notes.length > 0
     ? `\nTruncation:\n${pruned.notes.map((note) => `- ${note}`).join("\n")}`
     : "";
+  const compatibility = request.compatibilityNotes.length > 0
+    ? `\nCompatibility:\n${request.compatibilityNotes.map((note) => `- ${note}`).join("\n")}`
+    : "";
   return (
     `CNKGraph classic literature result\n` +
     `Action: ${request.action}\n` +
     `Source API: ${request.url}\n` +
     `Script: ${request.language}\n` +
     `Usage: CNKGraph open resources are for research and learning; confirm permission before commercial use.` +
+    `${compatibility}` +
     `${notes}\n\n${JSON.stringify(pruned.value, null, 2)}`
   );
 }
@@ -415,8 +423,8 @@ export function createClassicWordsTool(fetchImpl: typeof fetch = globalThis.fetc
         char_index: { type: "string", enum: ["begin", "end"], description: "Allusion keyword position" },
         person_scope: {
           type: "string",
-          enum: ["Xing", "Zi", "Hao", "ShiHao", "FengJue", "HomeTown"],
-          description: "Historical-person search field",
+          enum: ["Name", "Xing", "Zi", "Hao", "ShiHao", "FengJue", "HomeTown"],
+          description: "Historical-person search field. Use Name for a full name; Xing expects a surname only.",
         },
         person_id: { type: "integer", minimum: 1, description: "Historical person ID" },
         begin_year: { type: "integer", minimum: -5000, maximum: 5000 },
@@ -455,8 +463,24 @@ export function createClassicWordsTool(fetchImpl: typeof fetch = globalThis.fetc
       const timer = setTimeout(() => controller.abort(new Error("timeout")), duration);
 
       try {
-        const response = await fetchImpl(request.url, { ...request.init, signal: controller.signal });
-        const text = await response.text();
+        let response = await fetchImpl(request.url, { ...request.init, signal: controller.signal });
+        let text = await response.text();
+        if (
+          request.action === "search_people" &&
+          response.status === 404 &&
+          rawInput.person_scope !== "Name"
+        ) {
+          const fallback = buildClassicWordsRequest({ ...rawInput, person_scope: "Name" });
+          const fallbackResponse = await fetchImpl(fallback.url, { ...fallback.init, signal: controller.signal });
+          const fallbackText = await fallbackResponse.text();
+          if (fallbackResponse.ok) {
+            response = fallbackResponse;
+            text = fallbackText;
+            request.compatibilityNotes.push(
+              `search_people retried with person_scope=Name after ${String(rawInput.person_scope)} returned HTTP 404.`,
+            );
+          }
+        }
         if (!response.ok) {
           const detail = responseErrorSnippet(text);
           return {

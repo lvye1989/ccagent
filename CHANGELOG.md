@@ -4,6 +4,12 @@ All notable changes to CCAGENT are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Routed `classic_words.author_writings` through the JSON writing-search API,
+  added full-name person search, and fall back from a failed alias/surname
+  lookup to `person_scope=Name`.
+
 ## [0.1.2] - 2026-09-20
 
 ### Added
