@@ -13,6 +13,7 @@
  */
 
 import type { AgentDefinition } from "./types.js";
+import { isAgentEnabled } from "./preferences.js";
 
 const MAX_DESC_CHARS = 220;
 
@@ -72,6 +73,7 @@ const CREATION_GUIDANCE = [
  * two built-ins, but the contract is preserved for callers and tests.
  */
 export function formatAgentsSystemReminder(agents: AgentDefinition[]): string {
+  agents = agents.filter((agent) => isAgentEnabled(agent.agentType));
   if (agents.length === 0) return "";
 
   // Sort built-ins to the top and otherwise alphabetically — gives the

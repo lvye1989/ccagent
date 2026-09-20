@@ -332,6 +332,8 @@ function normalizeMcpServer(
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
   const type = obj.type;
+  if (obj.enabled !== undefined && typeof obj.enabled !== "boolean") return null;
+  const enabled = typeof obj.enabled === "boolean" ? { enabled: obj.enabled } : {};
   const sub = (s: string) => substitutePluginVars(s, vars);
   const subRecord = (
     env: unknown,
@@ -354,7 +356,7 @@ function normalizeMcpServer(
   if (type === "http" || type === "sse") {
     if (typeof obj.url !== "string" || !obj.url) return null;
     const headers = subRecord(obj.headers);
-    return { type, url: sub(obj.url), scope: "project", ...(headers ? { headers } : {}) } as ScopedMcpServerConfig;
+    return { type, url: sub(obj.url), scope: "project", ...enabled, ...(headers ? { headers } : {}) } as ScopedMcpServerConfig;
   }
   // stdio (default)
   if (typeof obj.command !== "string" || !obj.command) return null;
@@ -365,6 +367,7 @@ function normalizeMcpServer(
   return {
     type: "stdio",
     command: sub(obj.command),
+    ...enabled,
     args,
     scope: "project",
     ...(env ? { env } : {}),

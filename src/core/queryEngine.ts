@@ -28,6 +28,9 @@ import { getPlanModeAttachment, getPlanModeExitAttachment } from "../context/pla
 import { getTaskMode, setTaskMode } from "../state/taskModeStore.js";
 import { getTaskListId, resetTaskList } from "../state/taskStore.js";
 import { findSkill } from "../services/skills/registry.js";
+import { isAgentSkillsEnabled } from "../utils/agentSkillsEnabled.js";
+import { handleAgentSkillCommand } from "./queryEngine/commands/agentSkill.js";
+import { isAgentEnabled, agentClosedMessage } from "../agents/preferences.js";
 import {
   drainPendingNotifications,
   pendingNotificationCount,
@@ -316,6 +319,10 @@ export class QueryEngine {
     }
 
     if (trimmed.startsWith("/")) {
+      if (trimmed.slice(1).split(/\s+/, 1)[0].toLowerCase() === "workfriend" && !isAgentEnabled("workfriend")) {
+        yield { type: "command", kind: "error", message: agentClosedMessage("workfriend") };
+        return { handled: true };
+      }
       // Stage 33: built-in `prompt` command (`/init`). Resolved FIRST so a
       // reserved prompt command always means itself and can never be shadowed
       // by a user command or skill file. Expands into a prompt and runs a
@@ -377,6 +384,11 @@ export class QueryEngine {
       // string-prefix sentinel ("[skill_invocation:<name>]\n") for the body
       // and the source's exact XML format for the marker — both matched in
       // ConversationView.
+      const skillName = trimmed.slice(1).split(/\s+/, 1)[0];
+      if (!isAgentSkillsEnabled() && !isBuiltinCommandName(skillName) && findSkill(skillName)) {
+        yield { type: "command", kind: "error", message: "Agent Skills is closed. Use /agent-skill open to enable skills." };
+        return { handled: true };
+      }
       const skillExpansion = this.tryExpandSkillCommand(trimmed);
       if (skillExpansion) {
         const markerMessage: MessageParam = {
@@ -412,6 +424,7 @@ export class QueryEngine {
     const match = input.match(/^\/([a-zA-Z0-9_.:-]+)(?:\s+(.*))?$/);
     if (!match) return null;
     const [, name, rawArgs] = match;
+    if (isBuiltinCommandName(name) || !isAgentSkillsEnabled()) return null;
     const skill = findSkill(name);
     if (!skill) return null;
 
@@ -881,13 +894,15 @@ export class QueryEngine {
         yield {
           type: "command",
           kind: "info",
-          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [tools <name>|reconnect <name>] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
+          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
         };
         return { handled: true };
       case "config":
         return yield* handleConfigCommand(this.commandContext(), args);
       case "mcp":
-        return yield* handleMcpCommand(args);
+        return yield* handleMcpCommand(args, this.toolContext.requestUserQuestion);
+      case "agent-skill":
+        return yield* handleAgentSkillCommand(args, this.toolContext.requestUserQuestion);
       case "plugin":
       case "plugins":
         return yield* handlePluginCommand(this.commandContext(), args);
@@ -902,7 +917,7 @@ export class QueryEngine {
       case "skills":
         return yield* handleSkillsCommand(this.commandContext(), args);
       case "agents":
-        return yield* handleAgentsCommand();
+        return yield* handleAgentsCommand(args, this.toolContext.requestUserQuestion);
       case "hooks":
       case "hook":
         return yield* handleHooksCommand(this.commandContext());

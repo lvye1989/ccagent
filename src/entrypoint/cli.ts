@@ -3,7 +3,7 @@
 // other module body runs. See preflight.ts for why the ordering matters.
 import "./preflight.js";
 import { loadEnv } from "../utils/loadEnv.js";
-loadEnv();
+await loadEnv();
 import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 import { VERSION } from "../version.js";
@@ -77,16 +77,20 @@ Commands (in REPL):
                               Inspect or switch permission mode. full bypasses
                               all permission-engine prompts and rules.
   /tasks [task|todo|reset]    Switch task system or reset the task graph
-  /mcp [tools|reconnect <n>]  Inspect or reconnect MCP servers
+  /mcp                      Select each MCP server: Open / Close
+  /mcp open|close <name>     Save a user-wide MCP switch (no restart needed)
+  /mcp auth <name>           Explicitly start browser OAuth; Close cancels it
+  /mcp list|tools|reconnect  Inspect status/tools or reconnect without a browser
   /skills                     List loaded skills (user + project scope)
   /<skill-name> [args]        Invoke a skill by name
   /<command> [args]           Invoke a user-defined command (.ccagent/commands)
   /output-style [name]        Inspect or switch the answer style
-  /agents                     List built-in + custom sub-agent definitions
+  /agents [list|open <name>|close <name>]  Inspect or toggle individual agents
   /hooks                      Show configured lifecycle hooks
   /history                    Show session history
   /workfriend                 Start the built-in work companion and daily check-in
   /agent-team [open|close]    Open or close Agent Teams (interactive if omitted)
+  /agent-skill [open|close]   Open or close Skills (interactive if omitted)
 
 Extensions (Markdown + frontmatter):
   Output styles: ~/.ccagent/output-styles/<name>.md (default/Explanatory/Learning built-in)
@@ -94,7 +98,7 @@ Extensions (Markdown + frontmatter):
                  Body supports $ARGUMENTS / $1 / $2; frontmatter: description, argument-hint, model, allowed-tools
 
 Sub-agents:
-  Built-in: general-purpose, Explore, workfriend
+  Built-in: general-purpose, Explore, workfriend, rhino_agent
   Custom:   add <cwd>/.ccagent/agents/<name>.md or ~/.ccagent/agents/<name>.md
   Frontmatter: name, description, tools, disallowedTools, model, maxTurns,
                permissionMode, isolation. The Markdown body is the system prompt.
@@ -135,6 +139,8 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   syntaxHighlightingDisabled: true   Render code blocks as plain text (no ANSI colors)
   prefersReducedMotion: true     Calm, static spinner (no animation) for reduced-motion users
   agentTeams: false              Close Agent Teams (default: true; /agent-team)
+  agentSkills: false             Close Skills (default: true; /agent-skill)
+  agentStates: { "rhino_agent": "close" }  Close one agent (default: open; /agents)
   claudeMdExcludes: ["**/AGENT.md"]  Glob/abs-path list of AGENT.md files to skip loading
   enableAllProjectMcpServers: true   Auto-approve every server in <cwd>/.mcp.json (trusted folder)
   enabledMcpjsonServers: ["name"]    Approve specific .mcp.json servers
@@ -182,6 +188,18 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
     process.exit(1);
   }
 
+  // Consent must precede project environment/extension loading. Noninteractive
+  // runs never grant trust implicitly; explicit user configuration still works.
+  if (process.stdin.isTTY && !isPrintMode && !dumpSystemPrompt) {
+    const { ensureTrusted } = await import("../ui/trustGate.js");
+    const trusted = await ensureTrusted(process.cwd());
+    if (!trusted) {
+      console.log("Not trusted — exiting. Re-run and choose to trust this folder to continue.");
+      process.exit(0);
+    }
+    await loadEnv();
+  }
+
   // Build the in-memory `flag` settings source from argv and install it as the
   // highest-priority file-equivalent source BEFORE any loader runs. This makes
   // `--model` (and `--permission-mode`) part of the unified settings chain
@@ -214,6 +232,14 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   const { bootstrapAgentTeams } = await import("../utils/agentTeamsEnabled.js");
   await bootstrapAgentTeams().catch((error) => {
     console.error(`[ccagent] Agent Teams preference ignored: ${(error as Error).message}`);
+  });
+  const { bootstrapAgentSkills } = await import("../utils/agentSkillsEnabled.js");
+  await bootstrapAgentSkills().catch((error) => {
+    console.error(`[ccagent] Skills closed: ${(error as Error).message}`);
+  });
+  const { bootstrapAgentStates } = await import("../agents/preferences.js");
+  await bootstrapAgentStates().catch((error) => {
+    console.error(`[ccagent] Agents closed: ${(error as Error).message}`);
   });
   const resumeIndex = process.argv.indexOf("--resume");
   const resumeValue = resumeIndex !== -1 ? process.argv[resumeIndex + 1] : undefined;
@@ -296,20 +322,6 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
     const system = renderSystemPrompt(systemParts);
     console.log(system);
     process.exit(0);
-  }
-
-  // Trust gate (stage 25): before bringing up the REPL, make sure the user
-  // trusts this folder. Declining exits; non-interactive sessions run
-  // untrusted (project/local hooks + statusLine are then suppressed).
-  // Stage 28: print mode is non-interactive by definition — never prompt for
-  // trust (it would block a piped/CI invocation on a TTY answer).
-  if (process.stdin.isTTY && !isPrintMode) {
-    const { ensureTrusted } = await import("../ui/trustGate.js");
-    const trusted = await ensureTrusted(process.cwd());
-    if (!trusted) {
-      console.log("Not trusted — exiting. Re-run and choose to trust this folder to continue.");
-      process.exit(0);
-    }
   }
 
   // Stage 25 Tier 1 config — resolve trust-sensitive, execution-affecting

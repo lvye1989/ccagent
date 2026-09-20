@@ -6,9 +6,10 @@ import { buildMemoryPromptInstructions, ensureMemoryDirExists, formatMemorySyste
 import { buildMemoryAccessGuidance, buildMemoryExclusionGuidance, buildMemoryPersistenceBoundaryGuidance, buildMemoryTypeGuidance, buildMemoryValidationGuidance } from "./memory/memoryTypes.js";
 import { formatSkillsSystemReminder } from "../services/skills/budget.js";
 import { getModelVisibleSkills } from "../services/skills/registry.js";
+import { isAgentSkillsEnabled } from "../utils/agentSkillsEnabled.js";
 import { formatAgentsSystemReminder } from "../agents/promptInjection.js";
 import { formatTeamSystemReminder } from "../agents/teamPromptInjection.js";
-import { getAllAgents } from "../agents/registry.js";
+import { getEnabledAgents } from "../agents/registry.js";
 import { getActiveOutputStyleConfig } from "../styles/registry.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolTempRoot } from "../utils/paths.js";
@@ -152,12 +153,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions): Prom
   // Conditional skills (frontmatter `paths`) only appear here AFTER they've
   // been promoted in by activateConditionalSkillsForPaths(); see
   // skills/conditional.ts.
-  const skillsReminder = formatSkillsSystemReminder(getModelVisibleSkills());
+  const skillsReminder = isAgentSkillsEnabled()
+    ? formatSkillsSystemReminder(getModelVisibleSkills())
+    : "<system-reminder>Agent Skills is closed by the user. Do not invoke skills or automatically continue workflows from earlier skill instructions. Follow the user's current request using ordinary tools. Only the user can reopen skills with /agent-skill open.</system-reminder>";
 
   // Agents discovery listing — same pattern as skills. Tells the model
   // which `subagent_type` values it can pass to the Agent tool. The
   // registry is populated at startup by bootstrapAgents() in cli.ts.
-  const agentsReminder = formatAgentsSystemReminder(getAllAgents());
+  const agentsReminder = formatAgentsSystemReminder(getEnabledAgents());
 
   // Stage 21: Agent Teams reminder — appears only when the feature flag
   // is on AND a team is currently active. The model already sees the

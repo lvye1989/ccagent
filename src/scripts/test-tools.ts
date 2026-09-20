@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { loadEnv } from "../utils/loadEnv.js";
-loadEnv();
+await loadEnv();
 /**
  * Phase 3 verification script — Test tool interface and FileReadTool.
  *

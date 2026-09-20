@@ -105,6 +105,16 @@ export interface ToolContext {
   /** Parent loop's active model name (sub-agents fall back to this). */
   defaultModel?: string;
   /**
+   * Specialized Jev decision for a RhinoAction. The agentic loop supplies
+   * this only after validating a fresh RhinoObserve snapshot; RhinoAction
+   * treats it as an execution gate, never as executable model-authored data.
+   */
+  rhinoJevDecision?: unknown;
+  /** Runtime-only capability: every nested step still goes through the central gate and hooks. */
+  runRhinoFastTool?: (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>) => Promise<{
+    result: ToolResult; rawResult?: ToolResult; jevDecision?: unknown; toolDispatched?: boolean;
+  }>;
+  /**
    * The model-assigned `tool_use` id for THIS specific invocation. Set
    * fresh per call by `runTools()` in agenticLoop.ts. AgentTool uses it
    * as the key for publishing live sub-agent progress to the UI store

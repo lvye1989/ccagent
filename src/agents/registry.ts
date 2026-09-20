@@ -10,6 +10,7 @@
  */
 
 import type { AgentDefinition } from "./types.js";
+import { isAgentEnabled } from "./preferences.js";
 
 const agents = new Map<string, AgentDefinition>();
 let initialized = false;
@@ -36,6 +37,11 @@ export function findAgent(agentType: string): AgentDefinition | undefined {
 
 export function getAllAgents(): AgentDefinition[] {
   return [...agents.values()];
+}
+
+/** Model-facing catalog; management retains all definitions to allow reopening. */
+export function getEnabledAgents(): AgentDefinition[] {
+  return getAllAgents().filter((agent) => isAgentEnabled(agent.agentType));
 }
 
 /** Drop everything — only used by tests / hot reload. */

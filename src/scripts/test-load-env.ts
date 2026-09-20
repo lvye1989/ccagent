@@ -53,7 +53,7 @@ try {
   process.env.CCAGENT_ENV_FILE = canonicalEnv;
   process.env.DEEPSEEK_API_KEY = "inherited-key-must-be-ignored";
 
-  loadEnv();
+  await loadEnv();
 
   assert(
     process.env.DEEPSEEK_API_KEY === "canonical-file-key",
@@ -70,7 +70,7 @@ try {
 
   process.env.CCAGENT_ENV_FILE = path.join(root, "missing.env");
   process.env.DEEPSEEK_API_KEY = "second-inherited-key-must-be-ignored";
-  loadEnv();
+  await loadEnv();
   assert(
     process.env.DEEPSEEK_API_KEY === undefined,
     "missing canonical file does not fall back to inherited or settings keys",

@@ -312,6 +312,21 @@ export function summarizeTool(
       const intent = asString(inp.intent);
       return { label: "ComputerAction", target: intent ? action + ": " + shortenCommand(intent) : action };
     }
+    case "RhinoObserve":
+      return {
+        label: "RhinoObserve",
+        target: "active Rhino document",
+        stat: result?.match(/"object_count":\s*(\d+)/)?.[1],
+      };
+    case "RhinoAction": {
+      const action = asString(inp.action) ?? "action";
+      const intent = asString(inp.intent);
+      return {
+        label: "RhinoAction",
+        target: intent ? `${action}: ${shortenCommand(intent)}` : action,
+        stat: result?.match(/"undoRecordSerial":\s*(\d+)/)?.[1],
+      };
+    }
     case "MultiEdit": {
       const target = displayPath(asString(inp.file_path));
       const edits = Array.isArray(inp.edits) ? inp.edits.length : undefined;
@@ -337,6 +352,12 @@ export function summarizeTool(
         label: "Workfriend Jev",
         target: asString(inp.phase) === "end_of_day" ? "end-of-day assessment" : "start-of-day assessment",
         stat: result?.match(/^Decision authority:\s*(.+)$/m)?.[1],
+      };
+    case "ComputerNavigate":
+      return {
+        label: "Jev Navigate",
+        target: asString(inp.goal),
+        stat: result?.match(/^stop_reason=([^,\n]+)/m)?.[1],
       };
     case "WorkfriendDeliver": {
       const target = displayPath(asString(inp.output_path));

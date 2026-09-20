@@ -36,7 +36,11 @@ import type {
 } from "../permissions/permissions.js";
 import { resolveAgentTools } from "./resolveAgentTools.js";
 import type { AgentDefinition, AgentRunResult } from "./types.js";
+import { isAgentEnabled, agentClosedMessage } from "./preferences.js";
 import type { ContentBlock, Usage } from "../types/message.js";
+import { withRhinoTaskCleanup, rhinoCleanupSummary, markRhinoTaskFailure } from "../tools/rhinoArtifacts.js";
+import { withRhinoProject, writeRhinoProjectReport } from "../tools/rhinoProject.js";
+import { randomUUID } from "node:crypto";
 import {
   drainUnreadMessages,
   formatMailboxAttachment,
@@ -47,7 +51,7 @@ export const DEFAULT_AGENT_MAX_TURNS = 30;
 /** Streamed progress events forwarded to the parent's onProgress callback. */
 export type AgentProgressEvent =
   | { type: "tool_use_start"; toolName: string }
-  | { type: "tool_use_done"; toolName: string; isError?: boolean }
+  | { type: "tool_use_done"; toolName: string; isError?: boolean; result?: import("../tools/Tool.js").ToolResult }
   | { type: "text"; text: string }
   | { type: "error"; text: string }
   | { type: "turn_complete"; reason: LoopTerminationReason }
@@ -163,6 +167,34 @@ function countToolUses(messages: MessageParam[]): number {
 }
 
 export async function runChildAgent(params: RunChildAgentParams): Promise<AgentRunResult> {
+  // Recheck at execution time: cached definitions and async launches cannot bypass Close.
+  // Already-started runs finish normally; this guard never interrupts native writes.
+  if (!isAgentEnabled(params.agentDefinition.agentType)) {
+    throw new Error(agentClosedMessage(params.agentDefinition.agentType));
+  }
+  if (params.agentDefinition.agentType === "rhino_agent" && params.agentDefinition.source === "built-in") {
+    return withRhinoProject(async (directory) => {
+      const taskId = randomUUID();
+      const result = await withRhinoTaskCleanup(() => runChildAgentLoop({ ...params,
+        prompt: params.prompt + `\n\n[Runtime output policy] Project directory: ${directory}\nAll generated outputs belong here, never in the application repository or launch directory. Export a relative models/<name>.3dm with overwrite:false only after permission approval. Inputs still resolve against the original cwd. Report limitations; do not claim a model was saved unless export succeeded.`,
+      }), (report) => {
+        params.onProgress?.({ type: "text", text: `\n${rhinoCleanupSummary(report)}\n` });
+      });
+      result.finalText += `\n\nRhino 项目文件夹：${directory}`;
+      try {
+        writeRhinoProjectReport(`task-${taskId}.json`, { taskId, directory, reason: result.reason,
+          finalText: result.finalText, warnings: result.warnings, durationMs: result.totalDurationMs });
+      } catch (error) {
+        const warning = `Rhino task report could not be saved: ${(error as Error).message}`;
+        result.warnings = [...(result.warnings ?? []), warning]; result.finalText += `\n${warning}`;
+      }
+      return result;
+    });
+  }
+  return runChildAgentLoop(params);
+}
+
+async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunResult> {
   const startTime = Date.now();
   const def = params.agentDefinition;
   const resolved = resolveAgentTools(def, params.availableTools);
@@ -278,6 +310,7 @@ export async function runChildAgent(params: RunChildAgentParams): Promise<AgentR
       reason = value.reason;
       break;
     }
+    if (value.type === "tool_use_done" && value.result.isError) markRhinoTaskFailure();
     if (params.onProgress) {
       switch (value.type) {
         case "tool_use_start":
@@ -288,6 +321,7 @@ export async function runChildAgent(params: RunChildAgentParams): Promise<AgentR
             type: "tool_use_done",
             toolName: value.name,
             isError: value.result.isError,
+            result: value.result,
           });
           break;
         case "text":

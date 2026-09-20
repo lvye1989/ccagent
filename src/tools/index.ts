@@ -23,7 +23,7 @@ import { classicWordsTool } from "./classicWordsTool.js";
 import { listMcpResourcesTool } from "./listMcpResourcesTool.js";
 import { readMcpResourceTool } from "./readMcpResourceTool.js";
 import { powerShellTool } from "./powerShellTool.js";
-import { computerActionTool, computerObserveTool } from "./computerUseTools.js";
+import { computerActionTool, computerNavigateTool, computerObserveTool } from "./computerUseTools.js";
 import {
   markdownToPdfTool,
   pdfToMarkdownTool,
@@ -48,6 +48,8 @@ import { workfriendScheduleTool } from "./workfriendScheduleTool.js";
 import { workfriendAssessTool } from "./workfriendAssessTool.js";
 import { workfriendDeliverTool } from "./workfriendDeliverTool.js";
 import { agentTeamModeTool } from "./agentTeamModeTool.js";
+import { rhinoActionTool, rhinoObserveTool, rhinoInspectTool } from "./rhinoTools.js";
+import { rhinoSequenceTool } from "./rhinoSequence.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 
 const BUILTIN_TOOLS: Tool[] = [
@@ -61,6 +63,11 @@ const BUILTIN_TOOLS: Tool[] = [
   powerShellTool,
   computerObserveTool,
   computerActionTool,
+  computerNavigateTool,
+  rhinoObserveTool,
+  rhinoInspectTool,
+  rhinoActionTool,
+  rhinoSequenceTool,
   markdownToPdfTool,
   wordToPdfTool,
   pdfToWordTool,

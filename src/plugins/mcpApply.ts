@@ -17,13 +17,11 @@
 import type { ScopedMcpServerConfig } from "../types/mcp.js";
 import {
   clearServerCache,
-  connectToServer,
 } from "../services/mcp/client.js";
-import { fetchToolsForConnection } from "../services/mcp/fetchTools.js";
+import { startMcpServer } from "../services/mcp/bootstrap.js";
 import {
   deleteMcpRegistryEntry,
   getMcpRegistry,
-  setMcpRegistryEntry,
 } from "../services/mcp/registry.js";
 import { registerMcpTools } from "../tools/index.js";
 import { debugLog } from "../utils/log.js";
@@ -107,13 +105,12 @@ export async function applyPluginMcpDiff(
       const cfg = desired.get(name);
       if (!cfg) return false;
       try {
-        const connection = await connectToServer(name, cfg);
-        const tools = connection.type === "connected" ? await fetchToolsForConnection(connection) : [];
+        await startMcpServer(name, cfg, isCurrent);
         if (!isCurrent()) {
-          await clearServerCache(name, cfg);
+          // startMcpServer disposes its own stale instance. Clearing by name
+          // here could cancel a newer generation with the same configuration.
           return false;
         }
-        setMcpRegistryEntry(name, connection, tools);
         return true;
       } catch (error) {
         debugLog("plugins", `[mcp] connect failed for ${name}: ${(error as Error).message}`);

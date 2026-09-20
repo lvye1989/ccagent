@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { enqueuePendingNotification } from "../state/notificationStore.js";
 import { getCCAgentPath } from "../utils/paths.js";
+import { isAgentEnabled, onAgentStatesChanged } from "../agents/preferences.js";
 
 export interface WorkfriendSchedule {
   id: string;
@@ -24,6 +25,18 @@ interface ScheduleFile {
 
 const timers = new Map<string, NodeJS.Timeout>();
 const MAX_TIMER_DELAY = 2_147_000_000;
+let schedulerStarted = false;
+let wasEnabled = isAgentEnabled("workfriend");
+
+onAgentStatesChanged(() => {
+  const enabled = isAgentEnabled("workfriend");
+  if (enabled === wasEnabled) return;
+  wasEnabled = enabled;
+  if (!enabled) clearWorkfriendTimers();
+  else if (schedulerStarted) void bootstrapWorkfriendScheduler().catch((error) => {
+    console.warn(`[ccagent] Workfriend reminders could not resume: ${(error as Error).message}`);
+  });
+});
 
 export function getWorkfriendSchedulePath(): string {
   return getCCAgentPath("workfriend", "schedules.json");
@@ -81,6 +94,7 @@ async function fireSchedule(id: string): Promise<void> {
   const schedules = await readSchedules();
   const schedule = schedules.find((item) => item.id === id);
   if (!schedule || schedule.status !== "pending") return;
+  if (!isAgentEnabled("workfriend")) return; // Keep the persisted pending reminder for Open.
   schedule.status = "fired";
   await writeSchedules(schedules);
   enqueuePendingNotification({
@@ -90,6 +104,7 @@ async function fireSchedule(id: string): Promise<void> {
 }
 
 function armSchedule(schedule: WorkfriendSchedule): void {
+  if (!isAgentEnabled("workfriend")) return;
   if (schedule.status !== "pending" || timers.has(schedule.id)) return;
   const delay = Math.max(0, new Date(schedule.checkInAt).getTime() - Date.now());
   const timer = setTimeout(() => {
@@ -124,6 +139,7 @@ export async function createWorkfriendSchedule(input: {
   cwd: string;
   now?: Date;
 }): Promise<WorkfriendSchedule> {
+  schedulerStarted = true;
   const now = input.now ?? new Date();
   const end = parseWorkdayEnd(input.workdayEnd, now);
   let checkIn = new Date(end.getTime() - 60 * 60 * 1000);
@@ -168,6 +184,7 @@ export async function cancelWorkfriendSchedule(id: string): Promise<boolean> {
 }
 
 export async function bootstrapWorkfriendScheduler(): Promise<number> {
+  schedulerStarted = true;
   const schedules = await readSchedules();
   let pending = 0;
   for (const schedule of schedules) {

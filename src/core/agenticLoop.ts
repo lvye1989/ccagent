@@ -6,6 +6,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import {
   checkPermission,
+  loadPermissionSettings,
+  matchesPermissionRule,
   type PermissionDecision,
   type PermissionMode,
   type PermissionRequest,
@@ -20,6 +22,13 @@ import { findToolByName } from "../tools/index.js";
 import { truncateToolResult, type ToolContext, type ToolResult } from "../tools/Tool.js";
 import { appendTextToContent, prependTextToContent } from "../tools/contentBlocks.js";
 import { preflightComputerActionWithJev } from "../tools/computerUseTools.js";
+import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev } from "../tools/rhinoTools.js";
+import { canExecuteRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
+import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
+import {
+  decideToolUseWithJev,
+  shouldUseJevToolClassifier,
+} from "../permissions/jevToolClassifier.js";
 import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
@@ -198,6 +207,8 @@ export interface QueryParams {
 }
 
 export interface RunToolsOptions {
+  /** Runtime-only nested Rhino lane. Never comes from model input. */
+  rhinoFastLane?: boolean;
   permissionMode?: PermissionMode;
   permissionSettings?: PermissionSettings;
   sessionPermissionRules?: PermissionRuleSet;
@@ -305,6 +316,9 @@ function partitionToolCalls(blocks: ToolUseBlock[]): ToolBatch[] {
 interface RunOneToolReturn {
   execution: ToolExecutionResult;
   permissionRequest?: PermissionRequest;
+  rawResult?: ToolResult;
+  rhinoJevDecision?: RhinoJevDecision;
+  toolDispatched?: boolean;
 }
 
 /**
@@ -323,6 +337,7 @@ async function runOneToolBlock(
   context: ToolContext,
   options: RunToolsOptions,
 ): Promise<RunOneToolReturn> {
+  let toolDispatched = false;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
   const tool = findToolByName(block.name);
   if (!tool) {
@@ -336,6 +351,14 @@ async function runOneToolBlock(
   }
 
   try {
+    if (options.rhinoFastLane) {
+      validateRhinoFastInput(block.name, toolInput, context.cwd);
+      if (context.abortSignal?.aborted) throw new Error("Rhino fast lane aborted before dispatch");
+      const settings = options.permissionSettings ?? await loadPermissionSettings(context.cwd);
+      if ([...settings.deny, ...(options.sessionPermissionRules?.deny ?? [])].some(rule => matchesPermissionRule(rule, block.name, toolInput))) {
+        throw new Error(`Rhino fast lane stopped by an explicit ${block.name} deny rule`);
+      }
+    }
     // ─── Stage 22: PreToolUse hooks ────────────────────────────────
     // Fire user-defined PreToolUse hooks BEFORE the permission check.
     // A hook can:
@@ -372,10 +395,10 @@ async function runOneToolBlock(
     // It never lowers the LLM-declared risk. In Auto Mode a confident Jev
     // decision can replace the slower general-purpose classifier call; all
     // deterministic deny rules and the high-impact confirmation floor remain.
-    if (block.name === "ComputerAction") {
+    if (block.name === "ComputerAction" || block.name === "RhinoAction") {
       setToolStatus(block.id, "classifier");
     }
-    let jevDecision = block.name === "ComputerAction"
+    const jevDecision = block.name === "ComputerAction"
       ? await preflightComputerActionWithJev(
           toolInput,
           context,
@@ -406,11 +429,77 @@ async function runOneToolBlock(
     ) {
       toolInput = { ...toolInput, risk_category: jevDecision.effectiveRisk };
     }
+    const rhinoJevDecision = block.name === "RhinoAction"
+      ? await preflightRhinoActionWithJev(
+          toolInput,
+          context,
+          options.conversationMessages,
+          options.rhinoFastLane,
+        )
+      : options.rhinoFastLane && block.name === "RhinoInspect"
+        ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages)
+        : undefined;
+    if (options.rhinoFastLane && block.name !== "RhinoObserve" && (!rhinoJevDecision || !canExecuteRhinoFastStep(
+      rhinoJevDecision, (block.name === "RhinoInspect" ? "inspect" : toolInput.action) as RhinoJevProposedAction,
+      (block.name === "RhinoInspect" ? toolInput : toolInput.parameters) as Record<string, unknown>,
+    ))) {
+      return { rhinoJevDecision, execution: { toolUseId: block.id, toolName: block.name, toolInput, result: {
+        content: `Rhino fast handoff; no action executed. Schema validation succeeded, but Jev did not provide sufficient evidence for automatic continuation; a low score is not a schema error. ${rhinoJevDecision?.summary ?? "Missing Jev decision"}`, isError: true,
+      } } };
+    }
+    if (rhinoJevDecision?.requiresReplan) {
+      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result: {
+        content: `RhinoAction was not executed. Correct the proposed parameters or clarify them with the user; do not repeat RhinoObserve for unchanged invalid parameters. ${rhinoJevDecision.summary}`,
+        isError: true,
+      } } };
+    }
+    if (rhinoJevDecision?.forceObserve) {
+      const result: ToolResult = {
+        content: `Jev Rhino gate requires a fresh RhinoObserve before acting. ${rhinoJevDecision.summary}`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      };
+    }
+    if (rhinoJevDecision?.redirectToComputerUse) {
+      const result: ToolResult = {
+        content: `Jev Rhino gate selected computer_use; RhinoAction was not executed. Observe the Rhino window and use the smallest bounded UI step. ${rhinoJevDecision.summary}`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      };
+    }
     // Auto mode runs the safety classifier INSIDE checkPermission — surface
     // that to the card as "classifier checking…" while it's in flight.
     if (effectiveMode === "auto") {
       setToolStatus(block.id, "classifier");
     }
+    const toolJevDecision = effectiveMode === "auto" && block.name !== "RhinoAction" && block.name !== "RhinoSequence" && !options.rhinoFastLane && shouldUseJevToolClassifier(tool)
+      ? await decideToolUseWithJev(
+          block.name,
+          toolInput,
+          options.conversationMessages,
+          context.abortSignal,
+        )
+      : null;
+    const precomputedJevDecision = jevDecision?.permissionBehavior
+      ? {
+          behavior: jevDecision.permissionBehavior,
+          reason: `Jev Computer Use decision: ${jevDecision.summary}`,
+        }
+      : rhinoJevDecision?.permissionBehavior
+        ? {
+            behavior: rhinoJevDecision.permissionBehavior,
+            reason: `Jev Rhino decision: ${rhinoJevDecision.summary}`,
+          }
+      : toolJevDecision?.permissionBehavior
+        ? {
+            behavior: toolJevDecision.permissionBehavior,
+            reason: `Jev tool decision: ${toolJevDecision.summary}`,
+          }
+        : block.name === "RhinoSequence" ? { behavior: "allow" as const, reason: "Bounded orchestration only; every leaf uses Jev and the central permission gate" } : undefined;
     let permission = await checkPermission({
       tool,
       input: toolInput,
@@ -420,13 +509,8 @@ async function runOneToolBlock(
       sessionRules: options.sessionPermissionRules,
       messages: options.conversationMessages,
       model: options.model,
-      ...(jevDecision?.permissionBehavior
-        ? {
-            precomputedAutoDecision: {
-              behavior: jevDecision.permissionBehavior,
-              reason: `Jev Computer Use decision: ${jevDecision.summary}`,
-            },
-          }
+      ...(precomputedJevDecision
+        ? { precomputedAutoDecision: precomputedJevDecision }
         : {}),
     });
 
@@ -438,6 +522,13 @@ async function runOneToolBlock(
         ...permission,
         behavior: "ask",
         reason: `Jev Computer Use decision requires confirmation: ${jevDecision.summary}`,
+      };
+    }
+    if (rhinoJevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
+      permission = {
+        ...permission,
+        behavior: "ask",
+        reason: `Jev Rhino decision requires confirmation: ${rhinoJevDecision.summary}`,
       };
     }
 
@@ -452,7 +543,21 @@ async function runOneToolBlock(
     const computerRequiresFreshConfirmation =
       block.name === "ComputerAction" &&
       (computerRiskCategory !== "ordinary" || jevDecision?.permissionBehavior === "ask");
-    if (preOutcome.permissionBehavior === "allow" && !computerRequiresFreshConfirmation) {
+    const rhinoParameters =
+      block.name === "RhinoAction" && toolInput.parameters && typeof toolInput.parameters === "object" && !Array.isArray(toolInput.parameters)
+        ? toolInput.parameters as Record<string, unknown>
+        : {};
+    const rhinoAction = block.name === "RhinoAction" && typeof toolInput.action === "string"
+      ? toolInput.action
+      : undefined;
+    const rhinoHighImpact =
+      (rhinoAction === "boolean" && rhinoParameters.delete_inputs !== false)
+      || (rhinoAction === "extrude" && rhinoParameters.delete_inputs === true)
+      || (rhinoAction === "import_export" && rhinoParameters.operation === "export")
+      || rhinoAction === "run_grasshopper";
+    const rhinoRequiresFreshConfirmation =
+      block.name === "RhinoAction" && (rhinoHighImpact || rhinoJevDecision?.permissionBehavior === "ask");
+    if (preOutcome.permissionBehavior === "allow" && !options.rhinoFastLane && !computerRequiresFreshConfirmation && !rhinoRequiresFreshConfirmation) {
       permission = {
         ...permission,
         behavior: "allow",
@@ -466,9 +571,15 @@ async function runOneToolBlock(
       };
     }
 
+    let permissionTrace = permission.behavior === "allow" ? "auto_allowed" : permission.behavior;
     if (permission.behavior === "deny") {
+      const jevTrace = jevDecision?.configured
+        ? `\nJev Computer Use: ${jevDecision.summary}`
+        : toolJevDecision?.configured
+          ? `\nJev tool gate: ${toolJevDecision.summary}`
+          : "";
       const result: ToolResult = {
-        content: `Permission denied for ${block.name}: ${permission.reason}`,
+        content: `Permission denied for ${block.name}: ${permission.reason}${jevTrace}`,
         isError: true,
       };
       return {
@@ -507,6 +618,7 @@ async function runOneToolBlock(
       }
 
       if (decision === "deny") {
+        permissionTrace = "user_denied";
         const denialMessage = options.shouldAvoidPermissionPrompts === true
           ? buildHeadlessDenialMessage(block.name)
           : `Permission denied for ${block.name}.`;
@@ -520,6 +632,8 @@ async function runOneToolBlock(
         };
       }
 
+      permissionTrace = decision;
+
       if (decision === "allow_always") {
         const allowRules = options.sessionPermissionRules?.allow;
         if (allowRules && !allowRules.includes(permission.request.ruleHint)) {
@@ -532,7 +646,18 @@ async function runOneToolBlock(
     // need to publish out-of-band updates (currently just AgentTool's
     // sub-agent progress store) can correlate their events back to
     // the right tool-call card in the UI.
-    const callContext: ToolContext = { ...context, toolUseId: block.id };
+    const callContext: ToolContext = {
+      ...context,
+      toolUseId: block.id,
+      ...(rhinoJevDecision ? { rhinoJevDecision } : {}),
+      ...(block.name === "RhinoSequence" && !options.rhinoFastLane ? {
+        runRhinoFastTool: async (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>) => {
+          const leaf = await runOneToolBlock({ type: "tool_use", id: `${block.id}-fast-${Math.random().toString(36).slice(2)}`, name, input }, context,
+            { ...options, rhinoFastLane: true, shouldAvoidPermissionPrompts: true });
+          return { result: leaf.execution.result, rawResult: leaf.rawResult, jevDecision: leaf.rhinoJevDecision, toolDispatched: leaf.toolDispatched };
+        },
+      } : {}),
+    };
 
     // ─── Stage 26: file-history track-edit (before the mutation) ──────
     // Back up the pre-edit content of any file Write/Edit is about to
@@ -559,7 +684,9 @@ async function runOneToolBlock(
     }
 
     // Permission cleared (or never needed) — the tool is now executing.
+    if (options.rhinoFastLane && context.abortSignal?.aborted) throw new Error("Rhino fast lane aborted before native execution");
     setToolStatus(block.id, "running");
+    toolDispatched = true;
     const rawResult = await tool.call(toolInput, callContext);
     let result: ToolResult = {
       ...rawResult,
@@ -571,7 +698,25 @@ async function runOneToolBlock(
         ...result,
         content: prependTextToContent(
           result.content,
-          `[Jev Computer Use ${jevDecision.mode}]\n${jevDecision.summary}\n\n`,
+          `[Jev Computer Use ${jevDecision.mode}]\n${jevDecision.summary}, gate=${jevDecision.permissionBehavior ?? "policy_fallback"}, final_permission=${permissionTrace}\n\n`,
+        ),
+      };
+    }
+    if (rhinoJevDecision) {
+      result = {
+        ...result,
+        content: prependTextToContent(
+          result.content,
+          `[Jev Rhino ${rhinoJevDecision.mode}]\n${rhinoJevDecision.summary}, gate=${rhinoJevDecision.permissionBehavior ?? "policy_fallback"}, final_permission=${permissionTrace}\n\n`,
+        ),
+      };
+    }
+    if (toolJevDecision?.configured) {
+      result = {
+        ...result,
+        content: prependTextToContent(
+          result.content,
+          `[Jev Tool Auto ${toolJevDecision.mode}]\n${toolJevDecision.summary}, final_permission=${permissionTrace}\n\n`,
         ),
       };
     }
@@ -629,6 +774,9 @@ async function runOneToolBlock(
     return {
       execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
       ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}),
+      rawResult,
+      rhinoJevDecision,
+      toolDispatched,
     };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error
@@ -640,6 +788,7 @@ async function runOneToolBlock(
     };
     return {
       execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      toolDispatched,
     };
   }
 }

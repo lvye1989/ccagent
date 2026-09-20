@@ -7,7 +7,7 @@
  */
 
 import { loadEnv } from "../src/utils/loadEnv.js";
-loadEnv();
+await loadEnv();
 
 import * as fs from "node:fs";
 import * as os from "node:os";

@@ -2,9 +2,15 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.tgz
+__pycache__/
+*.py[cod]
 .env
+.env.*
+!.env.example
 .tmp/
 src/scripts/__dbg*.ts
 .DS_Store
 .claude
 .ccagent
+rhino/output/
+rhino/_diag/

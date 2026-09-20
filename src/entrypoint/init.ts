@@ -9,6 +9,11 @@ import {
   callOpenRouterJev,
   DEFAULT_OPENROUTER_JEV_MODEL,
 } from "../services/jev/openRouterJev.js";
+import {
+  buildGoogleWorkspaceMcpServers,
+  DEFAULT_GOOGLE_MCP_REDIRECT_URI,
+  isValidGoogleMcpRedirectUri,
+} from "../services/mcp/googleWorkspace.js";
 import { getCCAgentHome, getUserSettingsPath } from "../utils/paths.js";
 
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
@@ -188,6 +193,8 @@ export function buildUserSettings(
     configureQwen: boolean;
     qwenBaseURL?: string;
     qwenModel?: string;
+    configureGoogleMcp?: boolean;
+    googleMcpRedirectUri?: string;
   },
 ): Record<string, unknown> {
   const env = { ...objectValue(existing.env), CCAGENT_ENV_FILE: input.envPath };
@@ -202,6 +209,7 @@ export function buildUserSettings(
   };
   const nextModels: Record<string, unknown> = { ...models, deepseek };
   const roles: Record<string, unknown> = { ...objectValue(existing.modelRoles) };
+  const mcpServers: Record<string, unknown> = { ...objectValue(existing.mcpServers) };
 
   if (input.configureQwen) {
     nextModels["qwen-omni"] = {
@@ -217,17 +225,26 @@ export function buildUserSettings(
     roles.multimodal = "qwen-omni";
   }
 
+  if (input.configureGoogleMcp) {
+    Object.assign(
+      mcpServers,
+      buildGoogleWorkspaceMcpServers(input.googleMcpRedirectUri || DEFAULT_GOOGLE_MCP_REDIRECT_URI),
+    );
+  }
+
   return {
     ...existing,
     env,
     language: input.language,
     agentTeams: typeof existing.agentTeams === "boolean" ? existing.agentTeams : true,
+    agentSkills: typeof existing.agentSkills === "boolean" ? existing.agentSkills : true,
     defaultModel:
       typeof existing.defaultModel === "string" && existing.defaultModel.trim()
         ? existing.defaultModel
         : "deepseek",
     models: nextModels,
     ...(Object.keys(roles).length > 0 ? { modelRoles: roles } : {}),
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
   };
 }
 
@@ -421,7 +438,7 @@ export async function runInitCommand(
       "Usage: ccagent init [--skip-test]",
       "",
       "Create or safely update ~/.ccagent/.env and ~/.ccagent/settings.json.",
-      "API keys are written only to the private .env file.",
+      "API keys and Google OAuth credentials are written only to the private .env file.",
       "",
     ].join("\n"));
     return 0;
@@ -475,7 +492,7 @@ export async function runInitCommand(
     }
 
     const configureJev = await prompter.confirm(
-      "配置 OpenRouter Jev，用于 Computer Use 与 Workfriend 快速决策",
+      "配置 OpenRouter Jev，用于 Computer Use、Auto Mode、搜索与 Workfriend 快速决策",
       true,
     );
     let openRouterApiKey = existing.env.OPENROUTER_API_KEY || "";
@@ -486,6 +503,29 @@ export async function runInitCommand(
       jevModel = await prompter.ask("Jev 模型", jevModel);
     }
 
+    const existingMcpServers = objectValue(existing.settings.mcpServers);
+    const hasGoogleWorkspaceMcp = Object.keys(existingMcpServers).some((name) => name.startsWith("google-"));
+    const existingGoogleOAuth = objectValue(objectValue(existingMcpServers["google-drive"]).oauth);
+    const configureGoogleMcp = await prompter.confirm(
+      "安装 Google Workspace 官方 MCP 全套服务（Gmail/Drive/Docs/Sheets/Slides/Calendar/Chat/People）",
+      hasGoogleWorkspaceMcp,
+    );
+    let googleMcpClientId = existing.env.GOOGLE_MCP_CLIENT_ID || "";
+    let googleMcpClientSecret = existing.env.GOOGLE_MCP_CLIENT_SECRET || "";
+    let googleMcpRedirectUri = typeof existingGoogleOAuth.redirectUri === "string"
+      ? existingGoogleOAuth.redirectUri
+      : DEFAULT_GOOGLE_MCP_REDIRECT_URI;
+    if (configureGoogleMcp) {
+      const clientIdInput = await prompter.secret("Google OAuth Client ID", Boolean(googleMcpClientId));
+      googleMcpClientId = clientIdInput || googleMcpClientId;
+      const clientSecretInput = await prompter.secret("Google OAuth Client Secret", Boolean(googleMcpClientSecret));
+      googleMcpClientSecret = clientSecretInput || googleMcpClientSecret;
+      googleMcpRedirectUri = await prompter.ask("Google OAuth 回调地址", googleMcpRedirectUri);
+      if (!isValidGoogleMcpRedirectUri(googleMcpRedirectUri)) {
+        throw new Error("Google OAuth 回调地址必须是带明确端口的本机 HTTP 地址（127.0.0.1、localhost 或 ::1）");
+      }
+    }
+
     const settings = buildUserSettings(existing.settings, {
       envPath,
       language,
@@ -494,12 +534,15 @@ export async function runInitCommand(
       configureQwen,
       qwenBaseURL,
       qwenModel,
+      configureGoogleMcp,
+      googleMcpRedirectUri,
     });
     const envUpdates: Record<string, string> = {
       DEEPSEEK_API_KEY: deepseekApiKey,
       DEEPSEEK_PROTOCOL: "openai-responses",
       DEEPSEEK_MODEL: deepseekModel,
       DEEPSEEK_BASE_URL: deepseekBaseURL,
+      CCAGENT_COMPUTER_USE_INDICATOR: existing.env.CCAGENT_COMPUTER_USE_INDICATOR || "1",
     };
     if (configureQwen) {
       Object.assign(envUpdates, {
@@ -515,16 +558,35 @@ export async function runInitCommand(
       Object.assign(envUpdates, {
         OPENROUTER_API_KEY: openRouterApiKey,
         CCAGENT_COMPUTER_USE_JEV: "1",
+        CCAGENT_TOOL_JEV: "1",
+        CCAGENT_SEARCH_JEV: "1",
         CCAGENT_WORKFRIEND_JEV: "1",
         CCAGENT_JEV_MODE: existing.env.CCAGENT_JEV_MODE || "enforce",
+        JEV_TOOL_MODE: existing.env.JEV_TOOL_MODE || "enforce",
         WORKFRIEND_JEV_MODE: existing.env.WORKFRIEND_JEV_MODE || "decision",
         JEV_MODEL: jevModel,
+      });
+    }
+    if (configureGoogleMcp) {
+      Object.assign(envUpdates, {
+        GOOGLE_MCP_CLIENT_ID: googleMcpClientId,
+        GOOGLE_MCP_CLIENT_SECRET: googleMcpClientSecret,
       });
     }
 
     await writePrivateFile(envPath, mergeEnv(existing.envText, envUpdates));
     await writePrivateFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
     output.write(`\n✓ 已写入 ${envPath}\n✓ 已写入 ${settingsPath}\n`);
+    if (configureGoogleMcp) {
+      output.write([
+        "- 已安装 8 个 Google Workspace 官方远程 MCP 配置。",
+        `- 请在 Google Cloud OAuth Web 客户端中登记回调地址：${googleMcpRedirectUri}`,
+        "- 还需加入 Google Workspace Developer Preview 并启用 8 个 Workspace API；首次调用各服务时浏览器会请求授权。",
+      ].join("\n") + "\n");
+      if (!googleMcpClientId || !googleMcpClientSecret) {
+        output.write("- Google OAuth 凭据尚未填写；MCP 配置已保留，请补充 ~/.ccagent/.env 后再使用。\n");
+      }
+    }
 
     const skipConnectivity = options.skipConnectivity || argv.includes("--skip-test");
     if (skipConnectivity) {

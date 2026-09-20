@@ -20,6 +20,7 @@
  */
 
 import { findSkill } from "../services/skills/registry.js";
+import { isAgentSkillsEnabled } from "../utils/agentSkillsEnabled.js";
 import type { Skill } from "../types/types.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 
@@ -91,6 +92,9 @@ export const skillTool: Tool = {
   },
 
   async call(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!isAgentSkillsEnabled()) {
+      return { content: "Agent Skills is closed. Use /agent-skill open to enable skills.", isError: true };
+    }
     const { skill: name, args } = readInput(input);
 
     if (!name || !SKILL_NAME_RE.test(name)) {
@@ -150,6 +154,6 @@ export const skillTool: Tool = {
   },
 
   isEnabled(): boolean {
-    return true;
+    return isAgentSkillsEnabled();
   },
 };

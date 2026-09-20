@@ -13,6 +13,8 @@
  */
 
 import { findSkill } from "../../../services/skills/registry.js";
+import { isAgentSkillsEnabled } from "../../../utils/agentSkillsEnabled.js";
+import { isAgentEnabled } from "../../../agents/preferences.js";
 import { findUserCommand } from "../../../commands/userCommands/registry.js";
 import {
   isBuiltinCommandName,
@@ -37,7 +39,8 @@ export function classifyUserInput(trimmed: string): InputClassification {
     : "";
   const skillCommandName = rawCommandName.toLowerCase();
   const isSkillCommand =
-    isSlashCommand && !!skillCommandName && !!findSkill(skillCommandName);
+    isSlashCommand && !!skillCommandName && !isBuiltinCommandName(skillCommandName) &&
+    isAgentSkillsEnabled() && !!findSkill(skillCommandName);
   // User-defined commands also engage the full agentic loop (they expand into a
   // real prompt). Skip reserved built-in names so `/help` etc. stay synchronous
   // notices, mirroring the engine's guard.
@@ -49,7 +52,8 @@ export function classifyUserInput(trimmed: string): InputClassification {
   // Built-in `prompt` commands (`/init`) expand into a real prompt and run a
   // normal model turn, so they too are LLM-triggering.
   const isPromptCommand =
-    isSlashCommand && isBuiltinPromptCommand(rawCommandName);
+    isSlashCommand && isBuiltinPromptCommand(rawCommandName) &&
+    (rawCommandName.toLowerCase() !== "workfriend" || isAgentEnabled("workfriend"));
   const isLlmTriggering =
     !isSlashCommand || isSkillCommand || isUserCommand || isPromptCommand;
 

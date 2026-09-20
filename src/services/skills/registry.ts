@@ -18,6 +18,7 @@
  */
 
 import type { Skill } from "../../types/types.js";
+import { isAgentSkillsEnabled } from "../../utils/agentSkillsEnabled.js";
 
 const dynamic = new Map<string, Skill>();
 const conditional = new Map<string, Skill>();
@@ -51,6 +52,7 @@ export function isSkillsInitialized(): boolean {
  * listing in the system prompt. EXCLUDES `disable-model-invocation` skills.
  */
 export function getModelVisibleSkills(): Skill[] {
+  if (!isAgentSkillsEnabled()) return [];
   return [...dynamic.values()].filter((s) => !s.frontmatter.disableModelInvocation);
 }
 
@@ -61,10 +63,11 @@ export function getModelVisibleSkills(): Skill[] {
  * surprised by "command not found" before the file path matches).
  */
 export function getAllUserInvocableSkills(): Skill[] {
+  if (!isAgentSkillsEnabled()) return [];
   return [...dynamic.values(), ...conditional.values()];
 }
 
-/** Look up by name across both maps; returns undefined if not loaded. */
+/** Raw lookup for diagnostics/closed-command detection; execution must check the switch. */
 export function findSkill(name: string): Skill | undefined {
   return dynamic.get(name) ?? conditional.get(name);
 }
@@ -75,6 +78,7 @@ export function findSkill(name: string): Skill | undefined {
  * UI ("activated skill X").
  */
 export function activateConditional(name: string): boolean {
+  if (!isAgentSkillsEnabled()) return false;
   const skill = conditional.get(name);
   if (!skill) return false;
   conditional.delete(name);
@@ -84,6 +88,7 @@ export function activateConditional(name: string): boolean {
 
 /** Iterate over the conditional skills (read-only view). */
 export function listConditionalSkills(): Skill[] {
+  if (!isAgentSkillsEnabled()) return [];
   return [...conditional.values()];
 }
 

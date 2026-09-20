@@ -26,7 +26,8 @@ import {
   CallToolResultSchema,
   ListToolsResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ConnectedMcpServer } from "../../types/mcp.js";
+import type { ConnectedMcpServer, McpAuthOptions } from "../../types/mcp.js";
+import { isMcpServerEnabled } from "./preferences.js";
 import type { Tool, ToolContext, ToolResult } from "../../tools/Tool.js";
 import { debugLog, logWarn } from "../../utils/log.js";
 import { buildMcpToolName } from "./mcpStringUtils.js";
@@ -112,11 +113,16 @@ function buildToolAdapter(connection: ConnectedMcpServer, mcpTool: McpTool): Too
     description,
     inputSchema,
     isReadOnly: () => isReadOnly,
-    isEnabled: () => true,
+    isEnabled: () => !connection.signal?.aborted && isMcpServerEnabled(connection.name, connection.config),
     async call(rawInput: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+      if (connection.signal?.aborted || !isMcpServerEnabled(connection.name, connection.config)) {
+        return { content: `MCP server '${connection.name}' is closed; use /mcp open ${connection.name}.`, isError: true };
+      }
       const timeoutMs = resolveMcpToolTimeoutMs(connection);
+      const signals = [connection.signal, context.abortSignal].filter((s): s is AbortSignal => !!s);
+      const signal = signals.length ? AbortSignal.any(signals) : undefined;
       try {
-        const result = await connection.client.request(
+        const request = () => connection.client.request(
           {
             method: "tools/call",
             params: {
@@ -129,9 +135,12 @@ function buildToolAdapter(connection: ConnectedMcpServer, mcpTool: McpTool): Too
             timeout: timeoutMs,
             maxTotalTimeout: timeoutMs,
             resetTimeoutOnProgress: true,
-            ...(context.abortSignal ? { signal: context.abortSignal } : {}),
+            ...(signal ? { signal } : {}),
           },
         );
+        const result = connection.runWithAuth
+          ? await connection.runWithAuth(request, { signal })
+          : await request();
         const content = stringifyMcpContent(result.content as CallToolResult["content"]);
         return {
           content,
@@ -156,7 +165,10 @@ function buildToolAdapter(connection: ConnectedMcpServer, mcpTool: McpTool): Too
  */
 export async function fetchToolsForConnection(
   connection: ConnectedMcpServer,
+  options: McpAuthOptions = {},
 ): Promise<Tool[]> {
+  if (connection.signal?.aborted || !isMcpServerEnabled(connection.name, connection.config)) return [];
+  connection.discoveryError = undefined;
   if (!connection.capabilities?.tools) {
     debugLog("mcp", `[${connection.name}] no 'tools' capability declared, skipping tools/list`);
     return [];
@@ -164,12 +176,18 @@ export async function fetchToolsForConnection(
 
   let result: ListToolsResult;
   try {
-    result = (await connection.client.request(
+    const request = () => connection.client.request(
       { method: "tools/list" },
       ListToolsResultSchema,
-    )) as ListToolsResult;
+      { signal: connection.signal, timeout: options.interactive ? 330_000 : 30_000 },
+    ) as Promise<ListToolsResult>;
+    result = connection.runWithAuth
+      ? await connection.runWithAuth(request, { ...options, signal: connection.signal })
+      : await request();
   } catch (error) {
-    logWarn(`MCP server '${connection.name}' tools/list failed: ${(error as Error).message}`);
+    if (connection.signal?.aborted) return [];
+    connection.discoveryError = (error as Error).message;
+    logWarn(`MCP server '${connection.name}' tools/list failed: ${connection.discoveryError}`);
     return [];
   }
 

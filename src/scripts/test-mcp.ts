@@ -21,11 +21,14 @@
  *   so the smoke test is hermetic.
  */
 import { loadEnv } from "../utils/loadEnv.js";
-loadEnv();
+await loadEnv();
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as net from "node:net";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   buildMcpToolName,
   parseMcpToolName,
@@ -41,6 +44,7 @@ import { getMcpRegistry, getMcpRegistryEntry, clearMcpRegistry } from "../servic
 import { _resetMcpClientForTesting } from "../services/mcp/client.js";
 import { registerMcpTools, findToolByName, getAllTools } from "../tools/index.js";
 import type { ToolContext } from "../tools/Tool.js";
+import { GoogleWorkspaceOAuthProvider } from "../services/mcp/googleOAuth.js";
 
 const ctx: ToolContext = { cwd: process.cwd() };
 
@@ -105,11 +109,31 @@ async function testConfigValidation() {
       mcpServers: {
         "good-stdio": { command: "echo", args: ["hello"], toolTimeoutMs: 123456 },
         "good-http": { type: "http", url: "https://example.com/mcp" },
+        "good-google-oauth": {
+          type: "http",
+          url: "https://drivemcp.googleapis.com/mcp/v1",
+          oauth: {
+            provider: "google",
+            clientIdEnv: "GOOGLE_MCP_CLIENT_ID",
+            clientSecretEnv: "GOOGLE_MCP_CLIENT_SECRET",
+            redirectUri: "http://127.0.0.1:53682/oauth/callback",
+          },
+        },
         "good-sse": { type: "sse", url: "http://localhost:3000/sse" },
         "bad-no-command": { args: ["x"] },
         "bad-bad-url": { type: "http", url: "not a url" },
         "bad-bad-type": { type: "ws", url: "wss://x" },
         "bad-timeout": { command: "echo", toolTimeoutMs: 999 },
+        "bad-oauth-env": {
+          type: "http",
+          url: "https://example.com/mcp",
+          oauth: { provider: "google", clientIdEnv: "not-valid!", clientSecretEnv: "SECRET", redirectUri: "http://127.0.0.1:53682/callback" },
+        },
+        "bad-oauth-redirect": {
+          type: "http",
+          url: "https://example.com/mcp",
+          oauth: { provider: "google", clientIdEnv: "CLIENT", clientSecretEnv: "SECRET", redirectUri: "https://example.com/callback" },
+        },
       },
     }),
   );
@@ -132,6 +156,10 @@ async function testConfigValidation() {
   if (sse?.type === "sse" && sse.url === "http://localhost:3000/sse") pass("good-sse validated");
   else fail("good-sse missing");
 
+  const google = result.servers["good-google-oauth"];
+  if (google?.type === "http" && google.oauth?.provider === "google") pass("Google OAuth HTTP config validated");
+  else fail("good-google-oauth missing");
+
   if (!result.servers["bad-no-command"]) pass("bad-no-command rejected");
   else fail("bad-no-command should have been rejected");
 
@@ -144,11 +172,130 @@ async function testConfigValidation() {
   if (!result.servers["bad-timeout"]) pass("bad-timeout rejected (<1000ms)");
   else fail("bad-timeout should have been rejected");
 
-  if (result.errors.length === 4) pass(`emitted ${result.errors.length} errors`);
-  else fail(`expected 4 errors, got ${result.errors.length}: ${JSON.stringify(result.errors)}`);
+  if (!result.servers["bad-oauth-env"]) pass("bad-oauth-env rejected");
+  else fail("bad-oauth-env should have been rejected");
+
+  if (!result.servers["bad-oauth-redirect"]) pass("bad-oauth-redirect rejected");
+  else fail("bad-oauth-redirect should have been rejected");
+
+  if (result.errors.length === 6) pass(`emitted ${result.errors.length} errors`);
+  else fail(`expected 6 errors, got ${result.errors.length}: ${JSON.stringify(result.errors)}`);
 
   await fs.rm(tmp, { recursive: true, force: true });
   await fs.rm(fakeHome, { recursive: true, force: true });
+}
+
+async function reserveLoopbackPort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+async function testGoogleOAuthProvider(): Promise<void> {
+  console.log("\n── 2b. Google OAuth provider ──");
+  const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-google-oauth-"));
+  const port = await reserveLoopbackPort();
+  const redirectUri = `http://127.0.0.1:${port}/oauth/callback`;
+  const oldClientId = process.env.TEST_GOOGLE_CLIENT_ID;
+  const oldClientSecret = process.env.TEST_GOOGLE_CLIENT_SECRET;
+  process.env.TEST_GOOGLE_CLIENT_ID = "client-id";
+  process.env.TEST_GOOGLE_CLIENT_SECRET = "client-secret";
+  let openedUrl = "";
+  const provider = new GoogleWorkspaceOAuthProvider(
+    "google-test",
+    {
+      provider: "google",
+      clientIdEnv: "TEST_GOOGLE_CLIENT_ID",
+      clientSecretEnv: "TEST_GOOGLE_CLIENT_SECRET",
+      redirectUri,
+    },
+    {
+      homeDir: tmpHome,
+      openExternal: async (url) => {
+        openedUrl = url;
+        return true;
+      },
+    },
+  );
+
+  try {
+    const info = provider.clientInformation();
+    if (info.client_id === "client-id" && info.client_secret === "client-secret") {
+      pass("OAuth client credentials resolve from named environment variables");
+    } else {
+      fail("OAuth client credentials were not resolved from the environment");
+    }
+
+    await provider.saveTokens({ access_token: "access", token_type: "Bearer", refresh_token: "refresh" });
+    const restored = await provider.tokens();
+    if (restored?.access_token === "access" && restored.refresh_token === "refresh") {
+      pass("OAuth tokens persist under the private CCAGENT user directory");
+    } else {
+      fail("OAuth token persistence failed");
+    }
+
+    await provider.saveTokens({ access_token: "renewed-access", token_type: "Bearer" });
+    const refreshed = await provider.tokens();
+    if (refreshed?.access_token === "renewed-access" && refreshed.refresh_token === "refresh") {
+      pass("OAuth refresh responses preserve the existing Google refresh token");
+    } else {
+      fail("OAuth refresh response discarded the existing refresh token");
+    }
+
+    const state = provider.state();
+    provider.saveCodeVerifier("verifier");
+    provider.redirectToAuthorization(new URL(`https://accounts.google.test/authorize?state=${state}`));
+    let calls = 0;
+    let finishedCode = "";
+    const fakeTransport = {
+      finishAuth: async (code: string) => { finishedCode = code; },
+    } as unknown as StreamableHTTPClientTransport;
+    const run = provider.runWithAuth(fakeTransport, async () => {
+      calls += 1;
+      if (calls === 1) throw new UnauthorizedError();
+      return "authorized";
+    }, { interactive: true });
+
+    let callbackDelivered = false;
+    for (let i = 0; i < 100 && !callbackDelivered; i += 1) {
+      try {
+        const response = await fetch(`${redirectUri}?code=test-code&state=${encodeURIComponent(state)}`);
+        callbackDelivered = response.ok;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    const result = await run;
+    if (callbackDelivered && result === "authorized" && calls === 2 && finishedCode === "test-code") {
+      pass("401 challenge completes loopback OAuth and retries the MCP request once");
+    } else {
+      fail(`OAuth retry mismatch: callback=${callbackDelivered}, result=${result}, calls=${calls}, code=${finishedCode}`);
+    }
+    const opened = new URL(openedUrl);
+    if (
+      opened.origin === "https://accounts.google.test"
+      && opened.pathname === "/authorize"
+      && opened.searchParams.get("access_type") === "offline"
+      && opened.searchParams.get("prompt") === "consent"
+      && opened.searchParams.get("include_granted_scopes") === "true"
+    ) {
+      pass("authorization URL requests durable offline Google access");
+    } else {
+      fail("authorization URL did not request durable offline Google access");
+    }
+  } finally {
+    if (oldClientId === undefined) delete process.env.TEST_GOOGLE_CLIENT_ID;
+    else process.env.TEST_GOOGLE_CLIENT_ID = oldClientId;
+    if (oldClientSecret === undefined) delete process.env.TEST_GOOGLE_CLIENT_SECRET;
+    else process.env.TEST_GOOGLE_CLIENT_SECRET = oldClientSecret;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  }
 }
 
 // ─── 3. End-to-end with an inline MCP server ─────────────────────────
@@ -501,6 +648,7 @@ async function main() {
   console.log("── Stage 16: MCP Verification ──\n");
   testNormalization();
   await testConfigValidation();
+  await testGoogleOAuthProvider();
   await testEndToEnd();
   await testNonBlockingBootstrap();
   await testHttpTransport();

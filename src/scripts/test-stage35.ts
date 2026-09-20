@@ -171,7 +171,7 @@ async function buildFixtures(root: string): Promise<Fixtures> {
   await write(
     path.join(demoRoot, ".mcp.json"),
     JSON.stringify(
-      { mcpServers: { local: { command: "node", args: ["${CCAGENT_PLUGIN_ROOT}/server.js"] } } },
+      { mcpServers: { local: { command: "node", args: ["${CCAGENT_PLUGIN_ROOT}/server.js"], enabled: false } } },
       null,
       2,
     ),
@@ -343,6 +343,7 @@ async function main(): Promise<void> {
     "mcp server namespaced → plugin:demo:local",
   );
   const mcpArgs = (loaded.mcpServers[0]?.config as { args?: string[] }).args ?? [];
+  assert(loaded.mcpServers[0]?.config.enabled === false, "plugin MCP preserves explicit enabled:false");
   assert(mcpArgs[0] === `${fx.demoRoot}/server.js`, "mcp ${ROOT} substituted");
   const mcpEnv =
     (loaded.mcpServers[0]?.config as { env?: Record<string, string> }).env ?? {};

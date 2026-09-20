@@ -24,7 +24,8 @@
  * the user is iterating on a plan they haven't approved.
  */
 
-import { findAgent, getAllAgents } from "../agents/registry.js";
+import { findAgent, getEnabledAgents } from "../agents/registry.js";
+import { isAgentEnabled, agentClosedMessage } from "../agents/preferences.js";
 import type { AgentIsolation, AgentRunResult } from "../agents/types.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { DEFAULT_MODEL } from "../services/api/client.js";
@@ -255,9 +256,12 @@ export const agentTool: Tool = {
     }
 
     const agentType = subagent_type || "general-purpose";
+    if (!isAgentEnabled(agentType)) {
+      return { content: agentClosedMessage(agentType), isError: true };
+    }
     const def = findAgent(agentType);
     if (!def) {
-      const available = getAllAgents()
+      const available = getEnabledAgents()
         .map((a) => a.agentType)
         .join(", ");
       return {

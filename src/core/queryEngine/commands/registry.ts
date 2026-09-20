@@ -7,20 +7,21 @@
  * system notices and never sent to the model.
  */
 
-import { getMcpRegistry, getMcpRegistryEntry } from "../../../services/mcp/registry.js";
-import { reconnectMcpServer } from "../../../services/mcp/bootstrap.js";
 import { getAllUserInvocableSkills } from "../../../services/skills/registry.js";
 import { getAllAgents } from "../../../agents/registry.js";
+import { isAgentEnabled } from "../../../agents/preferences.js";
+import { handleAgentControlsCommand } from "./agents.js";
+import type { ToolContext } from "../../../tools/Tool.js";
 import {
   loadHooksDiagnosticReport,
   HOOK_EVENTS,
   type HookEvent,
   type HooksSettings,
 } from "../../../hooks/index.js";
-import type { ScopedMcpServerConfig } from "../../../types/mcp.js";
 import type { QueryEngineEvent } from "../types.js";
 import type { CommandContext } from "./context.js";
 import { refreshActivePlugins } from "../../../plugins/runtime.js";
+import { isAgentSkillsEnabled } from "../../../utils/agentSkillsEnabled.js";
 
 /**
  * Handle `/skills` — list loaded skills, or atomically reload all extension
@@ -35,6 +36,7 @@ export async function* handleSkillsCommand(
     const summary = result.summary;
     const lines = [
       `Extensions reloaded: ${summary.enabledPlugins} enabled, ${summary.disabledPlugins} disabled.`,
+      `Agent Skills: ${isAgentSkillsEnabled() ? "Open" : "Close (definitions retained, invocation disabled)"} — /agent-skill`,
       `Skills ${summary.skills} · Commands ${summary.commands} · Agents ${summary.agents} · ` +
         `Styles ${summary.outputStyles} · Hooks ${summary.hooks} · MCP ${summary.mcpServers} · ` +
         `Errors ${summary.errors}`,
@@ -57,6 +59,10 @@ export async function* handleSkillsCommand(
     return { handled: true };
   }
 
+  if (!isAgentSkillsEnabled()) {
+    yield { type: "command", kind: "info", message: "Agent Skills: Close — 技能已停用，已安装文件保留。使用 /agent-skill open 开启。" };
+    return { handled: true };
+  }
   const all = getAllUserInvocableSkills();
   if (all.length === 0) {
     yield {
@@ -87,17 +93,19 @@ export async function* handleSkillsCommand(
 }
 
 /**
- * Handle `/agents` — read-only listing of every Agent definition the
- * loader picked up at startup, grouped by source. Mirrors the source's
- * `claude agents` CLI handler (claude-code-source-code/src/tools/
- * AgentTool/agentDisplay.ts) but stripped to a text-only listing — no
- * interactive AgentsMenu yet.
+ * Handle `/agents` — native per-agent Open/Close controls, or a sourced
+ * read-only listing with `/agents list` (also used without an interactive UI).
  *
  * The model only sees the agents in the system-prompt <system-reminder>;
  * this command is the human-side answer to "what sub-agent types are
  * available right now?"
  */
-export async function* handleAgentsCommand(): AsyncGenerator<QueryEngineEvent, { handled: boolean }> {
+export async function* handleAgentsCommand(
+  args: string[] = [], ask?: ToolContext["requestUserQuestion"],
+): AsyncGenerator<QueryEngineEvent, { handled: boolean }> {
+  if ((args.length > 0 && !(args.length === 1 && args[0] === "list")) || (args.length === 0 && ask && getAllAgents().length > 0)) {
+    return yield* handleAgentControlsCommand(args, ask);
+  }
   const all = getAllAgents();
   if (all.length === 0) {
     yield {
@@ -125,7 +133,7 @@ export async function* handleAgentsCommand(): AsyncGenerator<QueryEngineEvent, {
 
   const lines = [`Agents (${all.length} loaded)`, ""];
   for (const agent of sorted) {
-    const tags: string[] = [agent.source];
+    const tags: string[] = [isAgentEnabled(agent.agentType) ? "Open" : "Close", agent.source];
     if (agent.tools && agent.tools.length > 0) {
       tags.push(`tools: ${agent.tools.join(",")}`);
     } else {
@@ -151,7 +159,8 @@ export async function* handleAgentsCommand(): AsyncGenerator<QueryEngineEvent, {
     "",
     "Sub-agents are spawned by the model via the `Agent` tool —",
     "you cannot invoke them directly. The model picks `subagent_type` from",
-    "the names listed above, based on the task.",
+    "the open names listed above, based on the task.",
+    "/agents — 逐个选择 Open / Close；/agents open <name>；/agents close <name>。",
   );
   yield { type: "command", kind: "info", message: lines.join("\n") };
   return { handled: true };
@@ -265,150 +274,6 @@ export async function* handleHooksCommand(
 }
 
 /**
- * Handle the `/mcp` slash command family.
- *
- *   /mcp                       — list every configured server + status + tool count
- *   /mcp tools <name>          — show all tools exposed by one server
- *   /mcp reconnect <name>      — drop cache + retry connection
- *
- * The output is rendered as a system notice (info/error tone), never sent
- * to the model. Mirrors the source's `mcp.tsx` panel content but stripped
- * to a text-only listing — CCAGENT doesn't need a full TUI panel for it.
+ * MCP controls use native question cards and local commands, never an LLM.
  */
-export async function* handleMcpCommand(
-  args: string[],
-): AsyncGenerator<QueryEngineEvent, { handled: boolean }> {
-  const describeTransport = (config: ScopedMcpServerConfig): string => {
-    if (config.type === "http") return `http: ${config.url}`;
-    if (config.type === "sse") return `sse: ${config.url}`;
-    return `stdio: ${config.command} ${(config.args ?? []).join(" ")}`.trim();
-  };
-
-  const [sub, ...rest] = args;
-
-  if (!sub) {
-    const entries = getMcpRegistry();
-    if (entries.length === 0) {
-      yield {
-        type: "command",
-        kind: "info",
-        message:
-          "MCP Servers (0 configured)\n\n" +
-          "No MCP servers configured. Add them under \"mcpServers\" in:\n" +
-          "  ~/.ccagent/settings.json   (user-wide)\n" +
-          "  .ccagent/settings.json      (project-only)",
-      };
-      return { handled: true };
-    }
-    const lines = [`MCP Servers (${entries.length} configured)`, ""];
-    for (const { connection, tools } of entries) {
-      const transport = describeTransport(connection.config);
-      if (connection.type === "connected") {
-        lines.push(`  ✓ ${connection.name}    connected   ${tools.length} tool(s)   (${transport})`);
-      } else if (connection.type === "failed") {
-        lines.push(`  ✗ ${connection.name}    failed      ${connection.error}`);
-      } else if (connection.type === "pending") {
-        const elapsedSec = Math.floor((Date.now() - connection.startedAt) / 1000);
-        lines.push(`  … ${connection.name}    connecting  (${elapsedSec}s elapsed; ${transport})`);
-      } else {
-        lines.push(`  - ${connection.name}    disabled`);
-      }
-    }
-    lines.push("", "Subcommands: /mcp tools <name> | /mcp reconnect <name>");
-    yield { type: "command", kind: "info", message: lines.join("\n") };
-    return { handled: true };
-  }
-
-  if (sub === "tools") {
-    const target = rest[0];
-    if (!target) {
-      yield { type: "command", kind: "error", message: "Usage: /mcp tools <serverName>" };
-      return { handled: true };
-    }
-    const entry = getMcpRegistryEntry(target);
-    if (!entry) {
-      yield { type: "command", kind: "error", message: `MCP server '${target}' is not configured.` };
-      return { handled: true };
-    }
-    if (entry.connection.type !== "connected") {
-      yield {
-        type: "command",
-        kind: "error",
-        message: `MCP server '${target}' is ${entry.connection.type}; cannot list tools.`,
-      };
-      return { handled: true };
-    }
-    if (entry.tools.length === 0) {
-      yield {
-        type: "command",
-        kind: "info",
-        message: `MCP server '${target}' exposes no tools (server may not declare the 'tools' capability).`,
-      };
-      return { handled: true };
-    }
-    const lines = [`MCP tools from '${target}' (${entry.tools.length})`, ""];
-    for (const tool of entry.tools) {
-      const ro = tool.isReadOnly() ? "[ro]" : "    ";
-      const desc = tool.description.replace(/\s+/g, " ").trim();
-      const truncated = desc.length > 100 ? `${desc.slice(0, 100)}…` : desc;
-      lines.push(`  ${ro} ${tool.name}`);
-      if (truncated) lines.push(`        ${truncated}`);
-    }
-    yield { type: "command", kind: "info", message: lines.join("\n") };
-    return { handled: true };
-  }
-
-  if (sub === "reconnect") {
-    const target = rest[0];
-    if (!target) {
-      yield { type: "command", kind: "error", message: "Usage: /mcp reconnect <serverName>" };
-      return { handled: true };
-    }
-    const entry = getMcpRegistryEntry(target);
-    if (!entry) {
-      yield { type: "command", kind: "error", message: `MCP server '${target}' is not configured.` };
-      return { handled: true };
-    }
-    try {
-      const next = await reconnectMcpServer(target);
-      if (!next) {
-        yield { type: "command", kind: "error", message: `MCP server '${target}' was removed before reconnect completed.` };
-        return { handled: true };
-      }
-      if (next.type === "connected") {
-        const newEntry = getMcpRegistryEntry(target);
-        yield {
-          type: "command",
-          kind: "info",
-          message: `MCP server '${target}' reconnected (${newEntry?.tools.length ?? 0} tool(s)).`,
-        };
-      } else if (next.type === "failed") {
-        yield {
-          type: "command",
-          kind: "error",
-          message: `MCP server '${target}' reconnect failed: ${next.error}`,
-        };
-      } else {
-        yield {
-          type: "command",
-          kind: "info",
-          message: `MCP server '${target}' is currently disabled.`,
-        };
-      }
-    } catch (error) {
-      yield {
-        type: "command",
-        kind: "error",
-        message: `MCP server '${target}' reconnect threw: ${(error as Error).message}`,
-      };
-    }
-    return { handled: true };
-  }
-
-  yield {
-    type: "command",
-    kind: "error",
-    message: `Unknown /mcp subcommand: ${sub}. Try /mcp, /mcp tools <name>, or /mcp reconnect <name>.`,
-  };
-  return { handled: true };
-}
+export { handleMcpCommand } from "./mcp.js";

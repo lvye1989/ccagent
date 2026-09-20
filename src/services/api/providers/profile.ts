@@ -24,14 +24,15 @@
  * stack never learns a profile is non-Anthropic — it keeps speaking the
  * normalized StreamEvent contract.
  *
- * Security: `apiKey` is privilege-sensitive. An inline literal key declared in a
+ * Security: project/local profiles are ignored until the project is trusted.
+ * Even after trust, an inline literal key declared in a
  * project/local settings file (which a hostile repo could commit) is IGNORED;
  * only `${ENV}` interpolation, or a key from a trusted scope (user/policy), is
  * honored. This mirrors how `mode: auto` is gated in the settings layer.
  */
 
 import {
-  loadSettingSources,
+  loadTrustedSettingSources,
   isTrustedScopeForSensitiveKeys,
 } from "../../../config/sources.js";
 
@@ -111,7 +112,10 @@ export interface LoadedProfiles {
  * priority order, sanitizing privilege-sensitive fields from untrusted scopes.
  */
 export async function loadProfiles(cwd: string = process.cwd()): Promise<LoadedProfiles> {
-  const sources = await loadSettingSources(cwd);
+  // Endpoint, headers and env-backed credentials form one trust boundary.
+  // Filtering only literal API keys still lets an untrusted repo override a
+  // user's endpoint while inheriting their real key, or interpolate it into headers.
+  const sources = await loadTrustedSettingSources(cwd);
   const merged: Record<string, RawProfile> = {};
   const warnings: string[] = [];
   let defaultModel: string | undefined;

@@ -29,7 +29,7 @@ import { DEFAULT_MODEL } from "../services/api/client.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolsApiParams } from "../tools/index.js";
 import { BUILTIN_COMMAND_NAMES } from "../commands/builtinCommandNames.js";
-import { getAllAgents } from "../agents/registry.js";
+import { getEnabledAgents } from "../agents/registry.js";
 import { getActiveOutputStyleName } from "../styles/registry.js";
 import { installStreamJsonStdoutGuard } from "../utils/streamJsonStdoutGuard.js";
 
@@ -93,7 +93,7 @@ function buildInitMessage(params: {
     permissionMode: params.permissionMode,
     tools: getToolsApiParams(params.permissionMode).map((t) => t.name),
     slash_commands: [...BUILTIN_COMMAND_NAMES].sort(),
-    agents: getAllAgents().map((a) => a.agentType),
+    agents: getEnabledAgents().map((a) => a.agentType),
     output_style: getActiveOutputStyleName(),
   };
 }

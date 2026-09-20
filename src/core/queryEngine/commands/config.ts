@@ -7,6 +7,7 @@
  */
 
 import { loadSettingSources, type SettingSource } from "../../../config/sources.js";
+import { setAgentSkillsEnabled } from "../../../utils/agentSkillsEnabled.js";
 import {
   updateUserSettings,
   updateProjectSettings,
@@ -132,7 +133,14 @@ export async function* handleConfigCommand(
     }
 
     try {
-      if (scope === "project") await updateProjectSettings(cwd, { [key]: value });
+      if (key === "agentStates") {
+        throw new Error("Use /agents open <name> or /agents close <name> to update the user-wide agentStates preference live.");
+      } else if (key === "agentSkills") {
+        if (scope !== "user" || typeof value !== "boolean") {
+          throw new Error("agentSkills is a user-only boolean. Use /agent-skill open or /agent-skill close.");
+        }
+        await setAgentSkillsEnabled(value);
+      } else if (scope === "project") await updateProjectSettings(cwd, { [key]: value });
       else if (scope === "local") await updateLocalSettings(cwd, { [key]: value });
       else await updateUserSettings({ [key]: value });
       // Apply live: permission rules / mode are read fresh into the engine;

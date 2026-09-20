@@ -106,6 +106,7 @@ const PLAN_ALLOWED_TOOLS = new Set([
   "ListMcpResources",
   "ReadMcpResource",
   "ComputerObserve",
+  "RhinoObserve",
 ]);
 
 // Coordination-only tools — their side effects are confined to CCAGENT's
@@ -314,6 +315,16 @@ export function matchesPermissionRule(rule: string, toolName: string, input: Rec
     return trimmedPattern === skillName;
   }
 
+  // RhinoAction rules are action-scoped. A rule such as
+  // `RhinoAction(transform)` cannot authorize export or Grasshopper.
+  if (toolName === "RhinoAction") {
+    const action = typeof input.action === "string" ? input.action : "";
+    const trimmedPattern = pattern.trim();
+    return trimmedPattern.includes("*")
+      ? wildcardToRegExp(trimmedPattern).test(action)
+      : trimmedPattern === action;
+  }
+
   return false;
 }
 
@@ -425,6 +436,13 @@ export function summarizePermissionRequest(toolName: string, input: Record<strin
     const risk = typeof input.risk_category === "string" ? input.risk_category : "<missing>";
     return `action=${action}, risk=${risk}, intent=${intent}`;
   }
+  if (toolName === "RhinoAction") {
+    const action = typeof input.action === "string" ? input.action : "<unknown>";
+    const intent = typeof input.intent === "string" ? input.intent : "<missing>";
+    const p = input.parameters && typeof input.parameters === "object" ? input.parameters as Record<string,unknown> : {};
+    const detail = [p.operation ? `operation=${p.operation}` : "",p.definition_path ? `definition=${p.definition_path}` : "",p.file_path ? `file=${p.file_path}` : "",p.delete_inputs === true ? "delete_inputs=true" : ""].filter(Boolean).join(", ");
+    return `action=${action}${detail ? `, ${detail}` : ""}, intent=${intent}`;
+  }
   return summarizeInput(input);
 }
 
@@ -446,6 +464,10 @@ export function buildPermissionRuleHint(toolName: string, input: Record<string, 
     const action = typeof input.action === "string" ? input.action : "*";
     return `ComputerAction(${action})`;
   }
+  if (toolName === "RhinoAction") {
+    const action = typeof input.action === "string" ? input.action : "*";
+    return `RhinoAction(${action})`;
+  }
   return toolName;
 }
 
@@ -465,11 +487,28 @@ function getRiskLabel(tool: Tool, input: Record<string, unknown>): string {
     return "Low risk: read-only tool";
   }
 
-  if (tool.name === "ComputerAction") {
+  if (tool.name === "ComputerAction" || tool.name === "ComputerNavigate") {
     const category = typeof input.risk_category === "string" ? input.risk_category : "unknown";
+    if (tool.name === "ComputerNavigate") {
+      return "Medium risk: bounded Jev-controlled Windows navigation";
+    }
     return category === "ordinary"
       ? "Medium risk: controls a Windows application"
       : `High risk: Windows UI action category ${category} requires fresh confirmation`;
+  }
+
+  if (tool.name === "RhinoAction") {
+    const action = typeof input.action === "string" ? input.action : "unknown";
+    const parameters = input.parameters && typeof input.parameters === "object" && !Array.isArray(input.parameters)
+      ? input.parameters as Record<string, unknown>
+      : {};
+    const deletesInputs =
+      (action === "boolean" && parameters.delete_inputs !== false)
+      || parameters.delete_inputs === true || (action === "object_state" && parameters.operation === "delete") || (action === "layer_manage" && parameters.operation === "delete_empty");
+    const external = action === "run_grasshopper" || action === "import_export";
+    return deletesInputs || external
+      ? `High risk: Rhino ${action} can delete geometry, execute a third-party definition, or write/read an external file`
+      : `Medium risk: Rhino ${action} changes the active model inside an Undo Record`;
   }
 
   if (
@@ -676,6 +715,30 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     }
     if (category !== "ordinary") {
       return { behavior: "ask", reason: "high-impact Computer Use action requires fresh confirmation", request };
+    }
+  }
+
+  // Rhino has its own deterministic confirmation floor. Jev may route and
+  // validate ordinary structured geometry operations, but it cannot waive a
+  // confirmation for deleting source geometry, exporting/overwriting files,
+  // or running a third-party Grasshopper definition. This applies even in
+  // Full Mode and even when a persistent allow rule exists.
+  if (params.tool.name === "RhinoAction") {
+    const action = typeof params.input.action === "string" ? params.input.action : "unknown";
+    const parameters = params.input.parameters && typeof params.input.parameters === "object" && !Array.isArray(params.input.parameters)
+      ? params.input.parameters as Record<string, unknown>
+      : {};
+    const deletesInputs =
+      (action === "boolean" && parameters.delete_inputs !== false)
+      || parameters.delete_inputs === true || (action === "object_state" && parameters.operation === "delete") || (action === "layer_manage" && parameters.operation === "delete_empty");
+    const exportsFile = action === "import_export" && parameters.operation === "export";
+    const runsThirdParty = action === "run_grasshopper";
+    if (deletesInputs || exportsFile || runsThirdParty) {
+      return {
+        behavior: "ask",
+        reason: "Rhino deletion, export/overwrite, or third-party Grasshopper execution requires fresh confirmation",
+        request,
+      };
     }
   }
 

@@ -1,8 +1,8 @@
 /**
  * loadEnv — Multi-source environment variable loader.
  *
- * Loads env vars from the CCAGENT settings chain plus a dotenv file, with
- * increasing priority (later sources override earlier ones):
+ * Loads user configuration first. Project/local env and implicit cwd dotenv
+ * are read only after machine-level project trust has been established.
  *
  *   1. ~/.ccagent/settings.json            → user-scope `env` block
  *   2. <cwd>/.ccagent/settings.json        → project-scope `env` block
@@ -15,14 +15,15 @@
  * one canonical file so a globally installed command uses the same key while
  * running from different working directories.
  *
- * Note: the project/local `env` blocks come from repo files. This is the same
- * trust posture as the cwd `.env` file (which dotenv already auto-loads), so it
- * introduces no attack surface beyond what `.env` provides.
+ * A repository cannot select a different user home, trust store, canonical key
+ * file, Node loader or TLS policy through environment entries. An explicit
+ * shell/user CCAGENT_ENV_FILE still works from any working directory.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import dotenv from "dotenv";
+import { isProjectTrusted } from "../config/globalState.js";
 import {
   getUserSettingsPath,
   getProjectSettingsPath,
@@ -30,6 +31,23 @@ import {
 } from "./paths.js";
 
 const DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY";
+const IDENTITY_KEYS = new Set(["CCAGENT_HOME", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"]);
+const PROJECT_PROTECTED_KEYS = new Set([
+  ...IDENTITY_KEYS, "CCAGENT_ENV_FILE", "NODE_OPTIONS", "NODE_PATH",
+  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+]);
+const injected = new Map<string, { before: string | undefined; applied: string }>();
+
+function applyValues(values: Record<string, string>, projectOwned: boolean, allowEnvFile = false): void {
+  for (const [key, value] of Object.entries(values)) {
+    const upper = key.toUpperCase();
+    if (!value || IDENTITY_KEYS.has(upper) || (!allowEnvFile && upper === "CCAGENT_ENV_FILE") ||
+        (projectOwned && PROJECT_PROTECTED_KEYS.has(upper))) continue;
+    const previous = injected.get(key);
+    injected.set(key, { before: previous ? previous.before : process.env[key], applied: value });
+    process.env[key] = value;
+  }
+}
 
 function readJsonEnv(filePath: string): Record<string, string> {
   try {
@@ -56,31 +74,49 @@ function readJsonEnv(filePath: string): Record<string, string> {
   return {};
 }
 
-export function loadEnv(): void {
+export async function loadEnv(): Promise<void> {
   const cwd = process.cwd();
+
+  // Trust may change between loads (first-run consent or another cwd). Do not
+  // leave previously injected repository values active after revocation.
+  // Explicit changes made by the caller since the last load are preserved.
+  for (const [key, { before, applied }] of injected) {
+    if (process.env[key] !== applied) continue;
+    if (before === undefined) delete process.env[key]; else process.env[key] = before;
+  }
+  injected.clear();
 
   // Never inherit the DeepSeek key from the parent shell, Windows user env,
   // or a previously loaded settings source. The selected .env below is the
   // sole authority for this credential.
   delete process.env[DEEPSEEK_API_KEY];
 
-  // Settings `env` blocks, low → high priority (later wins).
-  Object.assign(process.env, readJsonEnv(getUserSettingsPath()));
-  Object.assign(process.env, readJsonEnv(getProjectSettingsPath(cwd)));
-  Object.assign(process.env, readJsonEnv(getLocalSettingsPath(cwd)));
+  const userSettingsPath = getUserSettingsPath();
+  const userEnv = readJsonEnv(userSettingsPath);
+  // Relative paths owned by user settings are relative to THAT file, not an
+  // arbitrary repository cwd. Shell-selected relative paths remain explicit.
+  if (userEnv.CCAGENT_ENV_FILE?.trim()) {
+    userEnv.CCAGENT_ENV_FILE = path.resolve(path.dirname(userSettingsPath), userEnv.CCAGENT_ENV_FILE.trim());
+  }
+  applyValues(userEnv, false, true);
+  // Pin the credential location BEFORE any project-owned data is considered.
+  const configuredEnvFile = process.env.CCAGENT_ENV_FILE?.trim();
+  const trusted = await isProjectTrusted(cwd);
+  if (trusted) {
+    applyValues(readJsonEnv(getProjectSettingsPath(cwd)), true);
+    applyValues(readJsonEnv(getLocalSettingsPath(cwd)), true);
+  }
 
   // The selected .env is the highest-priority source. Parse into an isolated
   // object first so empty template entries are ignored. For DeepSeek, an empty
   // value leaves the key unavailable rather than falling back to another path.
   // `quiet` suppresses dotenv's "injected env (N) from .env" tip banner so
   // the REPL opens on a clean welcome card instead of a stray log line.
-  const configuredEnvFile = process.env.CCAGENT_ENV_FILE?.trim();
+  if (!configuredEnvFile && !trusted) return;
   const envFile = configuredEnvFile
     ? path.resolve(cwd, configuredEnvFile)
     : path.join(cwd, ".env");
   const dotenvValues: Record<string, string> = {};
   dotenv.config({ path: envFile, processEnv: dotenvValues, override: true, quiet: true });
-  for (const [key, value] of Object.entries(dotenvValues)) {
-    if (value !== "") process.env[key] = value;
-  }
+  applyValues(dotenvValues, !configuredEnvFile);
 }

@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## What this project is
 
-CCAGENT is a **terminal-native agentic coding CLI** published as the `ccagent` npm package. It installs the `ccagent` command and the `ccagent` long alias.
+CCAGENT is a **terminal-native agentic coding CLI** packaged as `ccdagent` on npm. It installs the `ccagent` command.
 
 - Runtime: Node 22+, ESM, strict TS, target ES2022, JSX `react-jsx`
 - TUI: React 19 + Ink 7 (no web framework)
@@ -19,7 +19,7 @@ The code is organized into five broad layers:
 4. **Tooling** — file/shell/search/web/MCP/local tools with permissions and sandboxing (`src/tools/`, `src/permissions/`, `src/sandbox/`, `src/services/mcp/`)
 5. **Model communication** — provider profiles and streaming LLM I/O over `llm-bridge` (`src/services/api/`)
 
-The numbered roadmap is complete through **Stage 36**. The `ccagent` package is published on npm, and the post-publication registry cold check passes.
+The numbered roadmap is complete through **Stage 36**. Verify registry versions separately; a local build or repository push is not an npm publication.
 
 ## Commands (the non-obvious ones)
 

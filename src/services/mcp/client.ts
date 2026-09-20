@@ -10,8 +10,8 @@
  *   - SIGINT → SIGTERM → SIGKILL  cleanup escalation for stdio child procs
  *   - Promise.allSettled           — one server's failure doesn't kill the rest
  *
- * What we drop (out of scope for §16):
- *   - HTTP / SSE / WebSocket transports + OAuth + needs-auth cache
+ * What remains out of scope:
+ *   - WebSocket transport and arbitrary-provider OAuth
  *   - Roots reverse-RPC (Claude exposes cwd via file://; not needed yet)
  *   - Connection drop detection + auto-reconnect (consecutive error counter)
  *   - In-process transport for Chrome / Computer Use
@@ -21,6 +21,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { execFile } from "node:child_process";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   ConnectedMcpServer,
@@ -28,9 +29,13 @@ import type {
   McpSSEServerConfig,
   McpServerConnection,
   ScopedMcpServerConfig,
+  McpAuthOptions,
 } from "../../types/mcp.js";
 import { debugLog, logWarn } from "../../utils/log.js";
 import { CLIENT_NAME, USER_AGENT, VERSION } from "../../version.js";
+import { GoogleWorkspaceOAuthProvider } from "./googleOAuth.js";
+import { isMcpServerEnabled, loadMcpPreferences } from "./preferences.js";
+import { abortable } from "./cancellation.js";
 
 // ─── Connect timeout ─────────────────────────────────────────────────
 
@@ -60,6 +65,7 @@ function getCacheKey(name: string, config: ScopedMcpServerConfig): string {
       type: config.type,
       url: config.url,
       headers: config.headers,
+      oauth: config.type === "http" ? config.oauth : undefined,
       toolTimeoutMs: config.toolTimeoutMs,
     })}`;
   }
@@ -73,6 +79,7 @@ function getCacheKey(name: string, config: ScopedMcpServerConfig): string {
 }
 
 const connectionCache = new Map<string, Promise<McpServerConnection>>();
+const connectionControllers = new Map<string, AbortController>();
 
 /** Track active connections for shutdown cleanup. */
 const activeConnections = new Map<string, ConnectedMcpServer>();
@@ -93,6 +100,14 @@ function sleep(ms: number): Promise<void> {
  */
 async function escalatedKill(name: string, pid: number | undefined): Promise<void> {
   if (!pid) return;
+  if (process.platform === "win32") {
+    // npx may own a server grandchild. Killing only the wrapper leaves it alive.
+    await new Promise<void>((resolve) => {
+      execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"],
+        { windowsHide: true, timeout: 2_000 }, () => resolve());
+    });
+    return;
+  }
   const aliveCheck = (): boolean => {
     try {
       // signal 0 = "is the process still alive?"
@@ -137,21 +152,26 @@ async function escalatedKill(name: string, pid: number | undefined): Promise<voi
  * but are dropped from `activeConnections`, so a follow-up `/mcp reconnect`
  * still triggers a real retry by clearing the cache key first.
  */
-export function connectToServer(
+export async function connectToServer(
   name: string,
   config: ScopedMcpServerConfig,
+  options: McpAuthOptions = {},
 ): Promise<McpServerConnection> {
+  await loadMcpPreferences();
+  if (!isMcpServerEnabled(name, config)) return { name, type: "disabled", config };
   const key = getCacheKey(name, config);
   const cached = connectionCache.get(key);
-  if (cached) return cached;
+  if (cached && !connectionControllers.get(key)?.signal.aborted) return cached;
 
-  const promise = doConnect(name, config);
+  const controller = new AbortController();
+  connectionControllers.set(key, controller);
+  const promise = doConnect(name, config, controller, options);
   connectionCache.set(key, promise);
 
   // If the connection ultimately resolves to a `connected` server, register
   // it for shutdown cleanup. Failed/disabled placeholders don't need cleanup.
   void promise.then((conn) => {
-    if (conn.type === "connected") {
+    if (conn.type === "connected" && connectionCache.get(key) === promise && !controller.signal.aborted) {
       activeConnections.set(name, conn);
     }
   });
@@ -180,6 +200,9 @@ interface TransportBundle {
    * because the SDK's transport.close() already terminates the connection.
    */
   preCleanup: () => Promise<void>;
+  /** OAuth-aware request wrapper. Present only on authenticated HTTP transports. */
+  runWithAuth?<T>(operation: () => Promise<T>, options?: McpAuthOptions): Promise<T>;
+  handshakeCompleted?: () => void;
 }
 
 function createStdioTransport(
@@ -217,12 +240,18 @@ function createStdioTransport(
   };
 }
 
-function createHttpTransport(config: McpHTTPServerConfig & { scope: string }): TransportBundle {
-  // Match the source's StreamableHTTPClientTransport options: requestInit
-  // (headers + UA) flows into every POST. We DO NOT pass an authProvider;
-  // OAuth is §16.9 deferred. If the server returns 401 we surface it as a
-  // connection failure with the response body so users can fix their token.
+function createHttpTransport(config: McpHTTPServerConfig & { scope: string }, options: McpAuthOptions): TransportBundle {
+  const oauthProvider = config.oauth
+    ? new GoogleWorkspaceOAuthProvider(new URL(config.url).hostname, config.oauth)
+    : undefined;
   const transport = new StreamableHTTPClientTransport(new URL(config.url), {
+    ...(oauthProvider ? { authProvider: oauthProvider } : {}),
+    // The SDK also uses this fetch for OAuth metadata/token requests. Closing
+    // only the MCP stream would otherwise leave those HTTP requests running.
+    fetch: (input, init) => fetch(input, {
+      ...init,
+      signal: AbortSignal.any([options.signal, init?.signal].filter((s): s is AbortSignal => !!s)),
+    }),
     requestInit: {
       headers: {
         "User-Agent": USER_AGENT,
@@ -230,11 +259,26 @@ function createHttpTransport(config: McpHTTPServerConfig & { scope: string }): T
       },
     },
   });
+  // initialize can itself challenge OAuth. Wrap sends only during the handshake;
+  // afterwards requests are wrapped as a whole (otherwise the serial queue deadlocks).
+  const send = transport.send.bind(transport);
+  if (oauthProvider) {
+    transport.send = (message, sendOptions) => {
+      // Restore BEFORE calling send: SDK token-refresh retries call this.send
+      // recursively and must not enter the same serialized OAuth queue twice.
+      transport.send = send;
+      return oauthProvider.runWithAuth(transport, () => send(message, sendOptions), options);
+    };
+  }
   return {
     transport,
     describe: `http: ${config.url}`,
     collectStderrTail: () => "",
-    preCleanup: async () => { /* http: client.close() handles it */ },
+    preCleanup: async () => { await oauthProvider?.cancel(); },
+    handshakeCompleted: () => { transport.send = send; },
+    ...(oauthProvider
+      ? { runWithAuth: <T>(operation: () => Promise<T>, authOptions?: McpAuthOptions) => oauthProvider.runWithAuth(transport, operation, authOptions) }
+      : {}),
   };
 }
 
@@ -276,6 +320,8 @@ function createSseTransport(config: McpSSEServerConfig & { scope: string }): Tra
 async function doConnect(
   name: string,
   config: ScopedMcpServerConfig,
+  controller: AbortController,
+  options: McpAuthOptions,
 ): Promise<McpServerConnection> {
   const summary =
     config.type === "http" || config.type === "sse"
@@ -286,7 +332,7 @@ async function doConnect(
   let bundle: TransportBundle;
   try {
     if (config.type === "http") {
-      bundle = createHttpTransport(config);
+      bundle = createHttpTransport(config, { ...options, signal: controller.signal });
     } else if (config.type === "sse") {
       bundle = createSseTransport(config);
     } else {
@@ -310,8 +356,25 @@ async function doConnect(
     },
   );
 
-  const connectPromise = client.connect(bundle.transport);
-  const timeoutMs = getConnectTimeoutMs();
+  let cleaned = false;
+  let cleaning: Promise<void> | undefined;
+  const cleanup = (): Promise<void> => {
+    if (cleaned) return cleaning ?? Promise.resolve();
+    cleaned = true;
+    controller.signal.removeEventListener("abort", onAbort);
+    controller.abort(new Error(`MCP server '${name}' closed`));
+    if (activeConnections.get(name)?.client === client) activeConnections.delete(name);
+    cleaning = (async () => {
+      await bundle.preCleanup();
+      await client.close().catch(() => undefined);
+    })();
+    return cleaning;
+  };
+  const onAbort = (): void => { void cleanup().catch(() => undefined); };
+  controller.signal.addEventListener("abort", onAbort, { once: true });
+  const timeoutMs = options.interactive && config.type === "http" && config.oauth
+    ? 5 * 60_000 + getConnectTimeoutMs() : getConnectTimeoutMs();
+  const connectPromise = client.connect(bundle.transport, { timeout: timeoutMs, signal: controller.signal });
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -321,21 +384,20 @@ async function doConnect(
   });
 
   try {
-    await Promise.race([connectPromise, timeoutPromise]);
+    await abortable(Promise.race([connectPromise, timeoutPromise]), controller.signal);
   } catch (error) {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     const errMsg = (error as Error).message;
     const stderrTail = bundle.collectStderrTail();
     const detail = stderrTail ? `${errMsg} (stderr: ${stderrTail.slice(0, 200).trim()})` : errMsg;
-    logWarn(`MCP server '${name}' failed to connect: ${detail}`);
-    try {
-      await bundle.transport.close();
-    } catch {
-      /* best-effort */
-    }
+    const cancelled = controller.signal.aborted;
+    if (!cancelled) logWarn(`MCP server '${name}' failed to connect: ${detail}`);
+    await cleanup();
+    if (cancelled) return { name, type: "disabled", config };
     return { name, type: "failed", config, error: detail };
   }
   if (timeoutHandle) clearTimeout(timeoutHandle);
+  bundle.handshakeCompleted?.();
 
   const capabilities = client.getServerCapabilities();
   const serverVersion = client.getServerVersion();
@@ -348,24 +410,6 @@ async function doConnect(
     })})`,
   );
 
-  let cleaned = false;
-  const cleanup = async (): Promise<void> => {
-    if (cleaned) return;
-    cleaned = true;
-    // A stale connection can finish after a newer generation has already
-    // connected under the same name. Never let cleanup of the stale instance
-    // unregister the newer one.
-    if (activeConnections.get(name)?.client === client) {
-      activeConnections.delete(name);
-    }
-    await bundle.preCleanup();
-    try {
-      await client.close();
-    } catch (error) {
-      debugLog("mcp", `[${name}] client.close error: ${(error as Error).message}`);
-    }
-  };
-
   return {
     name,
     type: "connected",
@@ -373,6 +417,8 @@ async function doConnect(
     capabilities,
     serverInfo: serverVersion ? { name: serverVersion.name ?? name, version: serverVersion.version ?? "?" } : undefined,
     config,
+    signal: controller.signal,
+    ...(bundle.runWithAuth ? { runWithAuth: bundle.runWithAuth } : {}),
     cleanup,
   };
 }
@@ -390,8 +436,11 @@ export async function clearServerCache(
   const key = getCacheKey(name, config);
   const pending = connectionCache.get(key);
   connectionCache.delete(key);
+  const controller = connectionControllers.get(key);
+  connectionControllers.delete(key);
+  controller?.abort(new Error(`MCP server '${name}' closed`));
   const existing = activeConnections.get(name);
-  if (existing) {
+  if (existing && getCacheKey(name, existing.config) === key) {
     if (activeConnections.get(name) === existing) activeConnections.delete(name);
     try {
       await existing.cleanup();
@@ -431,6 +480,8 @@ export function registerMcpProcessCleanup(): void {
   cleanupRegistered = true;
 
   const runCleanup = async (): Promise<void> => {
+    for (const controller of connectionControllers.values()) controller.abort(new Error("MCP shutdown"));
+    connectionControllers.clear();
     const conns = Array.from(activeConnections.values());
     activeConnections.clear();
     await Promise.allSettled(conns.map((c) => c.cleanup()));
@@ -464,6 +515,8 @@ export function getActiveMcpConnections(): readonly ConnectedMcpServer[] {
  * `clearServerCache(name, config)` per server.
  */
 export function _resetMcpClientForTesting(): void {
+  for (const controller of connectionControllers.values()) controller.abort(new Error("MCP test reset"));
+  connectionControllers.clear();
   connectionCache.clear();
   activeConnections.clear();
 }

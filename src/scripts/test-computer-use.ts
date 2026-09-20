@@ -8,15 +8,23 @@ import { getAllTools } from "../tools/index.js";
 import { toolResultText } from "../tools/Tool.js";
 import {
   computerActionTool,
+  computerNavigateTool,
   computerObserveTool,
   prohibitedWindowReason,
   validateComputerKey,
 } from "../tools/computerUseTools.js";
 import { listComputerWindows } from "../tools/computerUseBackend.js";
+import {
+  COMPUTER_USE_INDICATOR_SUBTITLE,
+  COMPUTER_USE_INDICATOR_TITLE,
+  computerUseIndicatorPowerShell,
+  getComputerUseIndicatorConfig,
+} from "../tools/computerUseIndicator.js";
 import { checkPermission, type PermissionSettings } from "../permissions/permissions.js";
 import { loadEnv } from "../utils/loadEnv.js";
 import {
   buildComputerUseJevRequest,
+  buildComputerNavigationJevRequest,
   interpretComputerUseJevResponse,
 } from "../tools/computerUseJev.js";
 import {
@@ -143,11 +151,12 @@ async function findTestWindow(titleHint: string): Promise<Awaited<ReturnType<typ
 }
 
 async function main(): Promise<void> {
-  loadEnv();
+  await loadEnv();
   console.log("\n[1] Registry and safety policy");
   const names = new Set(getAllTools().map((tool) => tool.name));
   assert(names.has("ComputerObserve") === (process.platform === "win32"), "ComputerObserve Windows registration");
   assert(names.has("ComputerAction") === (process.platform === "win32"), "ComputerAction Windows registration");
+  assert(names.has("ComputerNavigate") === (process.platform === "win32"), "ComputerNavigate Windows registration");
   assert(
     prohibitedWindowReason({ id: "1", processId: 1, processName: "WindowsTerminal", title: "Terminal" }) !== null,
     "terminal windows are prohibited",
@@ -159,7 +168,20 @@ async function main(): Promise<void> {
   assert(validateComputerKey("Windows+r") !== null, "Windows-key shortcuts are prohibited");
   assert(validateComputerKey("Control_L+a") === null, "ordinary keyboard chords are accepted");
 
-  console.log("\n[2] Permission floor");
+  console.log("\n[2] Visible control indicator");
+  const defaultIndicator = getComputerUseIndicatorConfig({});
+  const disabledIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR: "off" });
+  const customIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_HOLD_MS: "1200" });
+  const invalidIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_HOLD_MS: "99999" });
+  const indicatorSource = computerUseIndicatorPowerShell();
+  assert(defaultIndicator.enabled && defaultIndicator.holdMs === 650, "control indicator is enabled by default with a visible hold time");
+  assert(!disabledIndicator.enabled, "headless users can explicitly disable the control indicator");
+  assert(customIndicator.holdMs === 1200 && invalidIndicator.holdMs === 650, "indicator duration is configurable only within safe bounds");
+  assert(indicatorSource.includes(COMPUTER_USE_INDICATOR_TITLE) && indicatorSource.includes(COMPUTER_USE_INDICATOR_SUBTITLE), "overlay includes an explicit AI-control warning");
+  assert(indicatorSource.includes("WS_EX_NOACTIVATE") && indicatorSource.includes("WS_EX_TRANSPARENT"), "overlay does not steal focus or block user input");
+  assert(indicatorSource.includes("CCAgentCursorBadge") && indicatorSource.includes("DrawPolygon"), "overlay draws a highlighted mouse-pointer badge");
+
+  console.log("\n[3] Permission floor");
   const cwd = process.cwd();
   const observePlan = await checkPermission({
     tool: computerObserveTool,
@@ -196,8 +218,15 @@ async function main(): Promise<void> {
     settings: settings("full"),
   });
   assert(passwordFull.behavior === "deny", "password changes require user hand-off");
+  const navigateDefault = await checkPermission({
+    tool: computerNavigateTool,
+    input: { goal: "Find slide 8", stop_condition: "Slide 8 is visible" },
+    cwd,
+    settings: settings("default"),
+  });
+  assert(navigateDefault.behavior === "ask", "bounded multi-step navigation asks in default mode");
 
-  console.log("\n[3] Jev + LLM Computer Use decision gate");
+  console.log("\n[4] Jev + LLM Computer Use decision gate");
   const jevRequest = buildComputerUseJevRequest({
     userGoal: "Attach the selected drawing to an external message.",
     window: {
@@ -212,6 +241,21 @@ async function main(): Promise<void> {
   });
   assert(Boolean(jevRequest.questions.disposition && jevRequest.questions.risk_category), "Jev request batches disposition and risk questions");
   assert(JSON.stringify(jevRequest).includes("untrusted observations"), "Jev state marks screen content as untrusted");
+  const navigationRequest = buildComputerNavigationJevRequest({
+    userGoal: "Find slide 8",
+    goal: "Find slide 8",
+    stopCondition: "Slide 8 is visible",
+    allowedActions: ["page_up", "page_down"],
+    completedSteps: ["page_up"],
+    window: { processName: "powerpnt", title: "Deck", focusedElement: "Slide", width: 1200, height: 800 },
+    elements: [],
+    perception: "Slide 10 is currently visible.",
+  });
+  const navigationChoices = navigationRequest.questions.next_step?.type === "choice"
+    ? Object.keys(navigationRequest.questions.next_step.criteria)
+    : [];
+  assert(navigationChoices.includes("page_up") && !navigationChoices.includes("escape"), "bounded navigation exposes only the caller's allowed actions");
+  assert(!JSON.stringify(computerNavigateTool.inputSchema).includes("type_text"), "bounded navigation cannot type or click");
   let capturedJevBody: Record<string, unknown> = {};
   const mockedJev = await callOpenRouterJev(jevRequest, {
     apiKey: "openrouter-test-key",
@@ -295,9 +339,9 @@ async function main(): Promise<void> {
   assert(jevAutoAllow.behavior === "allow", "Auto Mode consumes Jev decision without a second LLM classifier call");
 
   if (process.platform !== "win32" || process.env.LIVE_COMPUTER_USE !== "1") {
-    console.log("\n[4] Live Windows observation skipped (set LIVE_COMPUTER_USE=1)");
+    console.log("\n[5] Live Windows observation skipped (set LIVE_COMPUTER_USE=1)");
   } else {
-    console.log("\n[4] Live observe → act → observe loop");
+    console.log("\n[5] Live observe → act → observe loop");
     const launched = await launchTestWindow();
     try {
       const window = await findTestWindow(launched.titleHint);

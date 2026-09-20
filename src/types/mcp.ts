@@ -7,8 +7,8 @@
  * claudeai-proxy). CCAGENT supports the three that cover the public MCP
  * ecosystem: `stdio` (local subprocess), `http` (Streamable HTTP), and `sse`
  * (legacy SSE-only servers). WebSocket / IDE / SDK / Claude.ai proxy stay
- * out of scope (§16.9). OAuth is also deferred — remote servers can still
- * pass static `headers` (e.g. a bearer token) for simple authenticated use.
+ * out of scope. Streamable HTTP additionally supports Google OAuth for the
+ * official Google Workspace remote MCP suite.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
@@ -22,6 +22,7 @@ import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
  * config as stdio.
  */
 export interface McpStdioServerConfig {
+  enabled?: boolean;
   type?: "stdio";
   command: string;
   args?: string[];
@@ -33,16 +34,29 @@ export interface McpStdioServerConfig {
 /**
  * Streamable HTTP MCP server (the recommended remote transport).
  *
- * Equivalent to source's `McpHTTPServerConfigSchema`. We intentionally don't
- * accept the source's `oauth` / `headersHelper` fields — for CCAGENT §16,
- * `headers` (a static string→string map) is enough to support bearer-token
- * APIs like `Authorization: Bearer <token>`.
+ * Equivalent to source's `McpHTTPServerConfigSchema`. Static `headers` support
+ * bearer-token APIs, while `oauth` enables the official Google Workspace MCP
+ * browser flow without placing credentials in settings.json.
  */
 export interface McpHTTPServerConfig {
+  enabled?: boolean;
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /** Browser OAuth used by Google's official Workspace MCP servers. */
+  oauth?: McpGoogleOAuthConfig;
   toolTimeoutMs?: number;
+}
+
+/**
+ * OAuth credentials stay environment-backed. `clientIdEnv` and
+ * `clientSecretEnv` are variable NAMES, never the credential values.
+ */
+export interface McpGoogleOAuthConfig {
+  provider: "google";
+  clientIdEnv: string;
+  clientSecretEnv: string;
+  redirectUri: string;
 }
 
 /**
@@ -52,6 +66,7 @@ export interface McpHTTPServerConfig {
  * server→client messages and POSTs each client→server JSON-RPC envelope.
  */
 export interface McpSSEServerConfig {
+  enabled?: boolean;
   type: "sse";
   url: string;
   headers?: Record<string, string>;
@@ -82,7 +97,18 @@ export interface ConnectedMcpServer {
   capabilities: ServerCapabilities | undefined;
   serverInfo?: { name: string; version: string };
   config: ScopedMcpServerConfig;
+  /** Serialize OAuth challenges, complete browser consent, then retry once. */
+  runWithAuth?<T>(operation: () => Promise<T>, options?: McpAuthOptions): Promise<T>;
+  /** Invalidates even tool adapters captured before Close/reconnect. */
+  signal?: AbortSignal;
+  discoveryError?: string;
   cleanup: () => Promise<void>;
+}
+
+export interface McpAuthOptions {
+  /** Only an explicit /mcp auth command may open a browser. */
+  interactive?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface FailedMcpServer {

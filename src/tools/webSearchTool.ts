@@ -5,6 +5,7 @@ import {
   type SearchProvider,
   type SearchResult,
 } from "./webSearch/adapters.js";
+import { rerankSearchResultsWithJev } from "../services/jev/searchReranker.js";
 
 /**
  * WebSearch — direct built-in web search.
@@ -28,17 +29,19 @@ function formatResults(
   results: SearchResult[],
   provider: string,
   fallbackFrom?: string,
+  jevSummary?: string,
 ): string {
   const providerLine = `Provider: ${provider}${fallbackFrom ? ` (fallback from ${fallbackFrom})` : ""}`;
+  const rankingLine = jevSummary ? `\nRanking: ${jevSummary}` : "";
   if (results.length === 0) {
-    return `Web search results for "${query}":\n${providerLine}\n\nNo results found.`;
+    return `Web search results for "${query}":\n${providerLine}${rankingLine}\n\nNo results found.`;
   }
   const lines = results.map((result) => {
     const base = `  - [${result.title}](${result.url})`;
     return result.snippet ? `${base}: ${result.snippet}` : base;
   });
   return (
-    `Web search results for "${query}":\n${providerLine}\n\nLinks:\n${lines.join("\n")}\n\n` +
+    `Web search results for "${query}":\n${providerLine}${rankingLine}\n\nLinks:\n${lines.join("\n")}\n\n` +
     "REMINDER: cite the sources above as markdown links when you use them."
   );
 }
@@ -130,12 +133,14 @@ export const webSearchTool: Tool = {
         const results = await candidate.search(input.query, searchOptions);
         hadSuccessfulSearch = true;
         if (results.length > 0) {
+          const ranked = await rerankSearchResultsWithJev(input.query, results, context.abortSignal);
           return {
             content: formatResults(
               input.query,
-              results,
+              ranked.results,
               candidate.name,
               candidate.name === adapter.name ? undefined : adapter.name,
+              ranked.summary,
             ),
           };
         }

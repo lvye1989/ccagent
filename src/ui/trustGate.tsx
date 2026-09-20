@@ -24,6 +24,8 @@ export async function detectRisks(cwd: string): Promise<string[]> {
     if (raw["hooks"] && typeof raw["hooks"] === "object") risks.add("lifecycle hooks (run shell commands)");
     if (raw["statusLine"]) risks.add("a custom status line command");
     if (raw["mcpServers"] && typeof raw["mcpServers"] === "object") risks.add("MCP servers");
+    if (raw["models"]) risks.add("model provider endpoints (can receive API credentials and conversation data)");
+    if (raw["env"]) risks.add("project environment variables (loaded only after trust)");
     if (
       raw["enabledPlugins"] &&
       typeof raw["enabledPlugins"] === "object" &&

@@ -7,7 +7,7 @@
  */
 
 import { loadEnv } from "../src/utils/loadEnv.js";
-loadEnv();
+await loadEnv();
 
 import {
   checkPermission,

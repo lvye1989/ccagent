@@ -63,6 +63,10 @@ export const SettingsSchema = z.looseObject({
   autoMode: z.boolean().optional(),
   // User-facing Agent Teams switch. Unset means enabled by default.
   agentTeams: z.boolean().optional(),
+  // User-wide Skills switch. Unset means open; manage with /agent-skill.
+  agentSkills: z.boolean().optional(),
+  // Per-definition user preference; absent names remain Open.
+  agentStates: z.record(z.string(), z.enum(["open", "close"])).optional(),
   allow: z.array(PermissionRule).optional(),
   deny: z.array(PermissionRule).optional(),
   ask: z.array(PermissionRule).optional(),
@@ -70,6 +74,8 @@ export const SettingsSchema = z.looseObject({
   env: z.record(z.string(), z.coerce.string()).optional(),
   hooks: z.record(z.string(), z.unknown()).optional(),
   mcpServers: z.record(z.string(), z.unknown()).optional(),
+  // User-wide per-server overrides; project files cannot change this preference.
+  mcpServerStates: z.record(z.string(), z.enum(["open", "close"])).optional(),
   statusLine: z.union([z.string(), z.looseObject({})]).optional(),
   outputStyle: z.string().trim().min(1).optional(),
   language: z.string().trim().min(1).optional(),

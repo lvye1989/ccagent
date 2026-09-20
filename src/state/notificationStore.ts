@@ -27,6 +27,8 @@
  *   be keyed by session id; until then a single global queue is fine.
  */
 
+import { isAgentEnabled, onAgentStatesChanged } from "../agents/preferences.js";
+
 export interface PendingNotification {
   /** Discriminator for future modes (compaction reminder, plan summary, ...). */
   mode: "task-notification" | "workfriend-notification";
@@ -77,21 +79,30 @@ export function enqueuePendingNotification(
  * surface a "you have N pending notifications" hint in the UI).
  */
 export function peekPendingNotifications(): readonly PendingNotification[] {
-  return queue;
+  return queue.filter(isDeliverable);
 }
 
+function isDeliverable(notification: PendingNotification): boolean {
+  return notification.mode !== "workfriend-notification" || isAgentEnabled("workfriend");
+}
+
+// Resume held Workfriend notifications on Open without losing task completions on Close.
+onAgentStatesChanged(() => { if (isAgentEnabled("workfriend")) notifyListeners(); });
+
 /**
- * Atomically take all queued notifications and clear the queue. The
+ * Atomically take deliverable notifications, retaining closed Workfriend reminders. The
  * caller MUST inject every returned entry into the conversation — there
  * is no way to put them back.
  */
 export function drainPendingNotifications(): PendingNotification[] {
-  const out = queue.splice(0, queue.length);
+  const out = queue.filter(isDeliverable);
+  const held = queue.filter((item) => !isDeliverable(item));
+  queue.splice(0, queue.length, ...held);
   return out;
 }
 
 export function pendingNotificationCount(): number {
-  return queue.length;
+  return queue.filter(isDeliverable).length;
 }
 
 /** Drop everything — used by tests and `/clear`. */

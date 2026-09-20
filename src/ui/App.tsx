@@ -111,21 +111,14 @@ export function App({ model, permissionMode, shouldResume, resumeSessionId }: Ap
   // model reads a *.test.ts file) appear in the suggestion list without
   // the user having to restart. Computing inline is fine — the registry
   // is an in-memory Map and we only render on existing state changes.
-  const skillCommands: CommandSuggestion[] = React.useMemo(
-    () =>
-      getAllUserInvocableSkills().map((skill) => ({
-        name: `/${skill.name}`,
-        tag: "skill",
-        description:
-          skill.description.length > 80
-            ? `${skill.description.slice(0, 77)}…`
-            : skill.description,
-      })),
-    // Re-derive whenever the message log grows — that's our cheap proxy
-    // for "something happened that may have activated a skill". The list
-    // is tiny so the cost is negligible.
-    [state.messages.length, state.toolCalls.length],
-  );
+  const skillCommands: CommandSuggestion[] = getAllUserInvocableSkills().map((skill) => ({
+    name: `/${skill.name}`,
+    tag: "skill",
+    description:
+      skill.description.length > 80
+        ? `${skill.description.slice(0, 77)}…`
+        : skill.description,
+  }));
 
   // Stage 23: user-defined `/<name>` commands. Loaded once at startup so
   // a stable dependency array is fine here.

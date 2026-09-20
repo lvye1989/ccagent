@@ -48,6 +48,12 @@ async function main(): Promise<void> {
   section("[1] Profile resolution (env interpolation, defaultModel, secret guard)");
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ea-mp-"));
+  // Provider profiles now require explicit project trust. Keep that consent in
+  // a disposable user store, never in the developer's real trust database.
+  const previousHome = process.env.CCAGENT_HOME;
+  process.env.CCAGENT_HOME = path.join(tmp, "user");
+  const { trustProject, resetGlobalStateCache } = await import("../src/config/globalState.js");
+  resetGlobalStateCache();
   const projDir = path.join(tmp, "proj");
   await fs.mkdir(path.join(projDir, ".ccagent"), { recursive: true });
 
@@ -80,12 +86,12 @@ async function main(): Promise<void> {
           leaky: {
             protocol: "gemini",
             model: "gemini-2.5-pro",
-            apiKey: "sk-inline-should-be-ignored",
+            apiKey: "sk-fixture-inline-should-be-ignored",
           },
           leakyFallback: {
             protocol: "openai-chat",
             model: "gpt-test",
-            apiKey: "${MP_MISSING_KEY:-sk-inline-should-also-be-ignored}",
+            apiKey: "${MP_MISSING_KEY:-sk-fixture-inline-should-also-be-ignored}",
           },
         },
       },
@@ -96,6 +102,7 @@ async function main(): Promise<void> {
 
   const { loadProfiles, resolveProfile } = await import("../src/services/api/providers/profile.js");
 
+  await trustProject(projDir);
   const loaded = await loadProfiles(projDir);
   assert(loaded.defaultModel === "gpt5", "defaultModel read from project settings");
   assert(loaded.profiles.gpt5?.apiKey === "sk-from-env-123", "${ENV} apiKey interpolated");
@@ -689,6 +696,9 @@ async function main(): Promise<void> {
     assert(!modelSupportsAdaptiveThinking("claude-opus-4-5"), "Opus 4.5 remains on budget thinking");
   }
 
+  if (previousHome === undefined) delete process.env.CCAGENT_HOME;
+  else process.env.CCAGENT_HOME = previousHome;
+  resetGlobalStateCache();
   await fs.rm(tmp, { recursive: true, force: true });
 
   console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass} passed, ${fail} failed`);

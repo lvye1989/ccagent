@@ -15,11 +15,15 @@ import {
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { MAX_IMAGE_BYTES } from "./imageUtils.js";
 import {
+  COMPUTER_NAVIGATION_ACTIONS,
   COMPUTER_USE_RISK_CATEGORIES,
+  decideComputerNavigationWithJev,
   decideComputerUseWithJev,
+  type ComputerNavigationAction,
   type ComputerUseJevDecision,
   type ComputerUseRiskCategory,
 } from "./computerUseJev.js";
+import { prependTextToContent } from "./contentBlocks.js";
 import {
   listComputerWindows,
   observeComputerWindow,
@@ -30,7 +34,7 @@ import {
   type ComputerWindow,
 } from "./computerUseBackend.js";
 
-export const COMPUTER_USE_TOOL_NAMES = ["ComputerObserve", "ComputerAction"] as const;
+export const COMPUTER_USE_TOOL_NAMES = ["ComputerObserve", "ComputerAction", "ComputerNavigate"] as const;
 
 export type ComputerRiskCategory = ComputerUseRiskCategory;
 
@@ -69,6 +73,17 @@ interface ActionInput {
   scroll_x?: number;
   scroll_y?: number;
   duration_ms?: number;
+  image_delivery?: "auto" | "inline" | "text_only";
+  perception?: "auto" | "on" | "off";
+}
+
+interface NavigateInput {
+  window_id: string;
+  snapshot_id: string;
+  goal: string;
+  stop_condition: string;
+  allowed_actions?: ComputerNavigationAction[];
+  max_steps?: number;
   image_delivery?: "auto" | "inline" | "text_only";
   perception?: "auto" | "on" | "off";
 }
@@ -304,9 +319,11 @@ async function buildObservationResult(
   const observation = snapshot.observation;
   let text = formatObservationText(snapshot.id, observation);
   const perceptionMode = input.perception ?? "auto";
-  let perception = "";
+  let perception = snapshot.perception || "";
   let perceptionError = "";
-  if (perceptionMode !== "off") {
+  if (perception) {
+    text += "\n\nPerception model (cached for this snapshot):\n" + perception;
+  } else if (perceptionMode !== "off") {
     try {
       const profile = await resolvePerceptionProfile(context.cwd);
       if (profile) {
@@ -570,6 +587,78 @@ function buildAction(input: ActionInput, snapshot: StoredSnapshot): ComputerActi
   }
 }
 
+function navigationActionInput(action: ComputerNavigationAction, snapshot: StoredSnapshot): ActionInput {
+  const base = {
+    window_id: snapshot.observation.window.id,
+    snapshot_id: snapshot.id,
+    intent: `Bounded Jev navigation step: ${action}`,
+    risk_category: "ordinary" as const,
+  };
+  switch (action) {
+    case "escape":
+      return { ...base, action: "press_key", key: "Escape" };
+    case "page_up":
+      return { ...base, action: "press_key", key: "PageUp" };
+    case "page_down":
+      return { ...base, action: "press_key", key: "PageDown" };
+    case "home":
+      return { ...base, action: "press_key", key: "Home" };
+    case "end":
+      return { ...base, action: "press_key", key: "End" };
+    case "scroll_up":
+      return {
+        ...base,
+        action: "scroll",
+        x: Math.floor(snapshot.observation.width / 2),
+        y: Math.floor(snapshot.observation.height / 2),
+        scroll_x: 0,
+        scroll_y: -600,
+      };
+    case "scroll_down":
+      return {
+        ...base,
+        action: "scroll",
+        x: Math.floor(snapshot.observation.width / 2),
+        y: Math.floor(snapshot.observation.height / 2),
+        scroll_x: 0,
+        scroll_y: 600,
+      };
+    case "wait":
+      return { ...base, action: "wait", duration_ms: 750 };
+  }
+}
+
+function navigationState(
+  snapshot: StoredSnapshot,
+  input: NavigateInput,
+  allowedActions: ComputerNavigationAction[],
+  completedSteps: ComputerNavigationAction[],
+) {
+  const observation = snapshot.observation;
+  return {
+    userGoal: input.goal,
+    goal: input.goal,
+    stopCondition: input.stop_condition,
+    allowedActions,
+    completedSteps,
+    window: {
+      processName: observation.window.processName,
+      title: concise(observation.window.title, 240),
+      focusedElement: concise(observation.focusedElement || "unknown", 240),
+      width: observation.width,
+      height: observation.height,
+    },
+    elements: observation.elements.slice(0, 120).map((element) => ({
+      index: element.index,
+      controlType: concise(element.controlType || "Element", 80),
+      name: concise(element.name || "", 180),
+      enabled: element.enabled !== false,
+      focused: element.focused === true,
+    })),
+    ...(snapshot.perception ? { perception: snapshot.perception.slice(0, 4_000) } : {}),
+  };
+}
+
 export const computerObserveTool: Tool = {
   name: "ComputerObserve",
   description:
@@ -719,6 +808,145 @@ export const computerActionTool: Tool = {
           "Error: " +
           (error instanceof Error ? error.message : String(error)) +
           " Action outcome may be unknown; call ComputerObserve again before retrying.",
+        isError: true,
+      };
+    }
+  },
+  isReadOnly(): boolean {
+    return false;
+  },
+  isEnabled(): boolean {
+    return process.platform === "win32";
+  },
+};
+
+export const computerNavigateTool: Tool = {
+  name: "ComputerNavigate",
+  description:
+    "Run a bounded Jev-controlled navigation loop on the latest Windows snapshot. Each step re-observes the exact window and Jev chooses only from explicitly allowed harmless navigation actions: Escape, PageUp/PageDown, Home/End, bounded scroll, or wait. The loop stops on success, ambiguity, risk, injection, window mismatch, Jev failure, or the step limit. It cannot click, type text, submit, upload, delete, install, or change accounts. Use ComputerAction for every non-navigation action.",
+  inputSchema: {
+    type: "object" as const,
+    properties: {
+      window_id: { type: "string", description: "Exact target id from ComputerObserve." },
+      snapshot_id: { type: "string", description: "Latest snapshot_id for this exact window." },
+      goal: { type: "string", description: "Narrow navigation goal using only user-authorized intent." },
+      stop_condition: { type: "string", description: "Visible condition that means navigation is complete." },
+      allowed_actions: {
+        type: "array",
+        items: { type: "string", enum: [...COMPUTER_NAVIGATION_ACTIONS] },
+        maxItems: 8,
+        description: "Optional subset of harmless navigation actions Jev may choose.",
+      },
+      max_steps: { type: "integer", minimum: 1, maximum: 5, description: "Maximum input actions; default 3." },
+      perception: { type: "string", enum: ["auto", "on", "off"], description: "Qwen perception mode for refreshed observations." },
+      image_delivery: { type: "string", enum: ["auto", "inline", "text_only"], description: "Final screenshot delivery mode." },
+    },
+    required: ["window_id", "snapshot_id", "goal", "stop_condition"],
+  },
+  async call(rawInput: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const input = rawInput as unknown as NavigateInput;
+    const key = snapshotKey(context, input.window_id || "");
+    let snapshot = snapshots.get(key);
+    try {
+      if (!input.goal?.trim() || input.goal.length > 1_000) throw new Error("goal must be 1-1000 characters.");
+      if (!input.stop_condition?.trim() || input.stop_condition.length > 1_000) {
+        throw new Error("stop_condition must be 1-1000 characters.");
+      }
+      const maxSteps = input.max_steps ?? 3;
+      if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 5) {
+        throw new Error("max_steps must be an integer from 1 to 5.");
+      }
+      const requested = input.allowed_actions?.length
+        ? [...new Set(input.allowed_actions)]
+        : [...COMPUTER_NAVIGATION_ACTIONS];
+      if (requested.length === 0 || requested.some((action) => !(COMPUTER_NAVIGATION_ACTIONS as readonly string[]).includes(action))) {
+        throw new Error("allowed_actions contains an unsupported navigation action.");
+      }
+      const allowedActions = requested as ComputerNavigationAction[];
+      if (!snapshot || snapshot.id !== input.snapshot_id) {
+        throw new Error("snapshot_id is missing, stale, or belongs to another window. Re-observe before navigating.");
+      }
+      if (Date.now() - snapshot.createdAt > SNAPSHOT_TTL_MS) {
+        throw new Error("snapshot_id expired. Re-observe before navigating.");
+      }
+
+      const completedSteps: ComputerNavigationAction[] = [];
+      const trace: string[] = [];
+      let stopReason = "step_limit";
+      let isError = true;
+
+      // The extra decision after maxSteps verifies whether the final action met
+      // the stop condition, but can never execute a sixth action.
+      for (let decisionIndex = 0; decisionIndex <= maxSteps; decisionIndex++) {
+        const decision = await decideComputerNavigationWithJev(
+          navigationState(snapshot, input, allowedActions, completedSteps),
+          context.abortSignal,
+        );
+        trace.push(`decision ${decisionIndex + 1}: ${decision.summary}`);
+        if (!decision.available) {
+          stopReason = "jev_unavailable";
+          break;
+        }
+        if (decision.nextStep === "stop_success") {
+          stopReason = "goal_reached";
+          isError = false;
+          break;
+        }
+        if (decision.nextStep === "ask_user" || !decision.nextStep) {
+          stopReason = "needs_main_llm_or_user";
+          break;
+        }
+        if (completedSteps.length >= maxSteps) {
+          stopReason = "step_limit";
+          break;
+        }
+
+        const window = await selectWindow(input.window_id, context.abortSignal);
+        if (
+          window.processId !== snapshot.observation.window.processId ||
+          window.processName !== snapshot.observation.window.processName
+        ) {
+          throw new Error("The window handle now belongs to a different process. Re-list windows.");
+        }
+        const action = buildAction(navigationActionInput(decision.nextStep, snapshot), snapshot);
+        snapshots.delete(key);
+        await performComputerAction(
+          window,
+          action,
+          { width: snapshot.observation.nativeWidth, height: snapshot.observation.nativeHeight },
+          context.abortSignal,
+        );
+        completedSteps.push(decision.nextStep);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        snapshot = await observeAndStore(window, context);
+        await buildObservationResult(
+          snapshot,
+          { perception: input.perception ?? "auto", image_delivery: "text_only" },
+          context,
+        );
+      }
+
+      const finalObservation = await buildObservationResult(
+        snapshot,
+        { perception: input.perception ?? "auto", image_delivery: input.image_delivery ?? "auto" },
+        context,
+      );
+      return {
+        content: prependTextToContent(
+          finalObservation.content,
+          [
+            "[Jev bounded ComputerNavigate]",
+            `stop_reason=${stopReason}, steps=${completedSteps.length}/${maxSteps}, actions=${completedSteps.join(",") || "none"}`,
+            ...trace,
+            "",
+          ].join("\n"),
+        ),
+        ...(isError ? { isError: true } : {}),
+      };
+    } catch (error) {
+      if (snapshot) snapshots.delete(key);
+      return {
+        content: `ComputerNavigate stopped: ${error instanceof Error ? error.message : String(error)} No further input was sent after the failure; call ComputerObserve again before retrying.`,
         isError: true,
       };
     }

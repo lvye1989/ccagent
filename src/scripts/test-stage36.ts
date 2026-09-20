@@ -201,6 +201,11 @@ try {
     "dist/ccagent.js",
     "dist/ccagent.js.map",
     "package.json",
+    "rhino/TOOLKIT.md",
+    "rhino/ccagent_grasshopper.py",
+    "rhino/ccagent_rhino_architecture.py",
+    "rhino/ccagent_rhino_runner.py",
+    "rhino/ccagent_rhino_toolkit.py",
   ];
   const packedFiles = dryRun?.[0]?.files.map((file) => file.path).sort() ?? [];
   assert(JSON.stringify(packedFiles) === JSON.stringify(expectedFiles), "tarball contains only release files", packedFiles.join(", "));

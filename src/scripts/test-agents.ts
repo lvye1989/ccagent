@@ -68,7 +68,7 @@ async function withTempProject(
 async function main(): Promise<void> {
   console.log("\n[1] Built-in agent definitions");
   const builtIns = getBuiltInAgents();
-  assert(builtIns.length === 3, "exactly 3 built-in agents (general-purpose, Explore, workfriend)");
+  assert(builtIns.length === 4, "exactly 4 built-in agents (general-purpose, Explore, workfriend, rhino_agent)");
   assert(
     builtIns.some((a) => a.agentType === "general-purpose"),
     "general-purpose agent is built-in",
@@ -86,6 +86,16 @@ async function main(): Promise<void> {
   assert(
     (workfriend?.getSystemPrompt() ?? "").includes("never exceeds 10 card questions"),
     "workfriend prompt enforces the questionnaire limit",
+  );
+  const rhinoAgent = builtIns.find((a) => a.agentType === "rhino_agent");
+  assert(!!rhinoAgent, "rhino_agent is built-in");
+  assert(
+    rhinoAgent?.tools?.join(",") === "RhinoObserve,RhinoInspect,RhinoAction,RhinoSequence,ComputerObserve,ComputerAction,ComputerNavigate",
+    "rhino_agent combines RhinoCommon tools with bounded Computer Use",
+  );
+  assert(
+    (rhinoAgent?.getSystemPrompt() ?? "").includes("Never call Bash or PowerShell"),
+    "rhino_agent prompt forbids arbitrary shell-driven Rhino commands",
   );
   const explore = builtIns.find((a) => a.agentType === "Explore");
   assert(
@@ -207,7 +217,7 @@ async function main(): Promise<void> {
     );
 
     const result = await bootstrapAgents(cwd);
-    assert(result.builtInCount === 3, "bootstrap reports 3 built-ins");
+    assert(result.builtInCount === 4, "bootstrap reports 4 built-ins");
     assert(
       result.customCount === 2,
       "bootstrap reports 2 valid custom agents (reviewer + Explore override)",

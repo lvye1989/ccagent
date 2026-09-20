@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+  computerUseIndicatorPowerShell,
+  getComputerUseIndicatorConfig,
+} from "./computerUseIndicator.js";
 
 export interface ComputerWindow {
   id: string;
@@ -101,51 +105,62 @@ async function runPowerShell(
   if (signal?.aborted) throw new Error("Computer Use operation aborted before it started.");
   const executable = process.env.CCAGENT_POWERSHELL?.trim() || "powershell.exe";
   const encoded = Buffer.from(script, "utf16le").toString("base64");
-  return await new Promise<string>((resolve, reject) => {
-    const child = spawn(
-      executable,
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-      {
+  let scriptDir: string | undefined;
+  let args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded];
+  // CreateProcess has a much smaller command-line ceiling than the payloads
+  // accepted by PowerShell. The visual control overlay contains embedded C#,
+  // so transport long scripts through a private temporary file instead.
+  if (encoded.length > 20_000) {
+    scriptDir = await mkdtemp(path.join(os.tmpdir(), "ccagent-computer-script-"));
+    const scriptPath = path.join(scriptDir, "run.ps1");
+    await writeFile(scriptPath, "\uFEFF" + script, { encoding: "utf8", mode: 0o600 });
+    args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath];
+  }
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const child = spawn(executable, args, {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, ...env },
-      },
-    );
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error) reject(error);
-      else resolve(stdout.trim());
-    };
-    const onAbort = () => {
-      child.kill();
-      finish(new Error("Computer Use operation aborted. Re-observe before retrying."));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error("Computer Use operation timed out. Its outcome is unknown; re-observe before retrying."));
-    }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk.toString();
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      };
+      const onAbort = () => {
+        child.kill();
+        finish(new Error("Computer Use operation aborted. Re-observe before retrying."));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(new Error("Computer Use operation timed out. Its outcome is unknown; re-observe before retrying."));
+      }, timeoutMs);
+      child.stdout.on("data", (chunk: Buffer | string) => {
+        if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk: Buffer | string) => {
+        if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk.toString();
+      });
+      child.on("error", (error) => finish(new Error("Failed to start Computer Use backend: " + error.message)));
+      child.on("close", (code) => {
+        if ((code ?? 1) !== 0) {
+          finish(new Error("Computer Use backend exited with code " + (code ?? -1) + ": " + (stderr.trim() || stdout.trim())));
+        } else {
+          finish();
+        }
+      });
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk.toString();
-    });
-    child.on("error", (error) => finish(new Error("Failed to start Computer Use backend: " + error.message)));
-    child.on("close", (code) => {
-      if ((code ?? 1) !== 0) {
-        finish(new Error("Computer Use backend exited with code " + (code ?? -1) + ": " + (stderr.trim() || stdout.trim())));
-      } else {
-        finish();
-      }
-    });
-  });
+  } finally {
+    if (scriptDir) await rm(scriptDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function parseJsonOutput<T>(output: string): T {
@@ -318,6 +333,10 @@ function actionScript(): string {
     powershellHeader(),
     "Add-Type -AssemblyName System.Windows.Forms",
     nativePreamble(),
+    "$indicatorEnabled = $env:CC_INDICATOR_ENABLED -eq '1'",
+    "if ($indicatorEnabled) {",
+    computerUseIndicatorPowerShell(),
+    "}",
     "$handle = [IntPtr][long]$env:CC_WINDOW_ID",
     "if (-not [CCAgentComputerNative]::IsWindow($handle)) { throw 'Target window no longer exists.' }",
     "$input = ConvertFrom-Json $env:CC_ACTION_INPUT",
@@ -358,7 +377,10 @@ function actionScript(): string {
     "if (-not [CCAgentComputerNative]::GetWindowRect($handle, [ref]$rect)) { throw 'Could not read target window bounds.' }",
     "$currentWidth = $rect.Right - $rect.Left; $currentHeight = $rect.Bottom - $rect.Top",
     "if ($currentWidth -ne [int]$env:CC_EXPECTED_WIDTH -or $currentHeight -ne [int]$env:CC_EXPECTED_HEIGHT) { throw 'Target window size changed after the snapshot; no input was sent. Re-observe before retrying.' }",
-    "function Move-Cursor([int]$x, [int]$y) { [void][CCAgentComputerNative]::SetCursorPos($rect.Left + $x, $rect.Top + $y) }",
+    "function Move-Cursor([int]$x, [int]$y, [int]$indicatorPauseMs = 90) {",
+    "  [void][CCAgentComputerNative]::SetCursorPos($rect.Left + $x, $rect.Top + $y)",
+    "  if ($indicatorEnabled) { [CCAgentControlOverlay]::UpdateCursor(); if ($indicatorPauseMs -gt 0) { [CCAgentControlOverlay]::Pump($indicatorPauseMs) } }",
+    "}",
     "function Send-MouseClick([string]$button, [int]$count) {",
     "  $down = [uint32]0x0002; $up = [uint32]0x0004",
     "  if ($button -eq 'right') { $down = 0x0008; $up = 0x0010 }",
@@ -406,20 +428,27 @@ function actionScript(): string {
     "  }",
     "  Start-Sleep -Milliseconds 60",
     "}",
-    "switch ([string]$input.action) {",
-    "  'activate' {}",
-    "  'click' { Move-Cursor ([int]$input.x) ([int]$input.y); Send-MouseClick ([string]$input.button) ([int]$input.clickCount) }",
-    "  'type_text' { [System.Windows.Forms.SendKeys]::SendWait((Escape-SendKeys ([string]$input.text))) }",
-    "  'press_key' { Send-KeyChordNative ([string]$input.key) }",
-    "  'scroll' { Move-Cursor ([int]$input.x) ([int]$input.y); [CCAgentComputerNative]::mouse_event(0x0800,0,0,-[int]$input.scrollY,[UIntPtr]::Zero); if ([int]$input.scrollX -ne 0) { [CCAgentComputerNative]::mouse_event(0x01000,0,0,[int]$input.scrollX,[UIntPtr]::Zero) } }",
-    "  'drag' {",
-    "    Move-Cursor ([int]$input.fromX) ([int]$input.fromY); [CCAgentComputerNative]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero)",
-    "    for ($i = 1; $i -le 20; $i++) { $x = [int]([double]$input.fromX + (([double]$input.toX - [double]$input.fromX) * $i / 20)); $y = [int]([double]$input.fromY + (([double]$input.toY - [double]$input.fromY) * $i / 20)); Move-Cursor $x $y; Start-Sleep -Milliseconds 12 }",
-    "    [CCAgentComputerNative]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)",
+    "$indicatorVisible = $false",
+    "try {",
+    "  if ($indicatorEnabled) { [CCAgentControlOverlay]::Show($env:CC_TARGET_LABEL); $indicatorVisible = $true; [CCAgentControlOverlay]::Pump(160) }",
+    "  switch ([string]$input.action) {",
+    "    'activate' {}",
+    "    'click' { Move-Cursor ([int]$input.x) ([int]$input.y); Send-MouseClick ([string]$input.button) ([int]$input.clickCount) }",
+    "    'type_text' { [System.Windows.Forms.SendKeys]::SendWait((Escape-SendKeys ([string]$input.text))) }",
+    "    'press_key' { Send-KeyChordNative ([string]$input.key) }",
+    "    'scroll' { Move-Cursor ([int]$input.x) ([int]$input.y); [CCAgentComputerNative]::mouse_event(0x0800,0,0,-[int]$input.scrollY,[UIntPtr]::Zero); if ([int]$input.scrollX -ne 0) { [CCAgentComputerNative]::mouse_event(0x01000,0,0,[int]$input.scrollX,[UIntPtr]::Zero) } }",
+    "    'drag' {",
+    "      Move-Cursor ([int]$input.fromX) ([int]$input.fromY); [CCAgentComputerNative]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero)",
+    "      for ($i = 1; $i -le 20; $i++) { $x = [int]([double]$input.fromX + (([double]$input.toX - [double]$input.fromX) * $i / 20)); $y = [int]([double]$input.fromY + (([double]$input.toY - [double]$input.fromY) * $i / 20)); Move-Cursor $x $y 0; Start-Sleep -Milliseconds 12 }",
+    "      [CCAgentComputerNative]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero)",
+    "    }",
+    "    'set_value' { Move-Cursor ([int]$input.x) ([int]$input.y); Send-MouseClick 'left' 1; Send-KeyChordNative 'Control+a'; [System.Windows.Forms.SendKeys]::SendWait((Escape-SendKeys ([string]$input.text))) }",
+    "    'wait' { if ($indicatorEnabled) { [CCAgentControlOverlay]::Pump([int]$input.durationMs) } else { Start-Sleep -Milliseconds ([int]$input.durationMs) } }",
+    "    default { throw ('Unsupported Computer Use action: ' + [string]$input.action) }",
     "  }",
-    "  'set_value' { Move-Cursor ([int]$input.x) ([int]$input.y); Send-MouseClick 'left' 1; Send-KeyChordNative 'Control+a'; [System.Windows.Forms.SendKeys]::SendWait((Escape-SendKeys ([string]$input.text))) }",
-    "  'wait' { Start-Sleep -Milliseconds ([int]$input.durationMs) }",
-    "  default { throw ('Unsupported Computer Use action: ' + [string]$input.action) }",
+    "  if ($indicatorVisible) { [CCAgentControlOverlay]::Pump([int]$env:CC_INDICATOR_HOLD_MS) }",
+    "} finally {",
+    "  if ($indicatorVisible) { [CCAgentControlOverlay]::Hide() }",
     "}",
     "[pscustomobject]@{ ok = $true } | ConvertTo-Json -Compress",
   ].join("\n");
@@ -431,6 +460,7 @@ export async function performComputerAction(
   expectedSize: { width: number; height: number },
   signal?: AbortSignal,
 ): Promise<void> {
+  const indicator = getComputerUseIndicatorConfig();
   await runPowerShell(
     actionScript(),
     {
@@ -438,6 +468,9 @@ export async function performComputerAction(
       CC_ACTION_INPUT: JSON.stringify(action),
       CC_EXPECTED_WIDTH: String(expectedSize.width),
       CC_EXPECTED_HEIGHT: String(expectedSize.height),
+      CC_INDICATOR_ENABLED: indicator.enabled ? "1" : "0",
+      CC_INDICATOR_HOLD_MS: String(indicator.holdMs),
+      CC_TARGET_LABEL: window.processName.slice(0, 80),
     },
     signal,
     action.action === "wait" ? Math.max(DEFAULT_TIMEOUT_MS, action.durationMs + 5_000) : DEFAULT_TIMEOUT_MS,

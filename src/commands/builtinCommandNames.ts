@@ -47,6 +47,7 @@ export const BUILTIN_COMMAND_NAMES = new Set<string>([
   "init",
   "workfriend",
   "agent-team",
+  "agent-skill",
   "exit",
   "quit",
   "bye",
