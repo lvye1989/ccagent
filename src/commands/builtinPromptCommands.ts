@@ -87,9 +87,22 @@ Follow this sequence exactly:
 
 Use a warm, capable colleague tone. Do not diagnose mental-health conditions, shame productivity, or overstate what is known.`;
 
+const AGENT_TEAM_PROMPT = `Manage the user's Agent Teams preference.
+
+Follow this sequence exactly:
+1. If the command has no explicit Open or Close argument, call AskUserQuestion once with exactly one question. Use header "Agent Team" and provide exactly these two options:
+   - Open — Enable Agent Teams and expose TeamCreate, SendMessage, and TeamDelete.
+   - Close — Disable Agent Teams and hide its coordination tools.
+2. If the command explicitly includes "open" or "close", use that action directly and do not ask the question again.
+3. Call AgentTeamMode with state "open" or "close" matching the user's choice.
+4. Report the tool result concisely. Do not create or delete a team as part of this settings command.
+
+The choice is a user-level preference. Never infer Close from unrelated text, and never claim success unless AgentTeamMode succeeds.`;
+
 const PROMPTS: Record<string, string> = {
   init: INIT_PROMPT,
   workfriend: WORKFRIEND_PROMPT,
+  "agent-team": AGENT_TEAM_PROMPT,
 };
 
 /**

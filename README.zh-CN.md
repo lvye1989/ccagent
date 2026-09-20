@@ -169,6 +169,7 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 ```json
 {
   "defaultModel": "deepseek",
+  "agentTeams": true,
   "models": {
     "deepseek": {
       "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
@@ -245,6 +246,12 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 
 回访时，Workfriend 会结合当前会话上下文询问进度、瓶颈和问题，并提供不超过 10 道的针对性选择题卡片；回答后会给出有优先级的优化建议和基于实际情况的鼓励。最后可选择导出为可编辑的 `.docx` 或由 Qwen 生成的 `.wav`。Word 交付无需额外依赖；语音交付会把最终文本发送到 DashScope，需要配置 `DASHSCOPE_API_KEY`（或 `QWEN_API_KEY`）。
 
+### Agent Teams 默认状态与开关
+
+Agent Teams 现在默认处于 Open 状态，无需启动参数即可使用 `TeamCreate`、`SendMessage` 和 `TeamDelete`。在 REPL 中运行 `/agent-team`，即可通过交互卡片选择 **Open** 或 **Close**；也可以直接运行 `/agent-team open` 或 `/agent-team close`。选择会立即生效，并以 `agentTeams` 字段持久化到 `~/.ccagent/settings.json`。
+
+如果当前仍有活动团队，CCAGENT 会拒绝 Close，避免遗留仍在运行的队友；请先结束队友并执行 `TeamDelete`。如需仅覆盖当前进程，仍兼容 `--agent-teams`、`--no-agent-teams` 以及旧的 `CCAGENT_TEAMS=1|0` 环境变量，它们的优先级高于已保存设置。
+
 ### Windows Computer Use
 
 `ComputerObserve` 与 `ComputerAction` 在 Windows 上提供内置、非 MCP 的桌面控制闭环：
@@ -273,6 +280,7 @@ ccagent --permission-mode full  # 跳过权限引擎提示与 allow/deny 规则
 ccagent --resume                # 恢复最近一次会话
 ccagent --resume <session-id>   # 恢复指定会话
 # 进入 CCAGENT 后运行 /workfriend，启动每日工作回访
+# 进入 CCAGENT 后运行 /agent-team，选择 Open 或 Close
 ccagent -p "总结这个仓库"                         # Headless 文本输出
 ccagent -p "列出可用工具" --output-format json   # 机器可读输出
 git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Prompt
@@ -292,6 +300,7 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 | `/plugin`、`/marketplace` | 安装和管理插件 |
 | `/memory` | 检查或编辑项目记忆 |
 | `/workfriend` | 启动内置工作/心情问询和持久化的下班前回访 |
+| `/agent-team [open\|close]` | 开启或关闭 Agent Teams；不带参数时显示交互选择卡片 |
 
 ## 核心能力
 

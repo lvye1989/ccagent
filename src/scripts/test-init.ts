@@ -121,6 +121,7 @@ try {
   assert(env.QWEN_PROTOCOL === "openai-chat", "Qwen defaults to the verified Chat Completions protocol");
   assert(env.QWEN_TTS_MODEL === "qwen-audio-3.1-tts-flash" && env.QWEN_TTS_VOICE === "longanhuan_v3.1", "init writes Workfriend Qwen TTS defaults");
   assert((settings.env as Record<string, unknown>).CCAGENT_ENV_FILE === envPath, "settings point at the current user's canonical dotenv file");
+  assert(settings.agentTeams === true, "init enables Agent Teams for a new user by default");
   assert(testedDeepseek && testedQwen, "both configured providers are connection-tested");
   assert(!firstOutput.text().includes("deep-test-key") && !firstOutput.text().includes("qwen-test-key"), "command output does not reveal API keys");
 

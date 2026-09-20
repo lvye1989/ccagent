@@ -285,7 +285,7 @@ export const agentTool: Tool = {
       if (!isAgentTeamsEnabled()) {
         return {
           content:
-            "Error: Agent Teams feature is not enabled. Drop `name` / `team_name`, or restart with --agent-teams (or set CCAGENT_TEAMS=1).",
+            "Error: Agent Teams is closed. Drop `name` / `team_name`, or run /agent-team and choose Open.",
           isError: true,
         };
       }

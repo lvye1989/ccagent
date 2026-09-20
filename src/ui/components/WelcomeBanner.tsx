@@ -87,13 +87,13 @@ export function WelcomeBanner({ model, version, permissionMode }: WelcomeBannerP
           <Text color={theme.muted}>{"cwd    "}</Text>
           <Text>{prettyCwd()}</Text>
         </Box>
-        {isAgentTeamsEnabled() ? (
-          <Box>
-            <Text color={theme.muted}>{"teams  "}</Text>
-            <Text color={theme.brandLight}>enabled</Text>
-            <Text color={theme.muted}>{"  (TeamCreate · SendMessage · TeamDelete)"}</Text>
-          </Box>
-        ) : null}
+        <Box>
+          <Text color={theme.muted}>{"teams  "}</Text>
+          <Text color={isAgentTeamsEnabled() ? theme.brandLight : theme.muted}>
+            {isAgentTeamsEnabled() ? "enabled" : "disabled"}
+          </Text>
+          <Text color={theme.muted}>{"  (/agent-team)"}</Text>
+        </Box>
       </Box>
 
       <Box marginTop={1} flexDirection="column">

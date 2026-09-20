@@ -113,6 +113,7 @@ const COORDINATION_TOOLS = new Set([
   "TeamCreate",
   "TeamDelete",
   "SendMessage",
+  "AgentTeamMode",
 ]);
 
 function isCoordinationTool(toolName: string): boolean {

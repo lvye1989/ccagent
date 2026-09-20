@@ -65,9 +65,8 @@ Options:
                               Without it, -p denies such calls by default.
   --settings <path>           Load an external settings.json as the flag layer
                               (inline --model / --permission-mode still win)
-  --agent-teams               Enable Agent Teams (TeamCreate / TeamDelete /
-                              SendMessage tools). Equivalent
-                              to setting CCAGENT_TEAMS=1.
+  --agent-teams               Force Agent Teams on for this process
+  --no-agent-teams            Force Agent Teams off for this process
   --dump-system-prompt        Print the assembled system prompt and exit
 
 Commands (in REPL):
@@ -87,6 +86,7 @@ Commands (in REPL):
   /hooks                      Show configured lifecycle hooks
   /history                    Show session history
   /workfriend                 Start the built-in work companion and daily check-in
+  /agent-team [open|close]    Open or close Agent Teams (interactive if omitted)
 
 Extensions (Markdown + frontmatter):
   Output styles: ~/.ccagent/output-styles/<name>.md (default/Explanatory/Learning built-in)
@@ -99,12 +99,13 @@ Sub-agents:
   Frontmatter: name, description, tools, disallowedTools, model, maxTurns,
                permissionMode, isolation. The Markdown body is the system prompt.
 
-Agent Teams (requires --agent-teams or CCAGENT_TEAMS=1):
+Agent Teams (enabled by default; manage with /agent-team):
   TeamCreate({ team_name })                  Start a team-coordinated session
   Agent({ name, team_name, run_in_background: true, ... })  Spawn a named teammate
   SendMessage({ to, message, summary })      Drop a message in a teammate's inbox
   TeamDelete()                               Disband the active team
-  Disabled by default; the model never sees the team tools when off.
+  The model never sees the team tools when closed. The preference is stored
+  as "agentTeams" in ~/.ccagent/settings.json.
 
 Hooks (user-defined shell scripts on lifecycle events):
   Configure in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json:
@@ -132,6 +133,7 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   respectGitignore: false        Let Glob/Grep search files .gitignore would hide (default: true)
   syntaxHighlightingDisabled: true   Render code blocks as plain text (no ANSI colors)
   prefersReducedMotion: true     Calm, static spinner (no animation) for reduced-motion users
+  agentTeams: false              Close Agent Teams (default: true; /agent-team)
   claudeMdExcludes: ["**/AGENT.md"]  Glob/abs-path list of AGENT.md files to skip loading
   enableAllProjectMcpServers: true   Auto-approve every server in <cwd>/.mcp.json (trusted folder)
   enabledMcpjsonServers: ["name"]    Approve specific .mcp.json servers
@@ -205,6 +207,13 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   if (model) flagSettings.model = model;
   if (permissionMode) flagSettings.mode = permissionMode;
   setFlagSettings(flagSettings);
+
+  // Agent Teams defaults to open. Load the persisted user preference before
+  // any system prompt or tool list is assembled so frame 1 is consistent.
+  const { bootstrapAgentTeams } = await import("../utils/agentTeamsEnabled.js");
+  await bootstrapAgentTeams().catch((error) => {
+    console.error(`[ccagent] Agent Teams preference ignored: ${(error as Error).message}`);
+  });
   const resumeIndex = process.argv.indexOf("--resume");
   const resumeValue = resumeIndex !== -1 ? process.argv[resumeIndex + 1] : undefined;
   const resumeSessionId = resumeIndex !== -1 && resumeValue && !resumeValue.startsWith("--") ? resumeValue : null;

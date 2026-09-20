@@ -60,6 +60,8 @@ export const SettingsSchema = z.looseObject({
   // it is SECURITY-SENSITIVE and only honored from trusted scopes (user / flag
   // / policy) — never from a checked-in project/local settings file.
   autoMode: z.boolean().optional(),
+  // User-facing Agent Teams switch. Unset means enabled by default.
+  agentTeams: z.boolean().optional(),
   allow: z.array(PermissionRule).optional(),
   deny: z.array(PermissionRule).optional(),
   ask: z.array(PermissionRule).optional(),

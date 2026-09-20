@@ -173,6 +173,7 @@ CCAGENT also supports named Anthropic, OpenAI-compatible, Gemini, and local prof
 ```json
 {
   "defaultModel": "deepseek",
+  "agentTeams": true,
   "models": {
     "deepseek": {
       "protocol": "${DEEPSEEK_PROTOCOL:-openai-responses}",
@@ -253,6 +254,12 @@ Run `/workfriend` in the interactive REPL to start the built-in work companion. 
 
 At check-in, Workfriend uses the current conversation context, asks about progress and bottlenecks, and presents at most 10 focused multiple-choice questions. It responds with prioritized suggestions and grounded encouragement. You then choose an editable `.docx` or a Qwen-generated `.wav`. Word delivery is dependency-free; voice delivery sends the final text to DashScope and requires `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`).
 
+### Agent Teams default and switch
+
+Agent Teams is open by default, so `TeamCreate`, `SendMessage`, and `TeamDelete` are available without a startup flag. Run `/agent-team` to choose **Open** or **Close** in an interactive card. You can also run `/agent-team open` or `/agent-team close` directly. The choice is applied immediately and persisted as `agentTeams` in `~/.ccagent/settings.json`.
+
+CCAGENT refuses to close Agent Teams while a team is active; finish the teammates and run `TeamDelete` first. For one-process overrides, `--agent-teams`, `--no-agent-teams`, and the legacy `CCAGENT_TEAMS=1|0` variable remain supported and take precedence over the saved preference.
+
 ### Windows Computer Use
 
 `ComputerObserve` and `ComputerAction` provide a built-in, non-MCP desktop-control loop on Windows:
@@ -281,6 +288,7 @@ ccagent --permission-mode full  # bypass permission-engine prompts and rules
 ccagent --resume                # resume the latest session
 ccagent --resume <session-id>   # resume a specific session
 # inside CCAGENT: /workfriend   # start a daily work check-in
+# inside CCAGENT: /agent-team   # choose Open or Close for Agent Teams
 ccagent -p "summarize this repo"                 # headless text output
 ccagent -p "list the tools" --output-format json # machine-readable output
 git diff | ccagent -p "review this patch"         # combine stdin and a prompt
@@ -300,6 +308,7 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 | `/plugin`, `/marketplace` | Install and manage plugins |
 | `/memory` | Inspect or edit project memory |
 | `/workfriend` | Start the built-in work/mood check-in and persistent end-of-day companion |
+| `/agent-team [open\|close]` | Open or close Agent Teams; no argument shows an interactive choice |
 
 ## Capabilities
 

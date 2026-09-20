@@ -39,7 +39,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { isAgentTeamsEnabled } from "../utils/agentTeamsEnabled.js";
+import {
+  isAgentTeamsEnabled,
+  setAgentTeamsUserPreference,
+} from "../utils/agentTeamsEnabled.js";
 import {
   addTeamMember,
   cleanupTeamDirectory,
@@ -141,8 +144,7 @@ async function withTeamsFlag<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const prevEnv = process.env["CCAGENT_TEAMS"];
-  if (enabled) process.env["CCAGENT_TEAMS"] = "1";
-  else delete process.env["CCAGENT_TEAMS"];
+  process.env["CCAGENT_TEAMS"] = enabled ? "1" : "0";
   try {
     return await fn();
   } finally {
@@ -166,11 +168,17 @@ async function main(): Promise<void> {
   // same result.
   clearActiveTeam();
 
-  // ─── [1] Feature flag ──────────────────────────────────────────
-  console.log("\n[1] Feature flag — CCAGENT_TEAMS + --agent-teams");
+  // ─── [1] Default state + overrides ─────────────────────────────
+  console.log("\n[1] Default state + CCAGENT_TEAMS + CLI overrides");
+
+  setAgentTeamsUserPreference(undefined);
+  const initialEnv = process.env["CCAGENT_TEAMS"];
+  delete process.env["CCAGENT_TEAMS"];
+  assert(isAgentTeamsEnabled() === true, "feature on by default");
+  if (initialEnv !== undefined) process.env["CCAGENT_TEAMS"] = initialEnv;
 
   await withTeamsFlag(false, async () => {
-    assert(isAgentTeamsEnabled() === false, "feature off when no env / no flag");
+    assert(isAgentTeamsEnabled() === false, "feature off when CCAGENT_TEAMS=0");
   });
 
   await withTeamsFlag(true, async () => {
@@ -184,6 +192,12 @@ async function main(): Promise<void> {
       isAgentTeamsEnabled() === true,
       "feature on when --agent-teams in argv",
     );
+  });
+  process.argv.pop();
+
+  process.argv.push("--no-agent-teams");
+  await withTeamsFlag(true, async () => {
+    assert(isAgentTeamsEnabled() === false, "feature off when --no-agent-teams is present");
   });
   process.argv.pop();
 
@@ -647,8 +661,8 @@ async function main(): Promise<void> {
       );
       assert(out.isError === true, "AgentTool refuses name when flag off");
       assert(
-        toolResultText(out.content).includes("not enabled"),
-        "error mentions feature is not enabled",
+        toolResultText(out.content).includes("closed"),
+        "error explains that Agent Teams is closed",
       );
     });
 

@@ -215,6 +215,7 @@ export function buildUserSettings(
     ...existing,
     env,
     language: input.language,
+    agentTeams: typeof existing.agentTeams === "boolean" ? existing.agentTeams : true,
     defaultModel:
       typeof existing.defaultModel === "string" && existing.defaultModel.trim()
         ? existing.defaultModel
