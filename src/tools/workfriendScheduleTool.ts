@@ -40,6 +40,10 @@ export const workfriendScheduleTool: Tool = {
         type: "string",
         description: "How the user describes their recent work mood.",
       },
+      assessment_summary: {
+        type: "string",
+        description: "Concise WorkfriendAssess scores, state, and recommended action; do not include the full questionnaire.",
+      },
       context_summary: {
         type: "string",
         description: "Concise relevant summary of the current conversation so a reminder restored after restart still has context.",
@@ -60,6 +64,7 @@ export const workfriendScheduleTool: Tool = {
           workdayEnd: requiredText(input, "workday_end"),
           workSummary: requiredText(input, "work_summary"),
           moodSummary: requiredText(input, "mood_summary"),
+          assessmentSummary: typeof input.assessment_summary === "string" ? input.assessment_summary : undefined,
           contextSummary: typeof input.context_summary === "string" ? input.context_summary : undefined,
           cwd: context.cwd,
         });

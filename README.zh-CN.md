@@ -238,6 +238,14 @@ CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步
 | `QWEN_MODEL` | 用于理解 Computer Use 截图的 Qwen/视觉模型 |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope 或兼容 Qwen 截图感知端点 |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Computer Use 感知模型的 API Key |
+| `OPENROUTER_API_KEY` | Computer Use 与 Workfriend 的 Jev 决策所用 OpenRouter Key；保存于选定的私有 `.env` |
+| `CCAGENT_COMPUTER_USE_JEV` | 配置 OpenRouter Key 后是否启用 Jev；默认启用 |
+| `CCAGENT_WORKFRIEND_JEV` | 是否启用 Workfriend 的 Jev 情绪/压力评估；默认启用 |
+| `CCAGENT_JEV_MODE` | `enforce`（默认）、`shadow` 或 `off` |
+| `WORKFRIEND_JEV_MODE` | `decision`（Jev 选择主要行动，默认）、`advisory`（仅评分）或 `off` |
+| `JEV_MODEL` | OpenRouter Decisions 模型，默认为 `~typesafe/jev-latest` |
+| `JEV_BASE_URL` | 可选的 OpenRouter 官方 Decisions 端点覆盖；默认为 `https://openrouter.ai/api/alpha/decisions` |
+| `JEV_TIMEOUT_MS` / `JEV_MIN_CONFIDENCE` | 可选超时和执行置信度阈值；默认 `5000` 与 `0.8` |
 | `QWEN_TTS_MODEL` | Workfriend 语音交付模型，默认 `qwen-audio-3.1-tts-flash` |
 | `QWEN_TTS_VOICE` | 可选的 Workfriend 音色，默认 `longanhuan_v3.1` |
 | `DASHSCOPE_TTS_URL` | 可选的 Qwen-Audio-TTS 完整接口地址；未设置时从 `DASHSCOPE_BASE_URL` 推导 |
@@ -256,9 +264,11 @@ Shell 命令会通过 `TEMP`、`TMP`、`TMPDIR` 和 `CCAGENT_TMPDIR` 获得进�
 
 ### 内置 Workfriend
 
-在交互式 REPL 中运行 `/workfriend` 即可启动内置工作伙伴。它会先通过交互卡片询问你今天在做什么、最近的办公心情以及本地的下班时间，然后把提醒私密地保存到 `~/.ccagent/workfriend/`，并在下班前约一小时发起回访。如果当时 CCAGENT 没有运行，待处理提醒会在下次启动时恢复。
+在交互式 REPL 中运行 `/workfriend` 即可启动内置工作伙伴。它会先通过交互卡片询问你今天在做什么、最近的办公心情、当前工作压力以及本地的下班时间，然后把提醒私密地保存到 `~/.ccagent/workfriend/`，并在下班前约一小时发起回访。如果当时 CCAGENT 没有运行，待处理提醒会在下次启动时恢复。
 
-回访时，Workfriend 会结合当前会话上下文询问进度、瓶颈和问题，并提供不超过 10 道的针对性选择题卡片；回答后会给出有优先级的优化建议和基于实际情况的鼓励。最后可选择导出为可编辑的 `.docx` 或由 Qwen 生成的 `.wav`。Word 交付无需额外依赖；语音交付会把最终文本发送到 DashScope，需要配置 `DASHSCOPE_API_KEY`（或 `QWEN_API_KEY`）。
+Workfriend 会在首次问询和下班回访后调用 OpenRouter Jev，将情绪负荷和压力负荷分别评为 `0-4` 级，同时判断当前工作状态并选择下一步行动。`WORKFRIEND_JEV_MODE=decision` 时，Jev 的行动选择是主方案，主 LLM 负责解释、个性化建议与安慰，不能静默改成其他方案；`advisory` 模式只使用评分。评分是非临床的工作状态参考，不是心理健康诊断。明确的即时危险或自伤信号由程序安全规则强制升级到人工/紧急支持，任何模型都不能降级。
+
+发送给 OpenRouter 的仅为传入 `WorkfriendAssess` 的工作、心情、压力、进度与瓶颈摘要，不会自动发送隐藏会话全文、凭证或完整问卷。该工具按外部数据传输处理，即使处于 Full Mode 也会逐次请求确认。提醒只持久化精简评分摘要，不保存完整问卷。回访选择题仍不超过 10 道；最终可选择导出为可编辑的 `.docx` 或由 Qwen 生成的 `.wav`。Word 交付无需额外依赖；语音交付会把最终文本发送到 DashScope，需要配置 `DASHSCOPE_API_KEY`（或 `QWEN_API_KEY`）。
 
 ### Agent Teams 默认状态与开关
 
@@ -275,6 +285,8 @@ Agent Teams 现在默认处于 Open 状态，无需启动参数即可使用 `Tea
 3. `ComputerAction` 针对这份新鲜快照只执行一个动作，随后立即重新观察并返回下一份快照。
 
 推荐组合是 DeepSeek 作为主推理/文本模型，Qwen 仅作为视觉感知模型。可配置上表中的 `QWEN_*`/`DASHSCOPE_*` 环境变量，或令 `modelRoles.computerUse`（也接受 `computer_use`、`vision`、`image`、`multimodal`）指向已经声明的模型 Profile。在自动交付模式下，Qwen 成功生成视觉描述后，只把描述返回 DeepSeek，不把截图附加到 DeepSeek 回合。
+
+配置 `OPENROUTER_API_KEY` 后，CCAGENT 会在主 LLM 提出 `ComputerAction` 与权限/执行链之间增加 Jev 类型化决策门。程序通过 OpenRouter Decisions API 调用 `~typesafe/jev-latest`，一次批量判断目标是否存在、动作是否符合用户目标、是否疑似提示词注入、处置方式与实际风险。发送给 Jev 的只有文本和结构化状态，不含截图，也不含即将输入的正文。Jev 只能提高、不能降低主 LLM 声明的风险；高置信度普通操作可避免 Auto Mode 再调用一次通用 LLM 分类器，不确定、高影响或判断冲突时会退回重新观察、现有权限确认或通用 LLM 分类器。每个请求都强制使用 ZDR 并禁止提供商收集数据。可用 `CCAGENT_JEV_MODE=shadow` 仅记录判断而不执行约束。
 
 窗口像素和可访问性文本始终按不可信数据处理。终端、Windows 身份验证/安全窗口、密码管理器、ChatGPT 与 Codex 均被排除。上传、外部通信、删除、金融、安装、医疗、验证码、账户及敏感数据操作，即使处于 Full Mode 也必须在动作发生前逐次确认；密码修改与绕过安全机制会被拒绝并交还用户操作。
 
@@ -321,10 +333,10 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 - 文件与代码工具：Read、Write、Edit、MultiEdit、Glob、Grep、Bash、PowerShell
 - 文档格式转换工具：MarkdownToPdf、WordToPdf、PdfToWord、PdfToMarkdown。工具接收工作区文件路径，包含输出签名校验、超时、隔离写入和安全覆盖，并可使用用户上传的模板。文本模板支持 `{{content}}`、`{{title}}`、`{{source}}`、`{{date}}` 以及 `template_data` 中的标量变量；DOCX/DOTX 模板合并当前使用 Windows 上的 Microsoft Word。LibreOffice 是跨平台 PDF 渲染回退，PDF 解析使用本地 `pdf2docx`、PyMuPDF 或 pdfplumber。
 - Web 与外部工具：WebFetch、WebSearch、`classic_words`（CNKGraph 古典文献）、MCP Tools、MCP Resources
-- Windows Computer Use：目标窗口定点截图、UI Automation 元素、单动作执行、Qwen 感知路由、过期快照拒绝与动作时安全确认
+- Windows Computer Use：目标窗口定点截图、UI Automation 元素、单动作执行、Qwen 感知路由、OpenRouter Jev 类型化预检、过期快照拒绝与动作时安全确认
 - 安全执行：Allow/Ask/Deny、Plan Mode、Auto Mode、项目可信判断、Hooks 和受支持平台上的 Shell Sandbox。Full Mode（`/mode full`）会主动跳过通用权限规则引擎；Computer Use 高影响动作确认、Hooks、路径校验、工具校验和已启用的 Sandbox 仍是独立约束层。
 - 长任务：TodoWrite、持久化任务图、Sub-Agent、后台运行、Git Worktree 隔离、Agent Teams
-- 内置 Workfriend：工作与心情交互问询、下班前一小时持久化回访、最多 10 道上下文选择题、优化建议与鼓励，以及 Word/Qwen 语音交付
+- 内置 Workfriend：工作与心情交互问询、Jev 0-4 级情绪/压力评分与下一步决策、下班前一小时持久化回访、最多 10 道上下文选择题、优化建议与鼓励，以及 Word/Qwen 语音交付
 - 上下文与连续性：会话持久化、Resume、Compaction、Token 预算、项目记忆、文件检查点和 Rewind
 - 扩展能力：Skills、自定义 Agents、Slash Commands、Output Styles、Hooks、MCP Servers、Plugins 和静态 Marketplace
 - 使用接口：Ink 交互界面、Headless text/JSON/NDJSON、图片与截图、多模型协议

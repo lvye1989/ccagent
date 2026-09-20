@@ -332,6 +332,12 @@ export function summarizeTool(
         label: "Workfriend",
         target: asString(inp.action) === "schedule" ? `check-in before ${asString(inp.workday_end) ?? "workday end"}` : asString(inp.action),
       };
+    case "WorkfriendAssess":
+      return {
+        label: "Workfriend Jev",
+        target: asString(inp.phase) === "end_of_day" ? "end-of-day assessment" : "start-of-day assessment",
+        stat: result?.match(/^Decision authority:\s*(.+)$/m)?.[1],
+      };
     case "WorkfriendDeliver": {
       const target = displayPath(asString(inp.output_path));
       const bytes = result?.match(/^Bytes:\s*(\d+)$/m)?.[1];

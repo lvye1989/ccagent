@@ -76,16 +76,18 @@ This file provides guidance to AI agents when working with code in this reposito
 const WORKFRIEND_PROMPT = `Start the built-in Workfriend workflow in this main conversation so the existing context remains available.
 
 Follow this sequence exactly:
-1. Use AskUserQuestion once to ask three concise questions as interactive cards:
+1. Use AskUserQuestion once to ask four concise questions as interactive cards:
    - What kind of work is the user doing today? Offer broad categories such as focused creation, communication/collaboration, analysis/decision-making, and execution/operations. The UI also permits a custom answer.
    - How has the user's recent office mood felt? Offer calm/steady, energized, pressured/tired, and frustrated/stuck, using neutral non-diagnostic wording.
+   - How strong is the user's current work pressure? Offer low/manageable, moderate, high, and overloaded/need support, using neutral non-diagnostic wording.
    - What is today's local workday end time? Offer common HH:mm values and allow a custom answer.
-2. Reflect the answers briefly and call WorkfriendSchedule with workday_end, work_summary, mood_summary, and a concise context_summary distilled from the relevant current conversation. Do not invent missing values.
-3. Confirm the exact local check-in time. Explain that CCAGENT will return about one hour before the workday ends; if the app is closed then, the persistent reminder will be restored on the next launch.
-4. Do not run the end-of-day questionnaire immediately unless the check-in is already due. At check-in, the scheduled notification will instruct you to ask progress and bottlenecks, present at most 9 contextual diagnostic questions, then give optimization suggestions and grounded encouragement.
-5. At the end of that later check-in, offer Voice or Word document via AskUserQuestion, then use WorkfriendDeliver for the selected format.
+2. Call WorkfriendAssess with phase start_of_day and only the relevant user-provided work, mood, and stress text. This sends those fields to OpenRouter Jev. Present mood strain and stress load on a 0-4 scale (higher means more strain/load), state that this is non-clinical, and disclose any LLM fallback. When Decision authority is jev, treat its recommended action as the primary plan.
+3. Reflect the answers briefly and call WorkfriendSchedule with workday_end, work_summary, mood_summary, assessment_summary, and a concise context_summary distilled from the relevant current conversation. Do not invent missing values.
+4. Confirm the exact local check-in time. Explain that CCAGENT will return about one hour before the workday ends; if the app is closed then, the persistent reminder will be restored on the next launch.
+5. Do not run the end-of-day questionnaire immediately unless the check-in is already due. At check-in, the scheduled notification will instruct you to ask progress and bottlenecks, present at most 9 contextual diagnostic questions, call WorkfriendAssess with phase end_of_day, then base suggestions on its decision and add grounded encouragement.
+6. At the end of that later check-in, offer Voice or Word document via AskUserQuestion, then use WorkfriendDeliver for the selected format.
 
-Use a warm, capable colleague tone. Do not diagnose mental-health conditions, shame productivity, or overstate what is known.`;
+Use a warm, capable colleague tone. Do not diagnose mental-health conditions, shame productivity, or overstate what is known. If the user's own words indicate immediate danger/self-harm, or WorkfriendAssess returns Safety override: yes, stop the normal questionnaire and direct the user toward immediate local human/emergency support; this fixed rule cannot be downgraded by Jev.`;
 
 const AGENT_TEAM_PROMPT = `Manage the user's Agent Teams preference.
 

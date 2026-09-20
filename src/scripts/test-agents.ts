@@ -80,8 +80,8 @@ async function main(): Promise<void> {
   const workfriend = builtIns.find((a) => a.agentType === "workfriend");
   assert(!!workfriend, "workfriend agent is built-in");
   assert(
-    workfriend?.tools?.join(",") === "AskUserQuestion,WorkfriendSchedule,WorkfriendDeliver",
-    "workfriend has only its three focused interaction tools",
+    workfriend?.tools?.join(",") === "AskUserQuestion,WorkfriendAssess,WorkfriendSchedule,WorkfriendDeliver",
+    "workfriend includes its focused Jev assessment, interaction, schedule, and delivery tools",
   );
   assert(
     (workfriend?.getSystemPrompt() ?? "").includes("never exceeds 10 card questions"),

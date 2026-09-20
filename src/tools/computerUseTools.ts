@@ -15,6 +15,12 @@ import {
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { MAX_IMAGE_BYTES } from "./imageUtils.js";
 import {
+  COMPUTER_USE_RISK_CATEGORIES,
+  decideComputerUseWithJev,
+  type ComputerUseJevDecision,
+  type ComputerUseRiskCategory,
+} from "./computerUseJev.js";
+import {
   listComputerWindows,
   observeComputerWindow,
   performComputerAction,
@@ -26,24 +32,13 @@ import {
 
 export const COMPUTER_USE_TOOL_NAMES = ["ComputerObserve", "ComputerAction"] as const;
 
-export type ComputerRiskCategory =
-  | "ordinary"
-  | "sensitive_data"
-  | "upload"
-  | "external_communication"
-  | "delete"
-  | "financial"
-  | "install"
-  | "medical"
-  | "captcha"
-  | "account_change"
-  | "change_password"
-  | "bypass_safety";
+export type ComputerRiskCategory = ComputerUseRiskCategory;
 
 interface StoredSnapshot {
   id: string;
   observation: ComputerObservation;
   createdAt: number;
+  perception?: string;
 }
 
 interface ObserveInput {
@@ -82,20 +77,7 @@ const snapshots = new Map<string, StoredSnapshot>();
 const SNAPSHOT_TTL_MS = 2 * 60_000;
 const MAX_TEXT_CHARS = 5_000;
 const MAX_ELEMENTS_IN_RESULT = 220;
-const COMPUTER_RISK_CATEGORIES = new Set<ComputerRiskCategory>([
-  "ordinary",
-  "sensitive_data",
-  "upload",
-  "external_communication",
-  "delete",
-  "financial",
-  "install",
-  "medical",
-  "captcha",
-  "account_change",
-  "change_password",
-  "bypass_safety",
-]);
+const COMPUTER_RISK_CATEGORY_SET = new Set<ComputerRiskCategory>(COMPUTER_USE_RISK_CATEGORIES);
 
 const PROHIBITED_PROCESS_NAMES = new Set([
   "cmd",
@@ -329,7 +311,10 @@ async function buildObservationResult(
       const profile = await resolvePerceptionProfile(context.cwd);
       if (profile) {
         perception = await perceiveScreenshot(observation, profile, context.abortSignal);
-        if (perception) text += "\n\nPerception model (" + profile.id + "):\n" + perception;
+        if (perception) {
+          snapshot.perception = perception;
+          text += "\n\nPerception model (" + profile.id + "):\n" + perception;
+        }
       } else if (perceptionMode === "on") {
         perceptionError = "No Qwen/vision profile is configured.";
       }
@@ -428,6 +413,104 @@ export function actionRiskRequiresFreshConfirmation(category: unknown): boolean 
 
 export function actionRiskIsDenied(category: unknown): boolean {
   return category === "change_password" || category === "bypass_safety";
+}
+
+function recentUserGoal(messages: MessageParam[] | undefined): string {
+  if (!messages) return "No recent user goal was supplied.";
+  const collected: string[] = [];
+  for (let index = messages.length - 1; index >= 0 && collected.length < 3; index--) {
+    const message = messages[index];
+    if (!message || message.role !== "user") continue;
+    if (typeof message.content === "string") {
+      if (message.content.trim()) collected.unshift(message.content.trim());
+      continue;
+    }
+    if (!Array.isArray(message.content)) continue;
+    const text = message.content
+      .filter((block): block is Extract<(typeof message.content)[number], { type: "text" }> => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+    if (text) collected.unshift(text);
+  }
+  const joined = collected.join("\n\n");
+  return joined.length > 2_500 ? joined.slice(joined.length - 2_500) : joined || "No recent user goal was supplied.";
+}
+
+function jevActionDescription(input: ActionInput): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const key of [
+    "action",
+    "intent",
+    "risk_category",
+    "element_index",
+    "x",
+    "y",
+    "from_x",
+    "from_y",
+    "to_x",
+    "to_y",
+    "button",
+    "click_count",
+    "key",
+    "scroll_x",
+    "scroll_y",
+    "duration_ms",
+  ] as const) {
+    const value = input[key];
+    if (value !== undefined) output[key] = value;
+  }
+  if (typeof input.text === "string") {
+    output.text_metadata = {
+      length: input.text.length,
+      multiline: /[\r\n]/.test(input.text),
+      // Do not transmit text being typed; it may contain private data.
+      content_withheld: true,
+    };
+  }
+  return output;
+}
+
+/**
+ * Run Jev against the exact point-in-time snapshot before permission checks.
+ * Missing/stale snapshots remain the ComputerAction tool's responsibility and
+ * do not cause a network call.
+ */
+export async function preflightComputerActionWithJev(
+  rawInput: Record<string, unknown>,
+  context: ToolContext,
+  messages?: MessageParam[],
+): Promise<ComputerUseJevDecision | null> {
+  const input = rawInput as unknown as ActionInput;
+  const snapshot = snapshots.get(snapshotKey(context, input.window_id || ""));
+  if (!snapshot || snapshot.id !== input.snapshot_id || Date.now() - snapshot.createdAt > SNAPSHOT_TTL_MS) {
+    return null;
+  }
+  const observation = snapshot.observation;
+  return await decideComputerUseWithJev(
+    {
+      userGoal: recentUserGoal(messages),
+      window: {
+        processName: observation.window.processName,
+        title: concise(observation.window.title, 240),
+        focusedElement: concise(observation.focusedElement || "unknown", 240),
+        width: observation.width,
+        height: observation.height,
+      },
+      elements: observation.elements.slice(0, 120).map((element) => ({
+        index: element.index,
+        controlType: concise(element.controlType || "Element", 80),
+        name: concise(element.name || "", 180),
+        enabled: element.enabled !== false,
+        focused: element.focused === true,
+      })),
+      ...(snapshot.perception ? { perception: snapshot.perception.slice(0, 4_000) } : {}),
+      proposedAction: jevActionDescription(input),
+    },
+    typeof input.risk_category === "string" ? input.risk_category : "unknown",
+    typeof input.action === "string" ? input.action : "unknown",
+    context.abortSignal,
+  );
 }
 
 function buildAction(input: ActionInput, snapshot: StoredSnapshot): ComputerAction {
@@ -595,7 +678,7 @@ export const computerActionTool: Tool = {
     const snapshot = snapshots.get(key);
     try {
       if (!input.intent?.trim()) throw new Error("intent is required for every ComputerAction.");
-      if (!COMPUTER_RISK_CATEGORIES.has(input.risk_category)) {
+      if (!COMPUTER_RISK_CATEGORY_SET.has(input.risk_category)) {
         throw new Error("risk_category is missing or invalid.");
       }
       if (actionRiskIsDenied(input.risk_category)) {

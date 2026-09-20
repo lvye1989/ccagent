@@ -8,7 +8,18 @@ All notable changes to CCAGENT are documented in this file.
 
 - Added `ccagent init`, an interactive first-run setup that creates private
   user-level environment and settings files, safely preserves existing
-  configuration, and verifies DeepSeek text plus optional Qwen vision access.
+  configuration, and verifies DeepSeek text plus optional Qwen vision and
+  OpenRouter Jev Decisions access.
+- Added an OpenRouter `~typesafe/jev-latest` typed decision gate for Windows
+  Computer Use. It cross-checks LLM-proposed actions against the fresh UI
+  snapshot, can upgrade risk or request re-observation/confirmation, and can
+  replace the slower general Auto Mode classifier for confident ordinary
+  actions without weakening deterministic safety rules.
+- Added `WorkfriendAssess`, which uses Jev typed score/choice decisions for
+  non-clinical 0-4 workplace mood-strain and stress-load scoring, work-state
+  classification, and next-action selection. Decision mode delegates the
+  primary action to Jev while retaining a deterministic urgent-human-support
+  safety floor and explicit permission for external wellbeing-text transfer.
 
 ### Fixed
 

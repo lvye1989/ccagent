@@ -5,6 +5,10 @@ import { deflateSync } from "node:zlib";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { collectViaProvider } from "../services/api/providers/providerStream.js";
 import type { ModelProfile } from "../services/api/providers/profile.js";
+import {
+  callOpenRouterJev,
+  DEFAULT_OPENROUTER_JEV_MODEL,
+} from "../services/jev/openRouterJev.js";
 import { getCCAgentHome, getUserSettingsPath } from "../utils/paths.js";
 
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
@@ -24,10 +28,11 @@ export interface InitPrompter {
 export interface InitConnectionConfig {
   deepseek?: { apiKey: string; baseURL: string; model: string };
   qwen?: { apiKey: string; baseURL: string; model: string };
+  jev?: { apiKey: string; model: string };
 }
 
 export interface InitConnectionResult {
-  provider: "DeepSeek" | "Qwen vision";
+  provider: "DeepSeek" | "Qwen vision" | "OpenRouter Jev";
   ok: boolean;
   detail: string;
 }
@@ -362,6 +367,47 @@ export async function testInitConnections(config: InitConnectionConfig): Promise
       [config.qwen.apiKey],
     ));
   }
+  if (config.jev) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await callOpenRouterJev(
+        {
+          state: "CCAGENT Jev connectivity probe.",
+          questions: {
+            reachable: {
+              type: "noul",
+              instructions: "This record is a harmless CCAGENT connectivity probe.",
+              criteria: {
+                true: "The state explicitly describes a CCAGENT connectivity probe.",
+                false: "The state describes something else.",
+              },
+            },
+          },
+        },
+        {
+          apiKey: config.jev.apiKey,
+          model: config.jev.model,
+          timeoutMs: 15_000,
+          signal: controller.signal,
+        },
+      );
+      if (response.answers.reachable?.type !== "noul") {
+        throw new Error("provider returned no typed Noul answer");
+      }
+      results.push({ provider: "OpenRouter Jev", ok: true, detail: "连接与结构化决策验证通过" });
+    } catch (error: unknown) {
+      let detail = error instanceof Error ? error.message : String(error);
+      detail = detail
+        .replaceAll(config.jev.apiKey, "<redacted>")
+        .replace(/sk-or-[A-Za-z0-9_-]+/g, "<redacted>")
+        .replace(/\s+/g, " ")
+        .slice(0, 400);
+      results.push({ provider: "OpenRouter Jev", ok: false, detail });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   return results;
 }
 
@@ -428,6 +474,18 @@ export async function runInitCommand(
       qwenModel = await prompter.ask("Qwen 视觉模型", qwenModel);
     }
 
+    const configureJev = await prompter.confirm(
+      "配置 OpenRouter Jev，用于 Computer Use 与 Workfriend 快速决策",
+      true,
+    );
+    let openRouterApiKey = existing.env.OPENROUTER_API_KEY || "";
+    let jevModel = existing.env.JEV_MODEL || DEFAULT_OPENROUTER_JEV_MODEL;
+    if (configureJev) {
+      const keyInput = await prompter.secret("OpenRouter API Key", Boolean(openRouterApiKey));
+      openRouterApiKey = keyInput || openRouterApiKey;
+      jevModel = await prompter.ask("Jev 模型", jevModel);
+    }
+
     const settings = buildUserSettings(existing.settings, {
       envPath,
       language,
@@ -453,6 +511,16 @@ export async function runInitCommand(
         QWEN_TTS_VOICE: existing.env.QWEN_TTS_VOICE || DEFAULT_QWEN_TTS_VOICE,
       });
     }
+    if (configureJev) {
+      Object.assign(envUpdates, {
+        OPENROUTER_API_KEY: openRouterApiKey,
+        CCAGENT_COMPUTER_USE_JEV: "1",
+        CCAGENT_WORKFRIEND_JEV: "1",
+        CCAGENT_JEV_MODE: existing.env.CCAGENT_JEV_MODE || "enforce",
+        WORKFRIEND_JEV_MODE: existing.env.WORKFRIEND_JEV_MODE || "decision",
+        JEV_MODEL: jevModel,
+      });
+    }
 
     await writePrivateFile(envPath, mergeEnv(existing.envText, envUpdates));
     await writePrivateFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
@@ -471,9 +539,13 @@ export async function runInitCommand(
       ...(configureQwen && qwenApiKey
         ? { qwen: { apiKey: qwenApiKey, baseURL: qwenBaseURL, model: qwenModel } }
         : {}),
+      ...(configureJev && openRouterApiKey
+        ? { jev: { apiKey: openRouterApiKey, model: jevModel } }
+        : {}),
     };
     if (!connectionConfig.deepseek) output.write("- DeepSeek：未填写 API Key，跳过连接测试。\n");
     if (configureQwen && !connectionConfig.qwen) output.write("- Qwen vision：未填写 API Key，跳过连接测试。\n");
+    if (configureJev && !connectionConfig.jev) output.write("- OpenRouter Jev：未填写 API Key，跳过连接测试。\n");
 
     const tester = options.connectionTester ?? testInitConnections;
     const results = await tester(connectionConfig);

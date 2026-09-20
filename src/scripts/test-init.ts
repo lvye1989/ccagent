@@ -91,13 +91,14 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-init-"));
 try {
   const homeDir = path.join(root, ".ccagent");
   const firstPrompter = new FakePrompter(
-    ["", "", "", "", ""],
-    ["deep-test-key", "qwen-test-key"],
-    [true],
+    ["", "", "", "", "", ""],
+    ["deep-test-key", "qwen-test-key", "openrouter-test-key"],
+    [true, true],
   );
   const firstOutput = sink();
   let testedDeepseek = false;
   let testedQwen = false;
+  let testedJev = false;
   const firstCode = await runInitCommand([], {
     homeDir,
     output: firstOutput.output,
@@ -105,9 +106,11 @@ try {
     connectionTester: async (config) => {
       testedDeepseek = Boolean(config.deepseek);
       testedQwen = Boolean(config.qwen);
+      testedJev = Boolean(config.jev);
       return [
         { provider: "DeepSeek", ok: true, detail: "ok" },
         { provider: "Qwen vision", ok: true, detail: "ok" },
+        { provider: "OpenRouter Jev", ok: true, detail: "ok" },
       ];
     },
   });
@@ -120,9 +123,11 @@ try {
 
   assert(firstCode === 0 && firstPrompter.closed, "interactive init completes and closes its prompt");
   assert(settingsText.includes("${DEEPSEEK_API_KEY}") && settingsText.includes("${DASHSCOPE_API_KEY}"), "settings reference environment-backed secrets");
-  assert(!settingsText.includes("deep-test-key") && !settingsText.includes("qwen-test-key"), "settings never contain literal API keys");
-  assert(env.DEEPSEEK_API_KEY === "deep-test-key" && env.DASHSCOPE_API_KEY === "qwen-test-key", "API keys are written only to the private dotenv file");
+  assert(!settingsText.includes("deep-test-key") && !settingsText.includes("qwen-test-key") && !settingsText.includes("openrouter-test-key"), "settings never contain literal API keys");
+  assert(env.DEEPSEEK_API_KEY === "deep-test-key" && env.DASHSCOPE_API_KEY === "qwen-test-key" && env.OPENROUTER_API_KEY === "openrouter-test-key", "API keys are written only to the private dotenv file");
   assert(env.QWEN_PROTOCOL === "openai-chat", "Qwen defaults to the verified Chat Completions protocol");
+  assert(env.JEV_MODEL === "~typesafe/jev-latest" && env.CCAGENT_JEV_MODE === "enforce", "init enables OpenRouter Jev decisions for Computer Use");
+  assert(env.CCAGENT_WORKFRIEND_JEV === "1" && env.WORKFRIEND_JEV_MODE === "decision", "init gives Workfriend Jev mood/stress decision authority by default");
   assert(env.QWEN_TTS_MODEL === "qwen-audio-3.1-tts-flash" && env.QWEN_TTS_VOICE === "longanhuan_v3.1", "init writes Workfriend Qwen TTS defaults");
   assert((settings.env as Record<string, unknown>).CCAGENT_ENV_FILE === envPath, "settings point at the current user's canonical dotenv file");
   assert(settings.agentTeams === true, "init enables Agent Teams for a new user by default");
@@ -130,8 +135,8 @@ try {
     ((settings.models as Record<string, { contextWindow?: number }>).deepseek?.contextWindow === 1_048_576),
     "first-run settings enable the 1 Mi-token DeepSeek window",
   );
-  assert(testedDeepseek && testedQwen, "both configured providers are connection-tested");
-  assert(!firstOutput.text().includes("deep-test-key") && !firstOutput.text().includes("qwen-test-key"), "command output does not reveal API keys");
+  assert(testedDeepseek && testedQwen && testedJev, "all configured providers are connection-tested");
+  assert(!firstOutput.text().includes("deep-test-key") && !firstOutput.text().includes("qwen-test-key") && !firstOutput.text().includes("openrouter-test-key"), "command output does not reveal API keys");
 
   console.log("\n[3] Re-run preservation and malformed-file safety");
   const externalEnvPath = path.join(root, "existing-canonical.env");
@@ -142,7 +147,7 @@ try {
   };
   await fs.writeFile(settingsPath, JSON.stringify(withCustom, null, 2) + "\n", "utf-8");
   await fs.writeFile(externalEnvPath, "# existing\nCUSTOM_ENV=keep\n" + envText, "utf-8");
-  const secondPrompter = new FakePrompter(["", "", ""], [""], [false]);
+  const secondPrompter = new FakePrompter(["", "", ""], [""], [false, false]);
   const secondCode = await runInitCommand(["--skip-test"], {
     homeDir,
     output: sink().output,

@@ -15,6 +15,14 @@ import {
 import { listComputerWindows } from "../tools/computerUseBackend.js";
 import { checkPermission, type PermissionSettings } from "../permissions/permissions.js";
 import { loadEnv } from "../utils/loadEnv.js";
+import {
+  buildComputerUseJevRequest,
+  interpretComputerUseJevResponse,
+} from "../tools/computerUseJev.js";
+import {
+  callOpenRouterJev,
+  type JevDecisionResponse,
+} from "../services/jev/openRouterJev.js";
 
 const failures: string[] = [];
 
@@ -189,10 +197,107 @@ async function main(): Promise<void> {
   });
   assert(passwordFull.behavior === "deny", "password changes require user hand-off");
 
+  console.log("\n[3] Jev + LLM Computer Use decision gate");
+  const jevRequest = buildComputerUseJevRequest({
+    userGoal: "Attach the selected drawing to an external message.",
+    window: {
+      processName: "rhino",
+      title: "Rhino - model.3dm",
+      focusedElement: "Attach",
+      width: 1200,
+      height: 800,
+    },
+    elements: [{ index: 7, controlType: "Button", name: "Attach", enabled: true, focused: true }],
+    proposedAction: { action: "click", element_index: 7, risk_category: "ordinary" },
+  });
+  assert(Boolean(jevRequest.questions.disposition && jevRequest.questions.risk_category), "Jev request batches disposition and risk questions");
+  assert(JSON.stringify(jevRequest).includes("untrusted observations"), "Jev state marks screen content as untrusted");
+  let capturedJevBody: Record<string, unknown> = {};
+  const mockedJev = await callOpenRouterJev(jevRequest, {
+    apiKey: "openrouter-test-key",
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      capturedJevBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        model: "typesafe/jev-1.13",
+        answers: { reachable: { type: "noul", noul: 0.99 } },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch,
+  });
+  assert(mockedJev.answers.reachable?.type === "noul", "OpenRouter Decisions response is parsed as typed Jev answers");
+  assert(capturedJevBody.model === "~typesafe/jev-latest", "OpenRouter request uses the Jev latest alias");
+  assert(
+    (capturedJevBody.provider as { zdr?: boolean; data_collection?: string }).zdr === true &&
+      (capturedJevBody.provider as { data_collection?: string }).data_collection === "deny",
+    "OpenRouter Jev request enforces zero-retention and no-data-collection routing",
+  );
+
+  const highRiskResponse: JevDecisionResponse = {
+    model: "typesafe/jev-1.13",
+    answers: {
+      disposition: {
+        type: "choice",
+        choice: "confirm",
+        probabilities: { execute: 0.01, reobserve: 0.01, confirm: 0.97, deny: 0.01 },
+        confidence: 0.96,
+      },
+      risk_category: {
+        type: "choice",
+        choice: "upload",
+        probabilities: { ordinary: 0.01, upload: 0.99 },
+        confidence: 0.98,
+      },
+      target_present: { type: "noul", noul: 0.99 },
+      goal_aligned: { type: "noul", noul: 0.95 },
+      prompt_injection: { type: "noul", noul: 0.01 },
+    },
+  };
+  const highRiskDecision = interpretComputerUseJevResponse(
+    highRiskResponse,
+    "ordinary",
+    "click",
+    { mode: "enforce", model: "~typesafe/jev-latest", minConfidence: 0.8 },
+  );
+  assert(highRiskDecision.effectiveRisk === "upload", "Jev can only upgrade an LLM-declared ordinary risk");
+  assert(highRiskDecision.permissionBehavior === "ask", "Jev high-impact decision requires confirmation");
+
+  const safeResponse: JevDecisionResponse = {
+    model: "typesafe/jev-1.13",
+    answers: {
+      disposition: { type: "choice", choice: "execute", probabilities: { execute: 0.96 }, confidence: 0.94 },
+      risk_category: { type: "choice", choice: "ordinary", probabilities: { ordinary: 0.98 }, confidence: 0.97 },
+      target_present: { type: "noul", noul: 0.98 },
+      goal_aligned: { type: "noul", noul: 0.95 },
+      prompt_injection: { type: "noul", noul: 0.01 },
+    },
+  };
+  const safeDecision = interpretComputerUseJevResponse(
+    safeResponse,
+    "ordinary",
+    "click",
+    { mode: "enforce", model: "~typesafe/jev-latest", minConfidence: 0.8 },
+  );
+  assert(safeDecision.permissionBehavior === "allow", "high-confidence ordinary Jev decision can accelerate Auto Mode");
+  const noDowngrade = interpretComputerUseJevResponse(
+    safeResponse,
+    "external_communication",
+    "click",
+    { mode: "enforce", model: "~typesafe/jev-latest", minConfidence: 0.8 },
+  );
+  assert(noDowngrade.effectiveRisk === "external_communication" && noDowngrade.permissionBehavior === "ask", "Jev never downgrades an LLM-declared high-impact risk");
+
+  const jevAutoAllow = await checkPermission({
+    tool: computerActionTool,
+    input: { action: "click", risk_category: "ordinary", intent: "focus a local field" },
+    cwd,
+    settings: settings("auto"),
+    precomputedAutoDecision: { behavior: "allow", reason: "Jev verified ordinary action" },
+  });
+  assert(jevAutoAllow.behavior === "allow", "Auto Mode consumes Jev decision without a second LLM classifier call");
+
   if (process.platform !== "win32" || process.env.LIVE_COMPUTER_USE !== "1") {
-    console.log("\n[3] Live Windows observation skipped (set LIVE_COMPUTER_USE=1)");
+    console.log("\n[4] Live Windows observation skipped (set LIVE_COMPUTER_USE=1)");
   } else {
-    console.log("\n[3] Live observe → act → observe loop");
+    console.log("\n[4] Live observe → act → observe loop");
     const launched = await launchTestWindow();
     try {
       const window = await findTestWindow(launched.titleHint);

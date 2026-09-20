@@ -45,6 +45,7 @@ import { teamCreateTool } from "./teamCreateTool.js";
 import { teamDeleteTool } from "./teamDeleteTool.js";
 import { sendMessageTool } from "./sendMessageTool.js";
 import { workfriendScheduleTool } from "./workfriendScheduleTool.js";
+import { workfriendAssessTool } from "./workfriendAssessTool.js";
 import { workfriendDeliverTool } from "./workfriendDeliverTool.js";
 import { agentTeamModeTool } from "./agentTeamModeTool.js";
 import type { PermissionMode } from "../permissions/permissions.js";
@@ -79,6 +80,7 @@ const BUILTIN_TOOLS: Tool[] = [
   exitPlanModeTool,
   skillTool,
   askUserQuestionTool,
+  workfriendAssessTool,
   workfriendScheduleTool,
   workfriendDeliverTool,
   agentTeamModeTool,

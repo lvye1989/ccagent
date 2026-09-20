@@ -68,6 +68,15 @@ export interface PermissionCheckParams {
    * (which would fail auth for non-Anthropic-only setups).
    */
   model?: string;
+  /**
+   * Optional decision from a specialized typed classifier. Explicit deny
+   * rules and hard safety checks still run before this shortcut. The Jev
+   * Computer Use gate uses it to avoid a second general-purpose LLM call.
+   */
+  precomputedAutoDecision?: {
+    behavior: "allow" | "ask";
+    reason: string;
+  };
 }
 
 interface RawSettings {
@@ -484,6 +493,10 @@ function getRiskLabel(tool: Tool, input: Record<string, unknown>): string {
     return "Medium risk: saves or changes a persistent personal reminder";
   }
 
+  if (tool.name === "WorkfriendAssess") {
+    return "Medium risk: sends selected work, mood, and stress text to OpenRouter Jev";
+  }
+
   return "Medium risk: operation may change local state";
 }
 
@@ -535,6 +548,16 @@ async function resolveAutoModeDecision(
     }
   } else if (params.tool.isReadOnly()) {
     return { behavior: "allow", reason: "read-only tool", request };
+  }
+
+  // A specialized decision can replace the slower general classifier, but it
+  // cannot create a persistent allow rule or bypass the hard checks above.
+  if (params.precomputedAutoDecision) {
+    return {
+      behavior: params.precomputedAutoDecision.behavior,
+      reason: params.precomputedAutoDecision.reason,
+      request,
+    };
   }
 
   // Honor explicit allow rules — but NOT dangerous ones (interpreters, bare
@@ -654,6 +677,13 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     if (category !== "ordinary") {
       return { behavior: "ask", reason: "high-impact Computer Use action requires fresh confirmation", request };
     }
+  }
+
+  // Workfriend assessments transmit user-selected work and wellbeing text to
+  // OpenRouter. Require a fresh consent prompt in every mode, including Full,
+  // before any external request is made.
+  if (params.tool.name === "WorkfriendAssess") {
+    return { behavior: "ask", reason: "external wellbeing-text assessment requires fresh confirmation", request };
   }
 
   // Full Mode is an explicit user-controlled bypass of the permission rule

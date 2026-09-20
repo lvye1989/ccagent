@@ -19,6 +19,7 @@ import { compactMessages } from "../context/compaction.js";
 import { findToolByName } from "../tools/index.js";
 import { truncateToolResult, type ToolContext, type ToolResult } from "../tools/Tool.js";
 import { appendTextToContent, prependTextToContent } from "../tools/contentBlocks.js";
+import { preflightComputerActionWithJev } from "../tools/computerUseTools.js";
 import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
@@ -322,7 +323,7 @@ async function runOneToolBlock(
   context: ToolContext,
   options: RunToolsOptions,
 ): Promise<RunOneToolReturn> {
-  const toolInput = (block.input as Record<string, unknown>) ?? {};
+  let toolInput = (block.input as Record<string, unknown>) ?? {};
   const tool = findToolByName(block.name);
   if (!tool) {
     const result: ToolResult = {
@@ -366,6 +367,45 @@ async function runOneToolBlock(
 
     const liveMode = context.getPermissionMode?.() as PermissionMode | undefined;
     const effectiveMode = liveMode ?? options.permissionMode;
+
+    // Jev is a fast, typed decision gate for the exact Computer Use snapshot.
+    // It never lowers the LLM-declared risk. In Auto Mode a confident Jev
+    // decision can replace the slower general-purpose classifier call; all
+    // deterministic deny rules and the high-impact confirmation floor remain.
+    if (block.name === "ComputerAction") {
+      setToolStatus(block.id, "classifier");
+    }
+    let jevDecision = block.name === "ComputerAction"
+      ? await preflightComputerActionWithJev(
+          toolInput,
+          context,
+          options.conversationMessages,
+        )
+      : null;
+    if (jevDecision?.forceDeny) {
+      const result: ToolResult = {
+        content: `Jev Computer Use gate denied this action. ${jevDecision.summary}`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      };
+    }
+    if (jevDecision?.forceReobserve) {
+      const result: ToolResult = {
+        content: `Jev Computer Use gate requires a fresh observation before acting. ${jevDecision.summary}`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      };
+    }
+    if (
+      jevDecision?.available &&
+      jevDecision.effectiveRisk !== jevDecision.originalRisk
+    ) {
+      toolInput = { ...toolInput, risk_category: jevDecision.effectiveRisk };
+    }
     // Auto mode runs the safety classifier INSIDE checkPermission — surface
     // that to the card as "classifier checking…" while it's in flight.
     if (effectiveMode === "auto") {
@@ -380,7 +420,26 @@ async function runOneToolBlock(
       sessionRules: options.sessionPermissionRules,
       messages: options.conversationMessages,
       model: options.model,
+      ...(jevDecision?.permissionBehavior
+        ? {
+            precomputedAutoDecision: {
+              behavior: jevDecision.permissionBehavior,
+              reason: `Jev Computer Use decision: ${jevDecision.summary}`,
+            },
+          }
+        : {}),
     });
+
+    // Jev's request-time confirmation is an independent Computer Use safety
+    // layer, so it also applies in Full Mode where the generic permission
+    // engine is intentionally bypassed.
+    if (jevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
+      permission = {
+        ...permission,
+        behavior: "ask",
+        reason: `Jev Computer Use decision requires confirmation: ${jevDecision.summary}`,
+      };
+    }
 
     // PreToolUse hook can override the rule-based decision (source's
     // `permissionBehavior` from `processHookJSONOutput`). `deny` we
@@ -391,7 +450,8 @@ async function runOneToolBlock(
         ? toolInput.risk_category
         : undefined;
     const computerRequiresFreshConfirmation =
-      block.name === "ComputerAction" && computerRiskCategory !== "ordinary";
+      block.name === "ComputerAction" &&
+      (computerRiskCategory !== "ordinary" || jevDecision?.permissionBehavior === "ask");
     if (preOutcome.permissionBehavior === "allow" && !computerRequiresFreshConfirmation) {
       permission = {
         ...permission,
@@ -505,6 +565,16 @@ async function runOneToolBlock(
       ...rawResult,
       content: truncateToolResult(rawResult.content, tool.maxResultSizeChars),
     };
+
+    if (jevDecision?.configured) {
+      result = {
+        ...result,
+        content: prependTextToContent(
+          result.content,
+          `[Jev Computer Use ${jevDecision.mode}]\n${jevDecision.summary}\n\n`,
+        ),
+      };
+    }
 
     // ─── Stage 22: PostToolUse hooks ─────────────────────────────────
     // Fire AFTER the tool executes. Two effects:

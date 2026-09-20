@@ -11,6 +11,7 @@ export interface WorkfriendSchedule {
   workdayEnd: string;
   workSummary: string;
   moodSummary: string;
+  assessmentSummary?: string;
   contextSummary?: string;
   cwd: string;
   status: "pending" | "fired" | "cancelled";
@@ -62,11 +63,14 @@ function formatCheckIn(schedule: WorkfriendSchedule): string {
     `  <workday_end>${escapeXml(schedule.workdayEnd)}</workday_end>`,
     `  <today_work>${escapeXml(schedule.workSummary)}</today_work>`,
     `  <starting_mood>${escapeXml(schedule.moodSummary)}</starting_mood>`,
+    ...(schedule.assessmentSummary
+      ? [`  <starting_jev_assessment>${escapeXml(schedule.assessmentSummary)}</starting_jev_assessment>`]
+      : []),
     ...(schedule.contextSummary
       ? [`  <conversation_context_summary>${escapeXml(schedule.contextSummary)}</conversation_context_summary>`]
       : []),
     "  <instructions>",
-    "You are Workfriend, continuing the current conversation and using the persisted context summary when a restart removed older turns. Check in warmly now, about one hour before the user's workday ends. First ask for current progress and the concrete bottlenecks or problems encountered. Then use AskUserQuestion to present a focused diagnostic card with no more than 9 questions; use 2-4 practical options per question and avoid repeating facts already known from context. After the answers, give prioritized, concrete optimization suggestions plus sincere, non-judgmental encouragement. Finally use one AskUserQuestion item to let the user choose Voice or Word document, so the check-in contains no more than 10 card questions in total; call WorkfriendDeliver with the complete final report in the selected format. Do not diagnose mental-health conditions. If the user signals immediate danger or self-harm, stop the normal questionnaire and encourage urgent local professional/emergency support.",
+    "You are Workfriend, continuing the current conversation and using the persisted context summary when a restart removed older turns. Check in warmly now, about one hour before the user's workday ends. First ask for current progress and the concrete bottlenecks or problems encountered. Then use AskUserQuestion to present a focused diagnostic card with no more than 9 questions; use 2-4 practical options per question and avoid repeating facts already known from context. After the answers, call WorkfriendAssess with phase end_of_day and only relevant user-provided evidence. Treat its Jev recommendation as the primary plan when Decision authority is jev, then give prioritized concrete suggestions plus sincere, non-judgmental encouragement. Finally use one AskUserQuestion item to let the user choose Voice or Word document, so the check-in contains no more than 10 card questions in total; call WorkfriendDeliver with the complete final report. Scores are non-clinical. If the user signals immediate danger/self-harm or WorkfriendAssess returns Safety override: yes, stop the normal workflow and encourage urgent local professional/emergency support.",
     "  </instructions>",
     "</workfriend-check-in>",
   ].join("\n");
@@ -115,6 +119,7 @@ export async function createWorkfriendSchedule(input: {
   workdayEnd: string;
   workSummary: string;
   moodSummary: string;
+  assessmentSummary?: string;
   contextSummary?: string;
   cwd: string;
   now?: Date;
@@ -134,6 +139,7 @@ export async function createWorkfriendSchedule(input: {
     workdayEnd: input.workdayEnd.trim(),
     workSummary: input.workSummary.trim(),
     moodSummary: input.moodSummary.trim(),
+    ...(input.assessmentSummary?.trim() ? { assessmentSummary: input.assessmentSummary.trim() } : {}),
     ...(input.contextSummary?.trim() ? { contextSummary: input.contextSummary.trim() } : {}),
     cwd: input.cwd,
     status: "pending",

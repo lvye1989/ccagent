@@ -244,6 +244,14 @@ manual summary, and `/context` shows the resolved window and current estimate.
 | `QWEN_MODEL` | Qwen/vision model used to interpret Computer Use screenshots |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope or compatible Qwen endpoint for screenshot perception |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | API key for the Computer Use perception model |
+| `OPENROUTER_API_KEY` | OpenRouter key for Jev decisions in Computer Use and Workfriend; stored in the selected private `.env` |
+| `CCAGENT_COMPUTER_USE_JEV` | Enable the Jev gate when an OpenRouter key is available; defaults to enabled |
+| `CCAGENT_WORKFRIEND_JEV` | Enable Jev mood/stress assessment in Workfriend; defaults to enabled |
+| `CCAGENT_JEV_MODE` | `enforce` (default), `shadow`, or `off` |
+| `WORKFRIEND_JEV_MODE` | `decision` (Jev chooses the primary action, default), `advisory` (scores only), or `off` |
+| `JEV_MODEL` | OpenRouter Decisions model; defaults to `~typesafe/jev-latest` |
+| `JEV_BASE_URL` | Optional official OpenRouter Decisions endpoint override; defaults to `https://openrouter.ai/api/alpha/decisions` |
+| `JEV_TIMEOUT_MS` / `JEV_MIN_CONFIDENCE` | Optional timeout and enforcement-confidence threshold; defaults to `5000` and `0.8` |
 | `QWEN_TTS_MODEL` | Workfriend voice-delivery model; defaults to `qwen-audio-3.1-tts-flash` |
 | `QWEN_TTS_VOICE` | Optional Workfriend voice id; defaults to `longanhuan_v3.1` |
 | `DASHSCOPE_TTS_URL` | Optional full Qwen-Audio-TTS endpoint; otherwise derived from `DASHSCOPE_BASE_URL` |
@@ -265,9 +273,11 @@ surname; a 404 from a non-name scope is retried as a full-name lookup.
 
 ### Built-in Workfriend
 
-Run `/workfriend` in the interactive REPL to start the built-in work companion. It first asks what you are working on, how work has felt recently, and your local workday end time through interactive cards. It then stores a private reminder under `~/.ccagent/workfriend/` and checks in about one hour before the workday ends. If CCAGENT is closed at that time, the pending reminder is restored on the next launch.
+Run `/workfriend` in the interactive REPL to start the built-in work companion. It first asks what you are working on, how work has felt recently, your current work pressure, and your local workday end time through interactive cards. It then stores a private reminder under `~/.ccagent/workfriend/` and checks in about one hour before the workday ends. If CCAGENT is closed at that time, the pending reminder is restored on the next launch.
 
-At check-in, Workfriend uses the current conversation context, asks about progress and bottlenecks, and presents at most 10 focused multiple-choice questions. It responds with prioritized suggestions and grounded encouragement. You then choose an editable `.docx` or a Qwen-generated `.wav`. Word delivery is dependency-free; voice delivery sends the final text to DashScope and requires `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`).
+After the initial intake and again after the end-of-day questionnaire, Workfriend calls OpenRouter Jev to score mood strain and stress load from `0-4`, classify the work state, and choose the next action. In `WORKFRIEND_JEV_MODE=decision`, Jev's action is the primary plan while the main LLM explains and personalizes it; `advisory` uses the scores without delegating the action. These are non-clinical workplace-reflection scores, not mental-health diagnoses. Explicit immediate-danger or self-harm signals trigger a deterministic urgent-human-support floor that no model can downgrade.
+
+Only the work, mood, stress, progress, and bottleneck summaries supplied to `WorkfriendAssess` are sent to OpenRouter—not hidden conversation history, credentials, or the complete questionnaire. Because this is an external transfer of private wellbeing text, the tool requires fresh confirmation even in Full Mode. The reminder persists only a concise score/action summary. The later check-in still uses no more than 10 card questions. You then choose an editable `.docx` or a Qwen-generated `.wav`. Word delivery is dependency-free; voice delivery sends the final text to DashScope and requires `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`).
 
 ### Agent Teams default and switch
 
@@ -284,6 +294,8 @@ CCAGENT refuses to close Agent Teams while a team is active; finish the teammate
 3. `ComputerAction` performs exactly one action against that fresh snapshot, then immediately observes again and returns the next snapshot.
 
 The recommended pairing is DeepSeek as the main reasoning/text model and Qwen as a perception-only model. Configure the `QWEN_*`/`DASHSCOPE_*` variables above, or point `modelRoles.computerUse` (also accepts `computer_use`, `vision`, `image`, or `multimodal`) at a declared model profile. In automatic delivery mode, a successful Qwen description is returned to DeepSeek without attaching the screenshot to the DeepSeek turn.
+
+When `OPENROUTER_API_KEY` is configured, CCAGENT adds Jev as a typed decision gate between the LLM-proposed `ComputerAction` and the permission/execution path. It calls OpenRouter's Decisions API with `~typesafe/jev-latest`, batches target validity, goal alignment, prompt-injection, disposition, and risk questions, and sends text/structured state only—never the screenshot or the text being typed. Jev can raise but never lower the LLM-declared risk. A confident ordinary decision avoids a second general-purpose Auto Mode classifier call; uncertainty, high-impact classification, or disagreement falls back to re-observation, existing permission prompts, or the normal LLM classifier. Every request requires ZDR and denies provider data collection. Use `CCAGENT_JEV_MODE=shadow` to observe decisions without enforcement.
 
 Window pixels and accessibility text are always treated as untrusted data. Terminals, Windows authentication/security surfaces, password managers, ChatGPT, and Codex are excluded. Uploads, external communication, deletion, financial, installation, medical, CAPTCHA, account, and sensitive-data actions require a fresh action-time confirmation even in Full Mode; password changes and safety bypasses are denied and handed back to the user.
 
@@ -330,10 +342,10 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 - File and code tools: Read, Write, Edit, MultiEdit, Glob, Grep, Bash, and PowerShell
 - Document conversion tools: MarkdownToPdf, WordToPdf, PdfToWord, and PdfToMarkdown. Each accepts workspace file paths, validates output signatures, supports timeouts and safe overwrite, and can use uploaded templates. Text templates support `{{content}}`, `{{title}}`, `{{source}}`, `{{date}}`, plus scalar values from `template_data`; DOCX/DOTX template merging currently uses Microsoft Word on Windows. LibreOffice is the cross-platform PDF-rendering fallback, and PDF extraction uses local Python packages such as `pdf2docx`, PyMuPDF, or pdfplumber.
 - Web and external tools: WebFetch, WebSearch, `classic_words` (CNKGraph classical literature), MCP tools, and MCP resources
-- Windows Computer Use: point-in-time target-window screenshots, UI Automation elements, single-action execution, Qwen perception routing, stale-snapshot rejection, and action-time safety confirmation
+- Windows Computer Use: point-in-time target-window screenshots, UI Automation elements, single-action execution, Qwen perception routing, OpenRouter Jev typed preflight decisions, stale-snapshot rejection, and action-time safety confirmation
 - Safe execution: allow/ask/deny rules, Plan Mode, Auto Mode, project trust, hooks, and shell sandboxing where supported. Full Mode (`/mode full`) intentionally bypasses the general permission rule engine; high-impact Computer Use confirmations, hooks, path validation, tool validation, and an enabled sandbox remain separate layers.
 - Long-running work: TodoWrite, persistent task graphs, sub-agents, background runs, Git worktree isolation, and Agent Teams
-- Built-in Workfriend: interactive work/mood intake, persistent one-hour-before-finish check-in, up to 10 contextual question cards, advice and encouragement, plus Word or Qwen voice delivery
+- Built-in Workfriend: interactive work/mood intake, Jev 0-4 mood/stress scoring and next-action decisions, persistent one-hour-before-finish check-in, up to 10 contextual question cards, advice and encouragement, plus Word or Qwen voice delivery
 - Context and continuity: session persistence, resume, compaction, token budgets, project memory, file checkpoints, and rewind
 - Extensibility: skills, custom agents, slash commands, output styles, hooks, MCP servers, plugins, and static marketplaces
 - Interfaces: interactive Ink UI, headless text/JSON/NDJSON output, images and screenshots, and multiple model protocols
