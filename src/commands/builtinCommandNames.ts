@@ -45,6 +45,7 @@ export const BUILTIN_COMMAND_NAMES = new Set<string>([
   "think",
   "effort",
   "init",
+  "workfriend",
   "exit",
   "quit",
   "bye",
@@ -63,7 +64,7 @@ export function isBuiltinCommandName(name: string): boolean {
  * Code's `type: 'prompt'` commands, e.g. `/init`). They must be recognised as
  * LLM-triggering by the UI and routed through prompt expansion by the engine.
  */
-export const BUILTIN_PROMPT_COMMAND_NAMES = new Set<string>(["init"]);
+export const BUILTIN_PROMPT_COMMAND_NAMES = new Set<string>(["init", "workfriend"]);
 
 /** Case-insensitive membership check for built-in `prompt` commands. */
 export function isBuiltinPromptCommand(name: string): boolean {

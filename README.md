@@ -230,6 +230,9 @@ is selected.
 | `QWEN_MODEL` | Qwen/vision model used to interpret Computer Use screenshots |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope or compatible Qwen endpoint for screenshot perception |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | API key for the Computer Use perception model |
+| `QWEN_TTS_MODEL` | Workfriend voice-delivery model; defaults to `qwen-audio-3.1-tts-flash` |
+| `QWEN_TTS_VOICE` | Optional Workfriend voice id; defaults to `longanhuan_v3.1` |
+| `DASHSCOPE_TTS_URL` | Optional full Qwen-Audio-TTS endpoint; otherwise derived from `DASHSCOPE_BASE_URL` |
 | `CCAGENT_OFFICE_ENGINE` | Optional office renderer preference: `word` or `libreoffice` |
 | `CCAGENT_PYTHON` | Optional Python 3 executable for PDF conversion helpers |
 | `CCAGENT_POWERSHELL` | Optional PowerShell executable for Microsoft Word automation |
@@ -243,6 +246,12 @@ For author collections, `author_writings` is normalized through CNKGraph's JSON
 writing-search endpoint because the legacy author URL returns CSV. For people,
 use `person_scope: "Name"` with a full name and `person_scope: "Xing"` with a
 surname; a 404 from a non-name scope is retried as a full-name lookup.
+
+### Built-in Workfriend
+
+Run `/workfriend` in the interactive REPL to start the built-in work companion. It first asks what you are working on, how work has felt recently, and your local workday end time through interactive cards. It then stores a private reminder under `~/.ccagent/workfriend/` and checks in about one hour before the workday ends. If CCAGENT is closed at that time, the pending reminder is restored on the next launch.
+
+At check-in, Workfriend uses the current conversation context, asks about progress and bottlenecks, and presents at most 10 focused multiple-choice questions. It responds with prioritized suggestions and grounded encouragement. You then choose an editable `.docx` or a Qwen-generated `.wav`. Word delivery is dependency-free; voice delivery sends the final text to DashScope and requires `DASHSCOPE_API_KEY` (or `QWEN_API_KEY`).
 
 ### Windows Computer Use
 
@@ -271,6 +280,7 @@ ccagent --auto                  # classifier-assisted permission mode
 ccagent --permission-mode full  # bypass permission-engine prompts and rules
 ccagent --resume                # resume the latest session
 ccagent --resume <session-id>   # resume a specific session
+# inside CCAGENT: /workfriend   # start a daily work check-in
 ccagent -p "summarize this repo"                 # headless text output
 ccagent -p "list the tools" --output-format json # machine-readable output
 git diff | ccagent -p "review this patch"         # combine stdin and a prompt
@@ -289,6 +299,7 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 | `/skills`, `/agents`, `/hooks`, `/mcp` | Inspect extension registries |
 | `/plugin`, `/marketplace` | Install and manage plugins |
 | `/memory` | Inspect or edit project memory |
+| `/workfriend` | Start the built-in work/mood check-in and persistent end-of-day companion |
 
 ## Capabilities
 
@@ -298,6 +309,7 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 - Windows Computer Use: point-in-time target-window screenshots, UI Automation elements, single-action execution, Qwen perception routing, stale-snapshot rejection, and action-time safety confirmation
 - Safe execution: allow/ask/deny rules, Plan Mode, Auto Mode, project trust, hooks, and shell sandboxing where supported. Full Mode (`/mode full`) intentionally bypasses the general permission rule engine; high-impact Computer Use confirmations, hooks, path validation, tool validation, and an enabled sandbox remain separate layers.
 - Long-running work: TodoWrite, persistent task graphs, sub-agents, background runs, Git worktree isolation, and Agent Teams
+- Built-in Workfriend: interactive work/mood intake, persistent one-hour-before-finish check-in, up to 10 contextual question cards, advice and encouragement, plus Word or Qwen voice delivery
 - Context and continuity: session persistence, resume, compaction, token budgets, project memory, file checkpoints, and rewind
 - Extensibility: skills, custom agents, slash commands, output styles, hooks, MCP servers, plugins, and static marketplaces
 - Interfaces: interactive Ink UI, headless text/JSON/NDJSON output, images and screenshots, and multiple model protocols

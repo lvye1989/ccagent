@@ -770,7 +770,7 @@ export function useAgentSession({
       trimmed.startsWith("/compact")
         ? "Compacting"
         : trimmed.length === 0
-          ? "Background sub-agent finished — replying"
+          ? "Notification received — replying"
           : "Thinking",
     );
 

@@ -73,6 +73,10 @@ export function isInternalMessage(message: MessageParam): boolean {
   // as skills — a visible `<command-name>` bubble plus this hidden body that
   // carries the substituted prompt template to the model.
   if (content.startsWith("[command_invocation:")) return true;
+  // Workfriend reminders are model instructions containing private work/mood
+  // context. The assistant's warm check-in is visible; the raw control block
+  // is not duplicated into the transcript.
+  if (content.startsWith("[workfriend-notification]")) return true;
   return false;
 }
 

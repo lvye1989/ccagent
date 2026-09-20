@@ -73,8 +73,23 @@ Notes:
 This file provides guidance to AI agents when working with code in this repository.
 \`\`\``;
 
+const WORKFRIEND_PROMPT = `Start the built-in Workfriend workflow in this main conversation so the existing context remains available.
+
+Follow this sequence exactly:
+1. Use AskUserQuestion once to ask three concise questions as interactive cards:
+   - What kind of work is the user doing today? Offer broad categories such as focused creation, communication/collaboration, analysis/decision-making, and execution/operations. The UI also permits a custom answer.
+   - How has the user's recent office mood felt? Offer calm/steady, energized, pressured/tired, and frustrated/stuck, using neutral non-diagnostic wording.
+   - What is today's local workday end time? Offer common HH:mm values and allow a custom answer.
+2. Reflect the answers briefly and call WorkfriendSchedule with workday_end, work_summary, mood_summary, and a concise context_summary distilled from the relevant current conversation. Do not invent missing values.
+3. Confirm the exact local check-in time. Explain that CCAGENT will return about one hour before the workday ends; if the app is closed then, the persistent reminder will be restored on the next launch.
+4. Do not run the end-of-day questionnaire immediately unless the check-in is already due. At check-in, the scheduled notification will instruct you to ask progress and bottlenecks, present at most 9 contextual diagnostic questions, then give optimization suggestions and grounded encouragement.
+5. At the end of that later check-in, offer Voice or Word document via AskUserQuestion, then use WorkfriendDeliver for the selected format.
+
+Use a warm, capable colleague tone. Do not diagnose mental-health conditions, shame productivity, or overstate what is known.`;
+
 const PROMPTS: Record<string, string> = {
   init: INIT_PROMPT,
+  workfriend: WORKFRIEND_PROMPT,
 };
 
 /**

@@ -119,6 +119,7 @@ try {
   assert(!settingsText.includes("deep-test-key") && !settingsText.includes("qwen-test-key"), "settings never contain literal API keys");
   assert(env.DEEPSEEK_API_KEY === "deep-test-key" && env.DASHSCOPE_API_KEY === "qwen-test-key", "API keys are written only to the private dotenv file");
   assert(env.QWEN_PROTOCOL === "openai-chat", "Qwen defaults to the verified Chat Completions protocol");
+  assert(env.QWEN_TTS_MODEL === "qwen-audio-3.1-tts-flash" && env.QWEN_TTS_VOICE === "longanhuan_v3.1", "init writes Workfriend Qwen TTS defaults");
   assert((settings.env as Record<string, unknown>).CCAGENT_ENV_FILE === envPath, "settings point at the current user's canonical dotenv file");
   assert(testedDeepseek && testedQwen, "both configured providers are connection-tested");
   assert(!firstOutput.text().includes("deep-test-key") && !firstOutput.text().includes("qwen-test-key"), "command output does not reveal API keys");

@@ -327,6 +327,20 @@ export function summarizeTool(
       const stat = bytes ? Number(bytes).toLocaleString("en-US") + " bytes" : undefined;
       return { label: name, target, stat };
     }
+    case "WorkfriendSchedule":
+      return {
+        label: "Workfriend",
+        target: asString(inp.action) === "schedule" ? `check-in before ${asString(inp.workday_end) ?? "workday end"}` : asString(inp.action),
+      };
+    case "WorkfriendDeliver": {
+      const target = displayPath(asString(inp.output_path));
+      const bytes = result?.match(/^Bytes:\s*(\d+)$/m)?.[1];
+      return {
+        label: asString(inp.format) === "voice" ? "Workfriend Voice" : "Workfriend Word",
+        target,
+        stat: bytes ? Number(bytes).toLocaleString("en-US") + " bytes" : undefined,
+      };
+    }
     case "WebFetch":
       return { label: "WebFetch", target: urlHost(asString(inp.url)), stat: result ? webFetchStat(result) : undefined };
     case "WebSearch": {

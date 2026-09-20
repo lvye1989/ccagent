@@ -79,6 +79,7 @@ export function buildCommandNotice(message: string, kind: "info" | "error"): Sys
         "/resume [n|id] — List and switch to a saved session",
         "/diff [n] — Show uncommitted git changes + recent agent edits",
         "/init — Analyze the repo and draft an AGENT.md (runs a model turn)",
+        "/workfriend — Start the built-in work companion and schedule a check-in",
         "/permissions [allow|deny|remove <rule>] — Manage allow/deny rules by layer",
         "/memory [edit <n>] — List/edit AGENT.md + project memory files in $EDITOR",
         "/exit | /quit | /bye — Exit session",

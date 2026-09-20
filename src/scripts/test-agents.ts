@@ -68,7 +68,7 @@ async function withTempProject(
 async function main(): Promise<void> {
   console.log("\n[1] Built-in agent definitions");
   const builtIns = getBuiltInAgents();
-  assert(builtIns.length === 2, "exactly 2 built-in agents (general-purpose, Explore)");
+  assert(builtIns.length === 3, "exactly 3 built-in agents (general-purpose, Explore, workfriend)");
   assert(
     builtIns.some((a) => a.agentType === "general-purpose"),
     "general-purpose agent is built-in",
@@ -76,6 +76,16 @@ async function main(): Promise<void> {
   assert(
     builtIns.some((a) => a.agentType === "Explore"),
     "Explore agent is built-in",
+  );
+  const workfriend = builtIns.find((a) => a.agentType === "workfriend");
+  assert(!!workfriend, "workfriend agent is built-in");
+  assert(
+    workfriend?.tools?.join(",") === "AskUserQuestion,WorkfriendSchedule,WorkfriendDeliver",
+    "workfriend has only its three focused interaction tools",
+  );
+  assert(
+    (workfriend?.getSystemPrompt() ?? "").includes("never exceeds 10 card questions"),
+    "workfriend prompt enforces the questionnaire limit",
   );
   const explore = builtIns.find((a) => a.agentType === "Explore");
   assert(
@@ -197,7 +207,7 @@ async function main(): Promise<void> {
     );
 
     const result = await bootstrapAgents(cwd);
-    assert(result.builtInCount === 2, "bootstrap reports 2 built-ins");
+    assert(result.builtInCount === 3, "bootstrap reports 3 built-ins");
     assert(
       result.customCount === 2,
       "bootstrap reports 2 valid custom agents (reviewer + Explore override)",
@@ -520,8 +530,8 @@ async function main(): Promise<void> {
     assert(infoMessage.includes("general-purpose"), "/agents includes general-purpose");
     assert(infoMessage.includes("Explore"), "/agents includes Explore");
     assert(infoMessage.includes("code-reviewer"), "/agents includes custom project agent");
-    assert(infoMessage.includes("[built-in]"), "/agents tags built-in source");
-    assert(infoMessage.includes("[project]"), "/agents tags project source");
+    assert(infoMessage.includes("built-in"), "/agents tags built-in source");
+    assert(infoMessage.includes("project"), "/agents tags project source");
     assert(infoMessage.includes("tools: Read,Grep,Glob"), "/agents shows tools allow-list");
     assert(infoMessage.includes("disallowed: Write,Edit"), "/agents shows disallowedTools");
     assert(infoMessage.includes("model: claude-haiku-4.5"), "/agents shows model override");
@@ -627,7 +637,7 @@ async function main(): Promise<void> {
       const safeResult = await runTools(
         safeBlocks,
         { cwd: process.cwd(), sessionId: "concurrency-test" },
-        { permissionMode: "auto", permissionSettings: { allow: [], deny: [], mode: "auto" }, sessionPermissionRules: { allow: [], deny: [] } },
+        { permissionMode: "full", permissionSettings: { allow: [], deny: [], mode: "full" }, sessionPermissionRules: { allow: [], deny: [] } },
       );
       const safeElapsed = Date.now() - safeStart;
       assert(safeResult.executions.length === 4, "all 4 safe blocks executed");
@@ -651,7 +661,7 @@ async function main(): Promise<void> {
       await runTools(
         unsafeBlocks,
         { cwd: process.cwd(), sessionId: "concurrency-test" },
-        { permissionMode: "auto", permissionSettings: { allow: [], deny: [], mode: "auto" }, sessionPermissionRules: { allow: [], deny: [] } },
+        { permissionMode: "full", permissionSettings: { allow: [], deny: [], mode: "full" }, sessionPermissionRules: { allow: [], deny: [] } },
       );
       assert(unsafePeak === 1, `unsafe tools serialized (peak=${unsafePeak})`);
 
@@ -670,7 +680,7 @@ async function main(): Promise<void> {
       const mixed = await runTools(
         mixedBlocks,
         { cwd: process.cwd(), sessionId: "concurrency-test" },
-        { permissionMode: "auto", permissionSettings: { allow: [], deny: [], mode: "auto" }, sessionPermissionRules: { allow: [], deny: [] } },
+        { permissionMode: "full", permissionSettings: { allow: [], deny: [], mode: "full" }, sessionPermissionRules: { allow: [], deny: [] } },
       );
       assert(mixed.executions.length === 5, "mixed batch: all 5 executed");
       assert(

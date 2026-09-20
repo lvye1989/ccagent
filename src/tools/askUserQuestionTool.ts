@@ -32,10 +32,10 @@ interface RawQuestion {
 function parseQuestions(input: Record<string, unknown>): UserQuestion[] | { error: string } {
   const rawQuestions = input.questions;
   if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
-    return { error: "questions must be a non-empty array (1-4 questions)" };
+    return { error: "questions must be a non-empty array (1-10 questions)" };
   }
-  if (rawQuestions.length > 4) {
-    return { error: "at most 4 questions are allowed" };
+  if (rawQuestions.length > 10) {
+    return { error: "at most 10 questions are allowed" };
   }
   const questions: UserQuestion[] = [];
   const seenQuestions = new Set<string>();
@@ -87,7 +87,7 @@ export const askUserQuestionTool: Tool = {
     "answer. Use this when you need the user to make a decision among " +
     "concrete alternatives (e.g. which library, which approach, which files " +
     "to touch) rather than guessing or asking in free-form prose. Provide " +
-    "1-4 questions, each with a short `header` chip, the full `question` " +
+    "1-10 questions, each with a short `header` chip, the full `question` " +
     "text, and 2-4 distinct `options` (each with a `label` and a short " +
     "`description` of its trade-offs). Set `multiSelect: true` when the user " +
     "may pick more than one option. Do NOT add an 'Other' option — the UI " +
@@ -97,7 +97,7 @@ export const askUserQuestionTool: Tool = {
     properties: {
       questions: {
         type: "array",
-        description: "1-4 multiple-choice questions to ask the user.",
+        description: "1-10 multiple-choice questions to ask the user.",
         items: {
           type: "object",
           properties: {

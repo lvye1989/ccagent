@@ -105,6 +105,7 @@ const BUILTIN_COMMANDS: CommandSuggestion[] = [
   { name: "/resume", description: "List and switch to a saved session (/resume [n|id])" },
   { name: "/diff", description: "Show uncommitted git changes + recent agent edits (/diff [n])" },
   { name: "/init", description: "Analyze the repo and draft an AGENT.md (runs a model turn)" },
+  { name: "/workfriend", description: "Start a work/mood check-in and end-of-day companion" },
   { name: "/permissions", description: "List/add/remove allow & deny rules by layer (alias: /allowed-tools)" },
   { name: "/memory", description: "List AGENT.md + project memory files; edit one in $EDITOR (/memory edit <n>)" },
   { name: "/exit", description: "Exit the session" },

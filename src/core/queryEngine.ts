@@ -667,7 +667,7 @@ export class QueryEngine {
     for (const notif of pendingNotifs) {
       const notifMessage: MessageParam = {
         role: "user",
-        content: `[task-notification]\n${notif.text}`,
+        content: `[${notif.mode}]\n${notif.text}`,
       };
       this.messages = [...this.messages, notifMessage];
     }
@@ -850,7 +850,7 @@ export class QueryEngine {
         yield {
           type: "command",
           kind: "info",
-          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [tools <name>|reconnect <name>] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
+          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [tools <name>|reconnect <name>] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
         };
         return { handled: true };
       case "config":

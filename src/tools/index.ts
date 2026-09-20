@@ -44,6 +44,8 @@ import { agentTool } from "./agentTool.js";
 import { teamCreateTool } from "./teamCreateTool.js";
 import { teamDeleteTool } from "./teamDeleteTool.js";
 import { sendMessageTool } from "./sendMessageTool.js";
+import { workfriendScheduleTool } from "./workfriendScheduleTool.js";
+import { workfriendDeliverTool } from "./workfriendDeliverTool.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 
 const BUILTIN_TOOLS: Tool[] = [
@@ -76,6 +78,8 @@ const BUILTIN_TOOLS: Tool[] = [
   exitPlanModeTool,
   skillTool,
   askUserQuestionTool,
+  workfriendScheduleTool,
+  workfriendDeliverTool,
   agentTool,
   // Stage 21 — Agent Teams. The three tools below all gate themselves
   // on isAgentTeamsEnabled() in their `isEnabled()` methods, so when

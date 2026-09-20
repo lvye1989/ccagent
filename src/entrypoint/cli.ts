@@ -86,6 +86,7 @@ Commands (in REPL):
   /agents                     List built-in + custom sub-agent definitions
   /hooks                      Show configured lifecycle hooks
   /history                    Show session history
+  /workfriend                 Start the built-in work companion and daily check-in
 
 Extensions (Markdown + frontmatter):
   Output styles: ~/.ccagent/output-styles/<name>.md (default/Explanatory/Learning built-in)
@@ -93,7 +94,7 @@ Extensions (Markdown + frontmatter):
                  Body supports $ARGUMENTS / $1 / $2; frontmatter: description, argument-hint, model, allowed-tools
 
 Sub-agents:
-  Built-in: general-purpose, Explore
+  Built-in: general-purpose, Explore, workfriend
   Custom:   add <cwd>/.ccagent/agents/<name>.md or ~/.ccagent/agents/<name>.md
   Frontmatter: name, description, tools, disallowedTools, model, maxTurns,
                permissionMode, isolation. The Markdown body is the system prompt.
@@ -444,6 +445,14 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   // stderr where it would tear through Ink's rendered frame.
   const { setUiActive } = await import("../state/uiNoticeStore.js");
   setUiActive(true);
+
+  // Restore persistent Workfriend reminders after the UI notification bus is
+  // ready. Overdue reminders are enqueued immediately and the mounted session
+  // consumes them as an ordinary model turn.
+  const { bootstrapWorkfriendScheduler } = await import("../workfriend/scheduler.js");
+  await bootstrapWorkfriendScheduler().catch((error) => {
+    logWarn(`Workfriend scheduler bootstrap failed: ${(error as Error).message}`);
+  });
 
   const { waitUntilExit } = render(
     React.createElement(App, { model: resolvedModel, permissionMode, resumeSessionId, shouldResume }),

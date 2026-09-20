@@ -469,9 +469,18 @@ function getRiskLabel(tool: Tool, input: Record<string, unknown>): string {
     tool.name === "MarkdownToPdf" ||
     tool.name === "WordToPdf" ||
     tool.name === "PdfToWord" ||
-    tool.name === "PdfToMarkdown"
+    tool.name === "PdfToMarkdown" ||
+    (tool.name === "WorkfriendDeliver" && input.format !== "voice")
   ) {
     return "Medium risk: writes files in the workspace";
+  }
+
+  if (tool.name === "WorkfriendDeliver" && input.format === "voice") {
+    return "Medium risk: sends the final report text to DashScope and writes an audio file";
+  }
+
+  if (tool.name === "WorkfriendSchedule") {
+    return "Medium risk: saves or changes a persistent personal reminder";
   }
 
   return "Medium risk: operation may change local state";

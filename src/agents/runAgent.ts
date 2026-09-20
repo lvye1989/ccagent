@@ -192,6 +192,12 @@ export async function runChildAgent(params: RunChildAgentParams): Promise<AgentR
     // Sub-agent reads its own mode — isolating plan-mode transitions
     // (Enter/ExitPlanMode) from the parent's mode state.
     getPermissionMode: () => subPermissionMode,
+    // Foreground sub-agents may display the same structured question cards
+    // as the parent. Background agents remain headless and must never block
+    // waiting for terminal input.
+    ...(!params.shouldAvoidPermissionPrompts && params.parentToolContext.requestUserQuestion
+      ? { requestUserQuestion: params.parentToolContext.requestUserQuestion }
+      : {}),
     // Stage 21: thread teammate identity into the sub-agent's tool
     // context so SendMessage's `from` resolves correctly.
     ...(params.teammateIdentity

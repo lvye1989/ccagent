@@ -11,6 +11,8 @@ const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
 const DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_QWEN_MODEL = "qwen3.8-omni-flash";
+const DEFAULT_QWEN_TTS_MODEL = "qwen-audio-3.1-tts-flash";
+const DEFAULT_QWEN_TTS_VOICE = "longanhuan_v3.1";
 
 export interface InitPrompter {
   ask(label: string, fallback: string): Promise<string>;
@@ -445,6 +447,8 @@ export async function runInitCommand(
         DASHSCOPE_BASE_URL: qwenBaseURL,
         QWEN_PROTOCOL: "openai-chat",
         QWEN_MODEL: qwenModel,
+        QWEN_TTS_MODEL: existing.env.QWEN_TTS_MODEL || DEFAULT_QWEN_TTS_MODEL,
+        QWEN_TTS_VOICE: existing.env.QWEN_TTS_VOICE || DEFAULT_QWEN_TTS_VOICE,
       });
     }
 

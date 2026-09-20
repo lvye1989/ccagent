@@ -225,6 +225,9 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 | `QWEN_MODEL` | 用于理解 Computer Use 截图的 Qwen/视觉模型 |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope 或兼容 Qwen 截图感知端点 |
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Computer Use 感知模型的 API Key |
+| `QWEN_TTS_MODEL` | Workfriend 语音交付模型，默认 `qwen-audio-3.1-tts-flash` |
+| `QWEN_TTS_VOICE` | 可选的 Workfriend 音色，默认 `longanhuan_v3.1` |
+| `DASHSCOPE_TTS_URL` | 可选的 Qwen-Audio-TTS 完整接口地址；未设置时从 `DASHSCOPE_BASE_URL` 推导 |
 | `CCAGENT_OFFICE_ENGINE` | 可选 Office 渲染器偏好：`word` 或 `libreoffice` |
 | `CCAGENT_PYTHON` | 可选 Python 3 可执行文件路径，用于 PDF 转换辅助程序 |
 | `CCAGENT_POWERSHELL` | 可选 PowerShell 可执行文件路径，用于 Microsoft Word 自动化 |
@@ -235,6 +238,12 @@ CCAGENT 也支持具名的 Anthropic、OpenAI 兼容、Gemini 和本地模型 Pr
 `classic_words` 是只读的内置 CNKGraph REST 工具，不经过 Skill 或 MCP，也不需要 API Key。它支持诗词文章检索、作品详情、作者作品集、同韵作品、对偶句、平仄、古籍与卷次、典故以及历史人物查询，并包含输入与 JSON 结构校验、结果限流、错误隔离和可配置超时。CNKGraph 开放资源用于研究学习；商业使用前请另行确认授权。
 
 查询作者作品集时，`author_writings` 会统一改走 CNKGraph 的 JSON 作品检索接口，因为旧作者接口返回 CSV。人物检索中，完整姓名请使用 `person_scope: "Name"`，姓氏请使用 `person_scope: "Xing"`；非姓名范围返回 404 时会自动按完整姓名重试。
+
+### 内置 Workfriend
+
+在交互式 REPL 中运行 `/workfriend` 即可启动内置工作伙伴。它会先通过交互卡片询问你今天在做什么、最近的办公心情以及本地的下班时间，然后把提醒私密地保存到 `~/.ccagent/workfriend/`，并在下班前约一小时发起回访。如果当时 CCAGENT 没有运行，待处理提醒会在下次启动时恢复。
+
+回访时，Workfriend 会结合当前会话上下文询问进度、瓶颈和问题，并提供不超过 10 道的针对性选择题卡片；回答后会给出有优先级的优化建议和基于实际情况的鼓励。最后可选择导出为可编辑的 `.docx` 或由 Qwen 生成的 `.wav`。Word 交付无需额外依赖；语音交付会把最终文本发送到 DashScope，需要配置 `DASHSCOPE_API_KEY`（或 `QWEN_API_KEY`）。
 
 ### Windows Computer Use
 
@@ -263,6 +272,7 @@ ccagent --auto                  # 分类器辅助的权限模式
 ccagent --permission-mode full  # 跳过权限引擎提示与 allow/deny 规则
 ccagent --resume                # 恢复最近一次会话
 ccagent --resume <session-id>   # 恢复指定会话
+# 进入 CCAGENT 后运行 /workfriend，启动每日工作回访
 ccagent -p "总结这个仓库"                         # Headless 文本输出
 ccagent -p "列出可用工具" --output-format json   # 机器可读输出
 git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Prompt
@@ -281,6 +291,7 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 | `/skills`、`/agents`、`/hooks`、`/mcp` | 检查扩展注册表 |
 | `/plugin`、`/marketplace` | 安装和管理插件 |
 | `/memory` | 检查或编辑项目记忆 |
+| `/workfriend` | 启动内置工作/心情问询和持久化的下班前回访 |
 
 ## 核心能力
 
@@ -290,6 +301,7 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 - Windows Computer Use：目标窗口定点截图、UI Automation 元素、单动作执行、Qwen 感知路由、过期快照拒绝与动作时安全确认
 - 安全执行：Allow/Ask/Deny、Plan Mode、Auto Mode、项目可信判断、Hooks 和受支持平台上的 Shell Sandbox。Full Mode（`/mode full`）会主动跳过通用权限规则引擎；Computer Use 高影响动作确认、Hooks、路径校验、工具校验和已启用的 Sandbox 仍是独立约束层。
 - 长任务：TodoWrite、持久化任务图、Sub-Agent、后台运行、Git Worktree 隔离、Agent Teams
+- 内置 Workfriend：工作与心情交互问询、下班前一小时持久化回访、最多 10 道上下文选择题、优化建议与鼓励，以及 Word/Qwen 语音交付
 - 上下文与连续性：会话持久化、Resume、Compaction、Token 预算、项目记忆、文件检查点和 Rewind
 - 扩展能力：Skills、自定义 Agents、Slash Commands、Output Styles、Hooks、MCP Servers、Plugins 和静态 Marketplace
 - 使用接口：Ink 交互界面、Headless text/JSON/NDJSON、图片与截图、多模型协议

@@ -29,7 +29,7 @@
 
 export interface PendingNotification {
   /** Discriminator for future modes (compaction reminder, plan summary, ...). */
-  mode: "task-notification";
+  mode: "task-notification" | "workfriend-notification";
   /** Pre-formatted XML/text message body — gets injected as a user message verbatim. */
   text: string;
   /** Enqueue timestamp in ms — kept for debug logs / future ordering tweaks. */
