@@ -98,7 +98,7 @@ export function getWorkfriendJevConfig(): WorkfriendJevConfig {
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),
     model: safeModel(process.env.JEV_MODEL),
-    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 5_000, 500, 30_000),
+    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 8_000, 500, 30_000),
   };
 }
 

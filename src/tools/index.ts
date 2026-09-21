@@ -23,7 +23,12 @@ import { classicWordsTool } from "./classicWordsTool.js";
 import { listMcpResourcesTool } from "./listMcpResourcesTool.js";
 import { readMcpResourceTool } from "./readMcpResourceTool.js";
 import { powerShellTool } from "./powerShellTool.js";
-import { computerActionTool, computerNavigateTool, computerObserveTool } from "./computerUseTools.js";
+import {
+  computerActionGroupTool,
+  computerActionTool,
+  computerNavigateTool,
+  computerObserveTool,
+} from "./computerUseTools.js";
 import {
   markdownToPdfTool,
   pdfToMarkdownTool,
@@ -62,6 +67,7 @@ const BUILTIN_TOOLS: Tool[] = [
   bashTool,
   powerShellTool,
   computerObserveTool,
+  computerActionGroupTool,
   computerActionTool,
   computerNavigateTool,
   rhinoObserveTool,

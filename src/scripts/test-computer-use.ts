@@ -7,28 +7,42 @@ import * as path from "node:path";
 import { getAllTools } from "../tools/index.js";
 import { toolResultText } from "../tools/Tool.js";
 import {
+  computerActionGroupTool,
   computerActionTool,
   computerNavigateTool,
   computerObserveTool,
   prohibitedWindowReason,
+  resolveComputerActionGroupJevDecision,
+  validateComputerActionGroup,
   validateComputerKey,
 } from "../tools/computerUseTools.js";
-import { listComputerWindows } from "../tools/computerUseBackend.js";
+import { COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE } from "../tools/computerUseGuidance.js";
+import {
+  computerUseActionPowerShell,
+  listComputerWindows,
+  observeComputerWindow,
+  performComputerActions,
+} from "../tools/computerUseBackend.js";
 import {
   COMPUTER_USE_INDICATOR_SUBTITLE,
   COMPUTER_USE_INDICATOR_TITLE,
+  computerUseIndicatorHostPowerShell,
   computerUseIndicatorPowerShell,
+  endComputerUseIndicatorSession,
   getComputerUseIndicatorConfig,
+  hasComputerUseIndicatorSession,
 } from "../tools/computerUseIndicator.js";
 import { checkPermission, type PermissionSettings } from "../permissions/permissions.js";
 import { loadEnv } from "../utils/loadEnv.js";
 import {
   buildComputerUseJevRequest,
   buildComputerNavigationJevRequest,
+  getComputerUseJevConfig,
   interpretComputerUseJevResponse,
 } from "../tools/computerUseJev.js";
 import {
   callOpenRouterJev,
+  OpenRouterJevError,
   type JevDecisionResponse,
 } from "../services/jev/openRouterJev.js";
 
@@ -154,8 +168,10 @@ async function main(): Promise<void> {
   await loadEnv();
   console.log("\n[1] Registry and safety policy");
   const names = new Set(getAllTools().map((tool) => tool.name));
+  const orderedNames = getAllTools().map((tool) => tool.name);
   assert(names.has("ComputerObserve") === (process.platform === "win32"), "ComputerObserve Windows registration");
   assert(names.has("ComputerAction") === (process.platform === "win32"), "ComputerAction Windows registration");
+  assert(names.has("ComputerActionGroup") === (process.platform === "win32"), "ComputerActionGroup Windows registration");
   assert(names.has("ComputerNavigate") === (process.platform === "win32"), "ComputerNavigate Windows registration");
   assert(
     prohibitedWindowReason({ id: "1", processId: 1, processName: "WindowsTerminal", title: "Terminal" }) !== null,
@@ -167,19 +183,169 @@ async function main(): Promise<void> {
   );
   assert(validateComputerKey("Windows+r") !== null, "Windows-key shortcuts are prohibited");
   assert(validateComputerKey("Control_L+a") === null, "ordinary keyboard chords are accepted");
+  if (process.platform === "win32") {
+    assert(
+      orderedNames.indexOf("ComputerActionGroup") < orderedNames.indexOf("ComputerAction"),
+      "the browser fast path is presented before the single-action fallback",
+    );
+  }
+  assert(
+    COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE.includes("MUST use ComputerActionGroup") &&
+      COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE.includes("stop and report success") &&
+      computerActionGroupTool.description.includes(COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE),
+    "the always-on browser routing and completion instructions are also present in the group tool description",
+  );
+  const groupSchemaProperties = (computerActionGroupTool.inputSchema as {
+    properties: Record<string, unknown>;
+  }).properties;
+  assert(
+    !("perception" in groupSchemaProperties) && !("image_delivery" in groupSchemaProperties),
+    "the grouped fast path cannot opt back into remote perception or inline image delivery",
+  );
+  const validBrowserGroup = {
+    window_id: "browser",
+    snapshot_id: "snapshot",
+    goal: "Search the web for current news",
+    risk_category: "ordinary" as const,
+    actions: [
+      { action: "press_key" as const, key: "Control+l" },
+      { action: "wait" as const, duration_ms: 150 },
+      { action: "type_text" as const, text: "https://www.baidu.com/s?wd=test" },
+      { action: "press_key" as const, key: "Enter" },
+      { action: "wait" as const, duration_ms: 1_000 },
+    ],
+  };
+  assert(validateComputerActionGroup(validBrowserGroup) === null, "ordinary address-bar search with bounded intermediate/final waits is accepted as one browser action group");
+  const browserSnapshot = {
+    id: "snapshot",
+    createdAt: Date.now(),
+    observation: {
+      window: { id: "browser", processId: 1, processName: "chrome", title: "Baidu" },
+      width: 1_200,
+      height: 800,
+      nativeWidth: 1_200,
+      nativeHeight: 800,
+      focusedElement: "ControlType.Document: Baidu",
+      elements: [
+        {
+          index: 74,
+          controlType: "Edit",
+          name: "百度搜索",
+          automationId: "chat-textarea",
+          className: "",
+          enabled: true,
+          focusable: true,
+          focused: false,
+          x: 200,
+          y: 150,
+          width: 600,
+          height: 40,
+        },
+        {
+          index: 81,
+          controlType: "Button",
+          name: "百度一下",
+          automationId: "chat-submit-button",
+          className: "",
+          enabled: true,
+          focusable: true,
+          focused: false,
+          x: 820,
+          y: 150,
+          width: 100,
+          height: 40,
+        },
+      ],
+      screenshot: Buffer.alloc(0),
+      mediaType: "image/jpeg" as const,
+    },
+  };
+  const validPageSearchGroup = {
+    window_id: "browser",
+    snapshot_id: "snapshot",
+    goal: "Search Baidu for current news",
+    risk_category: "ordinary" as const,
+    actions: [
+      { action: "set_value" as const, element_index: 74, text: "马斯克最新消息" },
+      { action: "press_key" as const, key: "Enter" },
+      { action: "wait" as const, duration_ms: 1_000 },
+    ],
+  };
+  assert(
+    validateComputerActionGroup(validPageSearchGroup, browserSnapshot) === null,
+    "one fresh editable browser element can be filled and submitted in one action group",
+  );
+  assert(
+    validateComputerActionGroup(
+      {
+        ...validPageSearchGroup,
+        actions: [
+          { action: "set_value" as const, element_index: 81, text: "must not type into a button" },
+          { action: "press_key" as const, key: "Enter" },
+          { action: "wait" as const, duration_ms: 1_000 },
+        ],
+      },
+      browserSnapshot,
+    )?.includes("Edit or ComboBox") === true,
+    "grouped page input is rejected unless the fresh snapshot target is editable",
+  );
+  assert(
+    validateComputerActionGroup(
+      {
+        ...validPageSearchGroup,
+        actions: [
+          { action: "set_value" as const, x: 200, y: 150, text: "raw coordinates are unsafe" },
+          { action: "press_key" as const, key: "Enter" },
+          { action: "wait" as const, duration_ms: 1_000 },
+        ],
+      },
+      browserSnapshot,
+    )?.includes("element_index") === true,
+    "grouped page input rejects raw coordinates",
+  );
+  assert(
+    validateComputerActionGroup({
+      ...validBrowserGroup,
+      actions: [
+        { action: "press_key" as const, key: "Control+l" },
+        { action: "press_key" as const, key: "Enter" },
+        { action: "type_text" as const, text: "must not type after navigation" },
+      ],
+    })?.includes("Only a final wait") === true,
+    "a browser group cannot target a changed page after submission",
+  );
+  assert(
+    validateComputerActionGroup({ ...validBrowserGroup, risk_category: "external_communication" })?.includes("ordinary") === true,
+    "non-ordinary effects cannot use the grouped fast path",
+  );
+  assert(
+    validateComputerActionGroup({
+      ...validBrowserGroup,
+      actions: [
+        { action: "click" as const, x: 100, y: 100 },
+        { action: "type_text" as const, text: "unsafe stale-focus path" },
+      ],
+    })?.includes("unsupported") === true,
+    "grouped browser clicks remain rejected so changed-page coordinates and focus are never reused",
+  );
 
   console.log("\n[2] Visible control indicator");
   const defaultIndicator = getComputerUseIndicatorConfig({});
   const disabledIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR: "off" });
-  const customIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_HOLD_MS: "1200" });
-  const invalidIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_HOLD_MS: "99999" });
+  const customIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_IDLE_TIMEOUT_MS: "180000" });
+  const invalidIndicator = getComputerUseIndicatorConfig({ CCAGENT_COMPUTER_USE_INDICATOR_IDLE_TIMEOUT_MS: "1000" });
   const indicatorSource = computerUseIndicatorPowerShell();
-  assert(defaultIndicator.enabled && defaultIndicator.holdMs === 650, "control indicator is enabled by default with a visible hold time");
+  const indicatorHost = computerUseIndicatorHostPowerShell();
+  const actionSource = computerUseActionPowerShell();
+  assert(defaultIndicator.enabled && defaultIndicator.idleTimeoutMs === 120_000, "control indicator is enabled by default with a bounded crash fallback");
   assert(!disabledIndicator.enabled, "headless users can explicitly disable the control indicator");
-  assert(customIndicator.holdMs === 1200 && invalidIndicator.holdMs === 650, "indicator duration is configurable only within safe bounds");
+  assert(customIndicator.idleTimeoutMs === 180_000 && invalidIndicator.idleTimeoutMs === 120_000, "indicator crash timeout is configurable only within safe bounds");
   assert(indicatorSource.includes(COMPUTER_USE_INDICATOR_TITLE) && indicatorSource.includes(COMPUTER_USE_INDICATOR_SUBTITLE), "overlay includes an explicit AI-control warning");
   assert(indicatorSource.includes("WS_EX_NOACTIVATE") && indicatorSource.includes("WS_EX_TRANSPARENT"), "overlay does not steal focus or block user input");
   assert(indicatorSource.includes("CCAgentCursorBadge") && indicatorSource.includes("DrawPolygon"), "overlay draws a highlighted mouse-pointer badge");
+  assert(indicatorHost.includes("$statePath") && indicatorHost.includes("$state.stop"), "one indicator host stays alive until the owning agent turn stops it");
+  assert(!indicatorSource.includes("Cursor.Position"), "the agent pointer never follows the user's hardware cursor");
+  assert(actionSource.includes("PostMessage") && !actionSource.includes("SetCursorPos") && !actionSource.includes("mouse_event"), "mouse actions target the selected window without moving the system cursor");
 
   console.log("\n[3] Permission floor");
   const cwd = process.cwd();
@@ -225,8 +391,80 @@ async function main(): Promise<void> {
     settings: settings("default"),
   });
   assert(navigateDefault.behavior === "ask", "bounded multi-step navigation asks in default mode");
+  const groupDefault = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("default"),
+  });
+  assert(groupDefault.behavior === "ask", "ordinary browser action group asks once in default mode");
+  const groupJevDefaultAllow = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("default"),
+    precomputedAutoDecision: { behavior: "allow", reason: "Jev approved the complete ordinary browser group" },
+  });
+  assert(groupJevDefaultAllow.behavior === "allow", "one high-confidence Jev allow replaces the ordinary default-mode group prompt");
+  const groupPlanDenied = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("plan"),
+    precomputedAutoDecision: { behavior: "allow", reason: "Jev approved the complete ordinary browser group" },
+  });
+  assert(groupPlanDenied.behavior === "deny", "Jev browser-group approval cannot bypass Plan Mode");
+  const highRiskGroupDenied = await checkPermission({
+    tool: computerActionGroupTool,
+    input: { ...validBrowserGroup, risk_category: "external_communication" },
+    cwd,
+    settings: settings("full"),
+    precomputedAutoDecision: { behavior: "allow", reason: "invalid attempted downgrade" },
+  });
+  assert(highRiskGroupDenied.behavior === "deny", "browser-group fast path cannot bypass the ordinary-risk floor");
+  const fallbackAskOverridesFullAndAllow = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: { mode: "full", allow: ["ComputerActionGroup"], deny: [] },
+    precomputedAutoDecision: { behavior: "allow", reason: "must not override mandatory fallback review" },
+    requiredComputerGroupReview: { behavior: "ask", reason: "confirm the intact browser group once" },
+  });
+  assert(
+    fallbackAskOverridesFullAndAllow.behavior === "ask",
+    "mandatory whole-group fallback review cannot be bypassed by Full Mode, an allow rule, or a precomputed allow",
+  );
+  const fallbackAllowExecutes = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("default"),
+    requiredComputerGroupReview: { behavior: "allow", reason: "whole-group fallback reviewer approved" },
+  });
+  assert(fallbackAllowExecutes.behavior === "allow", "an explicit whole-group fallback allow can execute the intact plan");
+  const fallbackPlanDenied = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("plan"),
+    requiredComputerGroupReview: { behavior: "allow", reason: "must not bypass Plan Mode" },
+  });
+  assert(fallbackPlanDenied.behavior === "deny", "whole-group fallback approval cannot bypass Plan Mode");
+  const fallbackRuleDenied = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: { mode: "full", allow: [], deny: ["ComputerActionGroup"] },
+    requiredComputerGroupReview: { behavior: "allow", reason: "must not bypass an explicit deny rule" },
+  });
+  assert(fallbackRuleDenied.behavior === "deny", "whole-group fallback approval cannot bypass an explicit deny rule");
 
   console.log("\n[4] Jev + LLM Computer Use decision gate");
+  const originalJevTimeout = process.env.JEV_TIMEOUT_MS;
+  delete process.env.JEV_TIMEOUT_MS;
+  assert(getComputerUseJevConfig().timeoutMs === 8_000, "Jev default timeout tolerates normal OpenRouter latency without an unbounded wait");
+  if (originalJevTimeout === undefined) delete process.env.JEV_TIMEOUT_MS;
+  else process.env.JEV_TIMEOUT_MS = originalJevTimeout;
   const jevRequest = buildComputerUseJevRequest({
     userGoal: "Attach the selected drawing to an external message.",
     window: {
@@ -275,6 +513,176 @@ async function main(): Promise<void> {
     "OpenRouter Jev request enforces zero-retention and no-data-collection routing",
   );
 
+  const successfulJevResponse = () => new Response(JSON.stringify({
+    model: "typesafe/jev-1.13",
+    answers: { reachable: { type: "noul", noul: 0.99 } },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  let transient503Attempts = 0;
+  const recoveredFrom503 = await callOpenRouterJev(jevRequest, {
+    apiKey: "openrouter-test-key",
+    maxAttempts: 2,
+    retryDelayMs: 0,
+    fetchImpl: (async () => {
+      transient503Attempts++;
+      return transient503Attempts === 1
+        ? new Response(JSON.stringify({ error: { message: "temporary overload" } }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          })
+        : successfulJevResponse();
+    }) as typeof fetch,
+  });
+  assert(
+    transient503Attempts === 2 &&
+      recoveredFrom503.attempts === 2 &&
+      recoveredFrom503.answers.reachable?.type === "noul",
+    "a transient Jev HTTP 503 is retried once and the second response succeeds",
+  );
+
+  let transientTimeoutAttempts = 0;
+  const recoveredFromTimeout = await callOpenRouterJev(jevRequest, {
+    apiKey: "openrouter-test-key",
+    timeoutMs: 10,
+    maxAttempts: 2,
+    retryDelayMs: 0,
+    fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+      transientTimeoutAttempts++;
+      if (transientTimeoutAttempts > 1) return Promise.resolve(successfulJevResponse());
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof fetch,
+  });
+  assert(
+    transientTimeoutAttempts === 2 &&
+      recoveredFromTimeout.attempts === 2 &&
+      recoveredFromTimeout.answers.reachable?.type === "noul",
+    "a transient Jev timeout is retried once and the second response succeeds",
+  );
+
+  let exhaustedTimeoutAttempts = 0;
+  let exhaustedTimeoutError: unknown;
+  try {
+    await callOpenRouterJev(jevRequest, {
+      apiKey: "openrouter-test-key",
+      timeoutMs: 10,
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+        exhaustedTimeoutAttempts++;
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }) as typeof fetch,
+    });
+  } catch (error) {
+    exhaustedTimeoutError = error;
+  }
+  assert(
+    exhaustedTimeoutAttempts === 2 &&
+      exhaustedTimeoutError instanceof OpenRouterJevError &&
+      exhaustedTimeoutError.kind === "timeout" &&
+      exhaustedTimeoutError.attempts === 2 &&
+      exhaustedTimeoutError.message.includes("after 2 attempts"),
+    "two Jev timeouts stop at the retry bound and report the attempt count",
+  );
+
+  let unauthorizedAttempts = 0;
+  let unauthorizedError: unknown;
+  try {
+    await callOpenRouterJev(jevRequest, {
+      apiKey: "openrouter-test-key",
+      maxAttempts: 3,
+      retryDelayMs: 0,
+      fetchImpl: (async () => {
+        unauthorizedAttempts++;
+        return new Response(JSON.stringify({ error: { message: "invalid key" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch,
+    });
+  } catch (error) {
+    unauthorizedError = error;
+  }
+  assert(
+    unauthorizedAttempts === 1 &&
+      unauthorizedError instanceof OpenRouterJevError &&
+      unauthorizedError.kind === "http" &&
+      unauthorizedError.status === 401,
+    "a Jev HTTP 401 is a hard failure and is never retried",
+  );
+
+  let protocolAttempts = 0;
+  let protocolError: unknown;
+  try {
+    await callOpenRouterJev(jevRequest, {
+      apiKey: "openrouter-test-key",
+      maxAttempts: 3,
+      retryDelayMs: 0,
+      fetchImpl: (async () => {
+        protocolAttempts++;
+        return new Response(JSON.stringify({ model: "typesafe/jev-1.13" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch,
+    });
+  } catch (error) {
+    protocolError = error;
+  }
+  assert(
+    protocolAttempts === 1 &&
+      protocolError instanceof OpenRouterJevError &&
+      protocolError.kind === "protocol",
+    "a malformed Jev protocol response is never retried",
+  );
+
+  const parentAbortController = new AbortController();
+  let parentAbortAttempts = 0;
+  let parentAbortError: unknown;
+  const parentAbortRequest = callOpenRouterJev(jevRequest, {
+    apiKey: "openrouter-test-key",
+    timeoutMs: 1_000,
+    maxAttempts: 3,
+    retryDelayMs: 0,
+    signal: parentAbortController.signal,
+    fetchImpl: ((_input: string | URL | Request, init?: RequestInit) => {
+      parentAbortAttempts++;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof fetch,
+  });
+  parentAbortController.abort(new Error("parent request cancelled"));
+  try {
+    await parentAbortRequest;
+  } catch (error) {
+    parentAbortError = error;
+  }
+  assert(
+    parentAbortAttempts === 1 &&
+      parentAbortError instanceof OpenRouterJevError &&
+      parentAbortError.kind === "aborted",
+    "a parent AbortSignal cancels the active Jev call without any retry",
+  );
+
   const highRiskResponse: JevDecisionResponse = {
     model: "typesafe/jev-1.13",
     answers: {
@@ -303,6 +711,22 @@ async function main(): Promise<void> {
   );
   assert(highRiskDecision.effectiveRisk === "upload", "Jev can only upgrade an LLM-declared ordinary risk");
   assert(highRiskDecision.permissionBehavior === "ask", "Jev high-impact decision requires confirmation");
+
+  const unavailableGroupDecision = resolveComputerActionGroupJevDecision({
+    configured: true,
+    available: false,
+    mode: "enforce",
+    model: "~typesafe/jev-latest",
+    originalRisk: "ordinary",
+    effectiveRisk: "ordinary",
+    summary: "Jev request timed out after 2 attempts.",
+  });
+  assert(
+    unavailableGroupDecision.requiresFallbackReview === true &&
+      unavailableGroupDecision.forceDeny !== true &&
+      unavailableGroupDecision.summary.includes("Do not decompose"),
+    "an unavailable Jev gate keeps the browser group intact for one fallback review instead of forcing single actions",
+  );
 
   const safeResponse: JevDecisionResponse = {
     model: "typesafe/jev-1.13",
@@ -337,6 +761,14 @@ async function main(): Promise<void> {
     precomputedAutoDecision: { behavior: "allow", reason: "Jev verified ordinary action" },
   });
   assert(jevAutoAllow.behavior === "allow", "Auto Mode consumes Jev decision without a second LLM classifier call");
+  const groupJevAutoAllow = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: settings("auto"),
+    precomputedAutoDecision: { behavior: "allow", reason: "Jev verified the complete ordinary browser group" },
+  });
+  assert(groupJevAutoAllow.behavior === "allow", "one Jev decision authorizes one ordinary browser group in Auto Mode");
 
   if (process.platform !== "win32" || process.env.LIVE_COMPUTER_USE !== "1") {
     console.log("\n[5] Live Windows observation skipped (set LIVE_COMPUTER_USE=1)");
@@ -377,6 +809,24 @@ async function main(): Promise<void> {
         );
       }
 
+      const rejectedGroup = await computerActionGroupTool.call(
+        {
+          window_id: window.id,
+          snapshot_id: snapshotId,
+          goal: "exercise local validation without sending input",
+          risk_category: "ordinary",
+          actions: [
+            { action: "press_key", key: "Control+l" },
+            { action: "type_text", text: "not sent" },
+          ],
+        },
+        context,
+      );
+      assert(
+        rejectedGroup.isError === true && toolResultText(rejectedGroup.content).includes("snapshot remains valid"),
+        "pre-execution group validation preserves the fresh snapshot for a corrected retry",
+      );
+
       const editableIndex = observedText.match(/^\[(\d+)\]\s+(?:Document|Edit)\b/m)?.[1];
       const replacementText = "Computer Use Action Probe " + Date.now();
       const acted = await computerActionTool.call(
@@ -399,6 +849,7 @@ async function main(): Promise<void> {
       if (acted.isError) console.log("  Action error: " + actedText);
       const refreshedId = actedText.match(/snapshot_id:\s*([0-9a-f-]+)/i)?.[1];
       assert(!acted.isError && Boolean(refreshedId) && refreshedId !== snapshotId, "text action consumes the old snapshot and returns a fresh one");
+      assert(hasComputerUseIndicatorSession("computer-use-test"), "control banner remains alive after one action instead of flashing per input");
 
       assert(
         withoutWhitespace(actedText).includes(withoutWhitespace(replacementText)),
@@ -454,6 +905,23 @@ async function main(): Promise<void> {
         keyboardReplaced,
         "keyboard chord and typing replaced the selected text",
       );
+      assert(hasComputerUseIndicatorSession("computer-use-test"), "one task-level indicator survives multiple ComputerAction calls");
+
+      const batchText = "Computer Use 中文批量输入测试 " + Date.now();
+      const beforeBatch = await observeComputerWindow(window);
+      await performComputerActions(
+        window,
+        [
+          { action: "press_key", key: "Control+a" },
+          { action: "type_text", text: batchText },
+        ],
+        { width: beforeBatch.nativeWidth, height: beforeBatch.nativeHeight },
+      );
+      const afterBatch = await observeComputerWindow(window);
+      assert(
+        withoutWhitespace(afterBatch.elements.map((element) => element.name).join("\n")).includes(withoutWhitespace(batchText)),
+        "multiple native inputs execute in one helper call without intermediate observation",
+      );
 
       const stale = await computerActionTool.call(
         {
@@ -470,6 +938,9 @@ async function main(): Promise<void> {
       );
       assert(stale.isError === true && toolResultText(stale.content).includes("stale"), "stale snapshot reuse is rejected");
     } finally {
+      await endComputerUseIndicatorSession("computer-use-test");
+      await endComputerUseIndicatorSession();
+      assert(!hasComputerUseIndicatorSession("computer-use-test") && !hasComputerUseIndicatorSession(), "task completion removes every test indicator session");
       launched.child.kill();
       if (launched.child.exitCode === null) {
         await new Promise<void>((resolve) => {

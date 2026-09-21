@@ -13,6 +13,7 @@ import { getEnabledAgents } from "../agents/registry.js";
 import { getActiveOutputStyleConfig } from "../styles/registry.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolTempRoot } from "../utils/paths.js";
+import { COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE } from "../tools/computerUseGuidance.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +44,14 @@ const IDENTITY_SECTIONS = [
   "Treat the current working directory as the primary workspace boundary. The CC Agent system directory at ~/.cc-agent is also available for memory and session storage; do not assume other outside paths are available.",
 ];
 
+// Safety and routing instructions must survive output styles. In particular,
+// an old project memory must not push a known browser search back onto the
+// expensive one-action/one-observation path.
+const COMPUTER_USE_INSTRUCTION_SECTIONS = [
+  COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE,
+  "Jev is a preflight decision gate, not a planner: it cannot merge separate ComputerAction calls after you choose them. Plan the complete ordinary browser sequence before selecting the tool.",
+];
+
 // Coding instructions — dropped when an output style sets
 // keepCodingInstructions:false (the style then fully owns the agent's
 // behaviour). Built-in styles keep them; only opt-out custom styles strip.
@@ -57,8 +66,8 @@ const CODING_INSTRUCTION_SECTIONS = [
 
 function getStaticPromptSections(keepCodingInstructions: boolean): string[] {
   return keepCodingInstructions
-    ? [...IDENTITY_SECTIONS, ...CODING_INSTRUCTION_SECTIONS]
-    : [...IDENTITY_SECTIONS];
+    ? [...IDENTITY_SECTIONS, ...COMPUTER_USE_INSTRUCTION_SECTIONS, ...CODING_INSTRUCTION_SECTIONS]
+    : [...IDENTITY_SECTIONS, ...COMPUTER_USE_INSTRUCTION_SECTIONS];
 }
 
 async function getGitContext(cwd: string): Promise<Pick<RuntimeEnvironmentContext, "gitBranch" | "gitStatus" | "gitRecentCommit">> {

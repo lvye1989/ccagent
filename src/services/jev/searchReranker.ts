@@ -39,7 +39,7 @@ function model(): string {
 
 function timeoutMs(): number {
   const parsed = Number(process.env.JEV_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed >= 500 && parsed <= 30_000 ? parsed : 5_000;
+  return Number.isFinite(parsed) && parsed >= 500 && parsed <= 30_000 ? parsed : 8_000;
 }
 
 function concise(value: string | undefined, max: number): string {

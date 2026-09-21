@@ -312,6 +312,14 @@ export function summarizeTool(
       const intent = asString(inp.intent);
       return { label: "ComputerAction", target: intent ? action + ": " + shortenCommand(intent) : action };
     }
+    case "ComputerActionGroup": {
+      const actions = Array.isArray(inp.actions) ? inp.actions.length : 0;
+      return {
+        label: "Jev Browser Group",
+        target: asString(inp.goal),
+        stat: result?.match(/^actions=(\d+)/m)?.[1] ?? (actions > 0 ? `${actions} actions` : undefined),
+      };
+    }
     case "RhinoObserve":
       return {
         label: "RhinoObserve",

@@ -304,8 +304,8 @@ CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步
 | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` | Computer Use 感知模型的 API Key |
 | `OPENROUTER_API_KEY` | Computer Use、Rhino、Auto Mode、搜索与 Workfriend 的 Jev 决策所用 OpenRouter Key；保存于选定的私有 `.env` |
 | `CCAGENT_COMPUTER_USE_JEV` | 配置 OpenRouter Key 后是否启用 Jev；默认启用 |
-| `CCAGENT_COMPUTER_USE_INDICATOR` | 发送真实输入时显示置顶接管提示和高亮鼠标图形；默认启用 |
-| `CCAGENT_COMPUTER_USE_INDICATOR_HOLD_MS` | 动作结束后继续显示提示的毫秒数，可设为 `250-3000`；默认 `650` |
+| `CCAGENT_COMPUTER_USE_INDICATOR` | 从首个 Computer Action 到本轮任务结束，持续显示置顶接管提示与独立代理指针；默认启用 |
+| `CCAGENT_COMPUTER_USE_INDICATOR_IDLE_TIMEOUT_MS` | 异常退出时的兜底清理超时，可设为 `30000-600000` 毫秒；正常情况下任务结束即清理，默认 `120000` |
 | `CCAGENT_TOOL_JEV` | Auto Mode 下是否优先用 Jev 判断非只读工具；配置 Key 后默认启用 |
 | `JEV_TOOL_MODE` | 通用工具决策模式：`enforce`（默认）、`shadow` 或 `off` |
 | `CCAGENT_SEARCH_JEV` | 是否按查询相关性与来源质量重排多条 `WebSearch` 结果；配置 Key 后默认启用 |
@@ -321,7 +321,7 @@ CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步
 | `WORKFRIEND_JEV_MODE` | `decision`（Jev 选择主要行动，默认）、`advisory`（仅评分）或 `off` |
 | `JEV_MODEL` | OpenRouter Decisions 模型，默认为 `~typesafe/jev-latest` |
 | `JEV_BASE_URL` | 可选的 OpenRouter 官方 Decisions 端点覆盖；默认为 `https://openrouter.ai/api/alpha/decisions` |
-| `JEV_TIMEOUT_MS` / `JEV_MIN_CONFIDENCE` | 可选超时和执行置信度阈值；默认 `5000` 与 `0.8` |
+| `JEV_TIMEOUT_MS` / `JEV_MIN_CONFIDENCE` | 可选超时和执行置信度阈值；默认 `8000` 与 `0.8` |
 | `QWEN_TTS_MODEL` | Workfriend 语音交付模型，默认 `qwen-audio-3.1-tts-flash` |
 | `QWEN_TTS_VOICE` | 可选的 Workfriend 音色，默认 `longanhuan_v3.1` |
 | `DASHSCOPE_TTS_URL` | 可选的 Qwen-Audio-TTS 完整接口地址；未设置时从 `DASHSCOPE_BASE_URL` 推导 |
@@ -431,20 +431,25 @@ Skills 也默认 Open。输入 `/agent-skill` 可在本地卡片选择 **Open** 
 
 ### Windows Computer Use
 
-`ComputerObserve`、`ComputerAction` 与 `ComputerNavigate` 在 Windows 上提供内置、非 MCP 的桌面控制闭环：
+`ComputerObserve`、`ComputerAction`、`ComputerActionGroup` 与 `ComputerNavigate` 在 Windows 上提供内置、非 MCP 的桌面控制闭环：
 
 1. `ComputerObserve(action="list_windows")` 列出可用的顶层窗口。
 2. `ComputerObserve(action="observe", window_id="...")` 只捕获所选窗口，返回截图、可访问性元素树与一次性 `snapshot_id`。
 3. `ComputerAction` 针对这份新鲜快照只执行一个动作，随后立即重新观察并返回下一份快照。
-4. `ComputerNavigate` 可让 Jev 在最多五步内选择可逆导航动作（Escape、翻页、Home/End、定量滚动或等待），每次输入后都重新观察；达到目标、状态含糊、疑似提示词注入、窗口变化、Jev 失败或达到步数上限时立即停止。该工具不能点击、输入、提交、上传、安装、删除或修改账户。
+4. `ComputerActionGroup` 是已完整规划的普通浏览器流程的必选快速通道。主 LLM 一次提交 2–8 个固定动作，Jev 对脱敏后的整组计划只判断一次；高置信度的 Jev 放行会替代普通权限提示和第二个分类模型。随后 Windows 在一次原生调用中连续执行，中间不截图、不扫描无障碍树、不调用 Qwen，最后只做一次精简的本地无障碍树观察。确定性拒绝、Plan Mode、显式 deny 规则与 Hooks 仍有最终约束力。最终检查默认关闭 Qwen；只有无障碍树不足时才显式启用。典型搜索流程可以是 `set_value（新鲜快照中的已启用 Edit/ComboBox）→ Enter → 有界等待`，也可以是 `Control+L → 可选有界等待 → 输入网址/查询词 → Enter → 有界等待`；批量流程拒绝原始坐标点击，整组等待总计不超过 5 秒。文本改用 Windows 原生 Unicode 输入，中文不再依赖当前输入法；本地计划校验失败发生在 Jev 和真实输入之前，并保留快照供修正后重试。Jev 必须可用且处于 `enforce`，工具只支持浏览器和普通可逆输入，提交页面后禁止继续操作新页面。
+5. `ComputerNavigate` 可让 Jev 在最多五步内选择可逆导航动作（Escape、翻页、Home/End、定量滚动或等待），每次输入后都重新观察；达到目标、状态含糊、疑似提示词注入、窗口变化、Jev 失败或达到步数上限时立即停止。该工具不能点击、输入、提交、上传、安装、删除或修改账户。
 
-在 CCAGENT 真正发送鼠标或键盘输入前，Windows 会显示置顶的 **“CCAGENT 正在控制电脑”** 提示条，并在鼠标附近显示红橙色高亮指针图形。提示层可被鼠标穿透、不抢键盘焦点、跟随指针，并会在动作结束或报错后自动撤销。它只会在目标窗口与快照尺寸通过最终校验后出现，因此被拒绝、未实际发送输入的动作不会误报“正在控制”。只有无人值守或无桌面的环境才建议设置 `CCAGENT_COMPUTER_USE_INDICATOR=0`。
+在 CCAGENT 发送本轮第一个输入前，Windows 会在目标窗口上端显示置顶的 **“ccagent正在控制电脑”** 提示条，并显示红橙色的**代理指针**。提示条与代理指针会跨越重新观察和多个单步动作持续存在，直到该轮任务完成、中止或失败时才消失。提示层可被鼠标穿透且不抢键盘焦点；点击、滚动与拖动通过定向窗口消息送往已验证的目标窗口，代理指针不再读取或移动用户的硬件鼠标，因此两个指针可以各自移动。键盘快捷键和文本输入仍需让目标应用获得 Windows 的唯一键盘焦点。提示只会在目标窗口与快照尺寸通过最终校验后出现。`CCAGENT_COMPUTER_USE_INDICATOR_IDLE_TIMEOUT_MS` 仅用于进程异常退出时兜底清理，并非单次动作显示时长；只有无人值守或无桌面环境才建议设置 `CCAGENT_COMPUTER_USE_INDICATOR=0`。
 
 推荐组合是 DeepSeek 作为主推理/文本模型，Qwen 仅作为视觉感知模型。可配置上表中的 `QWEN_*`/`DASHSCOPE_*` 环境变量，或令 `modelRoles.computerUse`（也接受 `computer_use`、`vision`、`image`、`multimodal`）指向已经声明的模型 Profile。在自动交付模式下，Qwen 成功生成视觉描述后，只把描述返回 DeepSeek，不把截图附加到 DeepSeek 回合。
 
-配置 `OPENROUTER_API_KEY` 后，CCAGENT 会在主 LLM 提出 `ComputerAction` 与权限/执行链之间增加 Jev 类型化决策门。程序通过 OpenRouter Decisions API 调用 `~typesafe/jev-latest`，一次批量判断目标是否存在、动作是否符合用户目标、是否疑似提示词注入、处置方式与实际风险。发送给 Jev 的只有文本和结构化状态，不含截图，也不含即将输入的正文。Jev 只能提高、不能降低主 LLM 声明的风险；高置信度普通操作可避免 Auto Mode 再调用一次通用 LLM 分类器，不确定、高影响或判断冲突时会退回重新观察、现有权限确认或通用 LLM 分类器。每个已执行结果都会同时记录 Jev 门禁与 `final_permission`，避免把原始 `execute` 误解为最终授权。每个请求都强制使用 ZDR 并禁止提供商收集数据。可用 `CCAGENT_JEV_MODE=shadow` 仅记录判断而不执行约束。
+配置 `OPENROUTER_API_KEY` 后，CCAGENT 会在主 LLM 提出 `ComputerAction` 或 `ComputerActionGroup` 与权限/执行链之间增加 Jev 类型化决策门。程序通过 OpenRouter Decisions API 调用 `~typesafe/jev-latest`，一次批量判断目标是否存在、动作是否符合用户目标、是否疑似提示词注入、处置方式与实际风险。发送给 Jev 的只有文本和结构化状态，不含截图，也不含即将输入的正文。动作组严格只调用一次 Jev，不能静默回退为未经审查的多动作执行。Jev 只能提高、不能降低主 LLM 声明的风险；高置信度普通操作可避免 Auto Mode 再调用一次通用 LLM 分类器，不确定、高影响或判断冲突时会退回重新观察、现有权限确认或单动作执行。每个已执行结果都会同时记录 Jev 门禁与 `final_permission`，避免把原始 `execute` 误解为最终授权。每个请求都强制使用 ZDR 并禁止提供商收集数据。`ComputerActionGroup` 要求 `CCAGENT_JEV_MODE=enforce`；shadow/off 模式保留单动作路径。
 
 窗口像素和可访问性文本始终按不可信数据处理。终端、Windows 身份验证/安全窗口、密码管理器、ChatGPT 与 Codex 均被排除。上传、外部通信、删除、金融、安装、医疗、验证码、账户及敏感数据操作，即使处于 Full Mode 也必须在动作发生前逐次确认；密码修改与绕过安全机制会被拒绝并交还用户操作。
+
+`ComputerAction` 只作为动态目标或单步动作的回退工具。它的动作后观察默认使用本地 `perception=off`、`image_delivery=text_only`，并返回精简元素列表，避免每次按键后都远程调用 Qwen；只有本地无障碍信息无法定位或验收目标时，才重新显式调用 `ComputerObserve(perception="on")`。
+
+如果用户只要求打开、搜索或导航，成功的 `ComputerActionGroup` 返回值已经包含最终完成观察；CCAGENT 会在这里结束，不再为了重复确认同一页面而额外调用一次 `ComputerObserve`/Qwen。
 
 该实现复现了 Codex 风格的可观察操作闭环与安全边界，但不包含 Codex 私有桌面辅助程序。当前使用 Windows `PrintWindow` 与 UI Automation，因此受保护内容或部分 GPU 渲染窗口的截图效果可能不同。对于 DOM 密集的网页任务，如有浏览器原生自动化能力，仍应优先使用。
 
@@ -491,7 +496,7 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 - 文件与代码工具：Read、Write、Edit、MultiEdit、Glob、Grep、Bash、PowerShell
 - 文档格式转换工具：MarkdownToPdf、WordToPdf、PdfToWord、PdfToMarkdown。工具接收工作区文件路径，包含输出签名校验、超时、隔离写入和安全覆盖，并可使用用户上传的模板。文本模板支持 `{{content}}`、`{{title}}`、`{{source}}`、`{{date}}` 以及 `template_data` 中的标量变量；DOCX/DOTX 模板合并当前使用 Windows 上的 Microsoft Word。LibreOffice 是跨平台 PDF 渲染回退，PDF 解析使用本地 `pdf2docx`、PyMuPDF 或 pdfplumber。
 - Web 与外部工具：WebFetch、Jev 重排的 WebSearch、`classic_words`（CNKGraph 古典文献）、MCP Tools、MCP Resources
-- Windows Computer Use：目标窗口定点截图、UI Automation 元素、单动作执行、Jev 有界导航、Qwen 感知路由、OpenRouter Jev 类型化预检、过期快照拒绝与动作时安全确认
+- Windows Computer Use：目标窗口定点截图、UI Automation 元素、单动作执行、单次 Jev 门禁的普通浏览器动作组、Jev 有界导航、Qwen 感知路由、OpenRouter Jev 类型化预检、过期快照拒绝与动作时安全确认
 - 安全执行：Allow/Ask/Deny、Plan Mode、Auto Mode、项目可信判断、Hooks 和受支持平台上的 Shell Sandbox。Full Mode（`/mode full`）会主动跳过通用权限规则引擎；Computer Use 高影响动作确认、Hooks、路径校验、工具校验和已启用的 Sandbox 仍是独立约束层。
 - 长任务：TodoWrite、持久化任务图、Sub-Agent、后台运行、Git Worktree 隔离、Agent Teams
 - 内置 Workfriend：工作与心情交互问询、Jev 0-4 级情绪/压力评分与下一步决策、下班前一小时持久化回访、最多 10 道上下文选择题、优化建议与鼓励，以及 Word/Qwen 语音交付

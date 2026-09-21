@@ -166,6 +166,12 @@ def _object_json(doc, rhino_object):
     }
     geometry = rhino_object.Geometry
     result["is_valid"] = bool(geometry.IsValid)
+    if isinstance(geometry, Rhino.Geometry.Curve):
+        # Native evidence for planar-surface decisions; a bounding box alone
+        # cannot establish closure or planarity of an oblique window outline.
+        result["is_closed"] = bool(geometry.IsClosed)
+        result["is_planar"] = bool(geometry.IsPlanar(doc.ModelAbsoluteTolerance))
+        result["degree"] = int(geometry.Degree)
     if isinstance(geometry, Rhino.Geometry.Brep):
         result["is_solid"] = bool(geometry.IsSolid)
         result["face_count"] = int(geometry.Faces.Count)
@@ -811,8 +817,14 @@ def _main():
                 if view is None:
                     raise RuntimeError("No active viewport to capture")
                 capture = Rhino.Display.ViewCapture()
-                capture.Width = 1200
-                capture.Height = 1500
+                # Match the active viewport; a forced portrait bitmap leaves
+                # huge blank margins around wide architectural courtyards.
+                viewport_size = view.ActiveViewport.Size
+                viewport_width = max(1, int(viewport_size.Width))
+                viewport_height = max(1, int(viewport_size.Height))
+                scale = 1600.0 / max(viewport_width, viewport_height)
+                capture.Width = max(1, int(round(viewport_width * scale)))
+                capture.Height = max(1, int(round(viewport_height * scale)))
                 capture.ScaleScreenItems = True
                 capture.DrawAxes = False
                 capture.DrawGrid = False

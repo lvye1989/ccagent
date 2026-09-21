@@ -21,7 +21,12 @@ import { compactMessages } from "../context/compaction.js";
 import { findToolByName } from "../tools/index.js";
 import { truncateToolResult, type ToolContext, type ToolResult } from "../tools/Tool.js";
 import { appendTextToContent, prependTextToContent } from "../tools/contentBlocks.js";
-import { preflightComputerActionWithJev } from "../tools/computerUseTools.js";
+import {
+  preflightComputerActionGroupWithJev,
+  preflightComputerActionWithJev,
+  validateComputerActionGroupPlan,
+} from "../tools/computerUseTools.js";
+import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js";
 import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev } from "../tools/rhinoTools.js";
 import { canExecuteRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
 import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
@@ -29,6 +34,7 @@ import {
   decideToolUseWithJev,
   shouldUseJevToolClassifier,
 } from "../permissions/jevToolClassifier.js";
+import { classifyAutoModeAction } from "../permissions/autoClassifier.js";
 import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
@@ -391,11 +397,24 @@ async function runOneToolBlock(
     const liveMode = context.getPermissionMode?.() as PermissionMode | undefined;
     const effectiveMode = liveMode ?? options.permissionMode;
 
+    if (block.name === "ComputerActionGroup") {
+      const validationError = validateComputerActionGroupPlan(toolInput);
+      if (validationError) {
+        const result: ToolResult = {
+          content: `ComputerActionGroup plan rejected locally before Jev: ${validationError} No input was sent and the snapshot was not consumed; correct the group and retry with the same snapshot_id.`,
+          isError: true,
+        };
+        return {
+          execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+        };
+      }
+    }
+
     // Jev is a fast, typed decision gate for the exact Computer Use snapshot.
     // It never lowers the LLM-declared risk. In Auto Mode a confident Jev
     // decision can replace the slower general-purpose classifier call; all
     // deterministic deny rules and the high-impact confirmation floor remain.
-    if (block.name === "ComputerAction" || block.name === "RhinoAction") {
+    if (block.name === "ComputerAction" || block.name === "ComputerActionGroup" || block.name === "RhinoAction") {
       setToolStatus(block.id, "classifier");
     }
     const jevDecision = block.name === "ComputerAction"
@@ -404,6 +423,12 @@ async function runOneToolBlock(
           context,
           options.conversationMessages,
         )
+      : block.name === "ComputerActionGroup"
+        ? await preflightComputerActionGroupWithJev(
+            toolInput,
+            context,
+            options.conversationMessages,
+          )
       : null;
     if (jevDecision?.forceDeny) {
       const result: ToolResult = {
@@ -422,6 +447,52 @@ async function runOneToolBlock(
       return {
         execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
       };
+    }
+    let computerGroupFallbackReview: {
+      behavior: "allow" | "ask";
+      reason: string;
+      trace: "llm_allow" | "manual_required";
+    } | undefined;
+    if (block.name === "ComputerActionGroup" && jevDecision?.requiresFallbackReview) {
+      if (context.abortSignal?.aborted) {
+        const result: ToolResult = {
+          content: "ComputerActionGroup was cancelled before fallback review. No input was sent.",
+          isError: true,
+        };
+        return {
+          execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+        };
+      }
+      setToolStatus(block.id, "classifier");
+      const fallbackVerdict = await classifyAutoModeAction({
+        messages: options.conversationMessages ?? [],
+        toolName: block.name,
+        toolInput,
+        allowRules: [
+          ...(options.permissionSettings?.allow ?? []),
+          ...(options.sessionPermissionRules?.allow ?? []),
+        ],
+        denyRules: [
+          ...(options.permissionSettings?.deny ?? []),
+          ...(options.sessionPermissionRules?.deny ?? []),
+        ],
+        model: options.model,
+      });
+      if (!fallbackVerdict.unavailable && !fallbackVerdict.shouldBlock) {
+        computerGroupFallbackReview = {
+          behavior: "allow",
+          reason: `Whole-group fallback LLM review approved the intact browser plan: ${fallbackVerdict.reason}`,
+          trace: "llm_allow",
+        };
+      } else {
+        computerGroupFallbackReview = {
+          behavior: "ask",
+          reason: fallbackVerdict.unavailable
+            ? `Jev and the whole-group fallback reviewer were unavailable; confirm the intact browser plan once (${fallbackVerdict.reason}).`
+            : `Whole-group fallback LLM review requires one confirmation: ${fallbackVerdict.reason}`,
+          trace: "manual_required",
+        };
+      }
     }
     if (
       jevDecision?.available &&
@@ -476,7 +547,7 @@ async function runOneToolBlock(
     if (effectiveMode === "auto") {
       setToolStatus(block.id, "classifier");
     }
-    const toolJevDecision = effectiveMode === "auto" && block.name !== "RhinoAction" && block.name !== "RhinoSequence" && !options.rhinoFastLane && shouldUseJevToolClassifier(tool)
+    const toolJevDecision = effectiveMode === "auto" && !jevDecision && block.name !== "RhinoAction" && block.name !== "RhinoSequence" && !options.rhinoFastLane && shouldUseJevToolClassifier(tool)
       ? await decideToolUseWithJev(
           block.name,
           toolInput,
@@ -512,6 +583,14 @@ async function runOneToolBlock(
       ...(precomputedJevDecision
         ? { precomputedAutoDecision: precomputedJevDecision }
         : {}),
+      ...(computerGroupFallbackReview
+        ? {
+            requiredComputerGroupReview: {
+              behavior: computerGroupFallbackReview.behavior,
+              reason: computerGroupFallbackReview.reason,
+            },
+          }
+        : {}),
     });
 
     // Jev's request-time confirmation is an independent Computer Use safety
@@ -522,6 +601,13 @@ async function runOneToolBlock(
         ...permission,
         behavior: "ask",
         reason: `Jev Computer Use decision requires confirmation: ${jevDecision.summary}`,
+      };
+    }
+    if (computerGroupFallbackReview?.behavior === "ask" && permission.behavior !== "deny") {
+      permission = {
+        ...permission,
+        behavior: "ask",
+        reason: computerGroupFallbackReview.reason,
       };
     }
     if (rhinoJevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
@@ -536,13 +622,18 @@ async function runOneToolBlock(
     // `permissionBehavior` from `processHookJSONOutput`). `deny` we
     // handle above as `blockingError`; `allow` short-circuits the
     // permission flow; `ask` upgrades a would-be `allow` into a prompt.
+    const isComputerInputTool = block.name === "ComputerAction" || block.name === "ComputerActionGroup";
     const computerRiskCategory =
-      block.name === "ComputerAction" && typeof toolInput.risk_category === "string"
+      isComputerInputTool && typeof toolInput.risk_category === "string"
         ? toolInput.risk_category
         : undefined;
     const computerRequiresFreshConfirmation =
-      block.name === "ComputerAction" &&
-      (computerRiskCategory !== "ordinary" || jevDecision?.permissionBehavior === "ask");
+      isComputerInputTool &&
+      (
+        computerRiskCategory !== "ordinary" ||
+        jevDecision?.permissionBehavior === "ask" ||
+        computerGroupFallbackReview?.behavior === "ask"
+      );
     const rhinoParameters =
       block.name === "RhinoAction" && toolInput.parameters && typeof toolInput.parameters === "object" && !Array.isArray(toolInput.parameters)
         ? toolInput.parameters as Record<string, unknown>
@@ -619,9 +710,13 @@ async function runOneToolBlock(
 
       if (decision === "deny") {
         permissionTrace = "user_denied";
-        const denialMessage = options.shouldAvoidPermissionPrompts === true
-          ? buildHeadlessDenialMessage(block.name)
-          : `Permission denied for ${block.name}.`;
+        const denialMessage = block.name === "ComputerActionGroup" && computerGroupFallbackReview
+          ? options.shouldAvoidPermissionPrompts === true
+            ? "ComputerActionGroup was not executed because Jev remained unavailable and foreground whole-group approval was unavailable. No input was sent. Do not decompose this plan into ComputerAction calls; retry the intact group after a fresh observation when Jev or foreground approval is available."
+            : "Permission denied for the intact ComputerActionGroup. No input was sent. Do not decompose the denied plan into ComputerAction calls."
+          : options.shouldAvoidPermissionPrompts === true
+            ? buildHeadlessDenialMessage(block.name)
+            : `Permission denied for ${block.name}.`;
         const result: ToolResult = {
           content: denialMessage,
           isError: true,
@@ -698,7 +793,7 @@ async function runOneToolBlock(
         ...result,
         content: prependTextToContent(
           result.content,
-          `[Jev Computer Use ${jevDecision.mode}]\n${jevDecision.summary}, gate=${jevDecision.permissionBehavior ?? "policy_fallback"}, final_permission=${permissionTrace}\n\n`,
+          `[Jev Computer Use ${jevDecision.mode}]\n${jevDecision.summary}, gate=${jevDecision.permissionBehavior ?? "policy_fallback"}, fallback_review=${computerGroupFallbackReview?.trace ?? "none"}, final_permission=${permissionTrace}\n\n`,
         ),
       };
     }
@@ -926,6 +1021,7 @@ export async function* query(
     }
   }
 
+  try {
   while (state.turnCount < maxTurns) {
     if (params.abortSignal?.aborted) {
       const abortedState = { ...state, aborted: true };
@@ -1304,4 +1400,7 @@ export async function* query(
     lastCallUsage,
     reason: "max_turns",
   };
+  } finally {
+    await endComputerUseIndicatorSession(params.toolContext.sessionId);
+  }
 }

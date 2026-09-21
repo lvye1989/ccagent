@@ -42,6 +42,7 @@ interface ToolJevConfig {
 const SKIP_TOOL_JEV = new Set([
   "ComputerObserve",
   "ComputerAction",
+  "ComputerActionGroup",
   "Agent",
   "AskUserQuestion",
   "WorkfriendAssess",
@@ -100,7 +101,7 @@ function getConfig(): ToolJevConfig {
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),
     model: safeModel(process.env.JEV_MODEL),
-    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 5_000, 500, 30_000),
+    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 8_000, 500, 30_000),
     minConfidence: envNumber(process.env.JEV_MIN_CONFIDENCE, 0.8, 0.5, 0.99),
   };
 }

@@ -138,7 +138,7 @@ export function getRhinoJevConfig(): {
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),
     model: safeModel(process.env.JEV_MODEL),
-    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 5_000, 500, 30_000),
+    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 8_000, 500, 30_000),
     minConfidence: envNumber(process.env.CCAGENT_RHINO_JEV_MIN_CONFIDENCE, 0.8, 0.5, 0.99),
   };
 }
@@ -157,17 +157,30 @@ function recentConversation(messages: MessageParam[], maxChars = 500): string[] 
 
 function compactObservation(observation: RhinoJevObservation, parameters: Record<string, unknown>, fast = false): Record<string, unknown> {
   const requested = new Set(rhinoTargetGuids(parameters));
-  const targets = [...observation.objects, ...observation.selection].filter(item => item && typeof item === "object" && requested.has(String((item as Record<string, unknown>).guid).toLowerCase()));
+  const targets = [...new Map([...observation.objects, ...observation.selection]
+    .filter(item => item && typeof item === "object" && requested.has(String((item as Record<string, unknown>).guid).toLowerCase()))
+    .map(item => [String((item as Record<string, unknown>).guid).toLowerCase(), item])).values()];
+  const observedTargets = new Set(targets.map(item => String((item as Record<string, unknown>).guid).toLowerCase()));
   return {
     observation_id: observation.observationId,
     captured_at: observation.capturedAt,
     document: observation.document,
     layers: observation.layers.slice(0, 80),
     selection: observation.selection.slice(0, 100),
-    objects: fast ? (requested.size ? targets : observation.objects.slice(0, 24)) : observation.objects.slice(0, 200),
+    objects: fast ? (requested.size ? targets : observation.objects.slice(0, 24))
+      : observation.objects.filter(item => !requested.has(String((item as Record<string, unknown>).guid).toLowerCase())).slice(0, 16),
     observed_object_count: observation.objects.length,
-    action_targets: targets,
-    objects_truncated: observation.objectsTruncated || observation.objects.length > 200,
+    action_targets: fast ? targets : targets.slice(0, 60),
+    target_summary: {
+      requested_count: requested.size, observed_count: targets.length,
+      missing_guids: [...requested].filter(id => !observedTargets.has(id)),
+      invalid_guids: targets.filter(item => (item as Record<string, unknown>).is_valid === false).map(item => (item as Record<string, unknown>).guid),
+      metadata_sample_truncated: !fast && targets.length > 60,
+    },
+    background_sample_truncated: !fast && observation.objects.length > 16,
+    // Summarizing background for the decision model is not a truncated native
+    // observation. Conflating them causes endless reobserve on >200 objects.
+    objects_truncated: Boolean(observation.objectsTruncated),
     command: observation.command,
     undo: observation.undo,
   };
@@ -180,6 +193,15 @@ export function buildRhinoJevRequest(
   messages: MessageParam[] = [],
   fast = false,
 ): JevDecisionRequest {
+  // Supply the exact chosen operation, not unrelated requirements from the
+  // entire toolkit (e.g. planar needs curves, not an extrusion vector).
+  let operationContract: unknown;
+  if ((RHINO_EXTENDED_ACTIONS as readonly string[]).includes(action)) {
+    const schema = rhinoCapabilities(action) as Record<string, any>;
+    operationContract = Array.isArray(schema.oneOf)
+      ? schema.oneOf.find((branch: any) => branch.properties?.operation?.const === parameters.operation) ?? schema
+      : schema;
+  }
   const nextActionCriteria: Record<string, string> = {
     inspect: "Observe Rhino again only when document, target, selection, units, or command state is insufficient or stale. Invalid proposed parameters require correction or ask_user, not repeated observation.",
   };
@@ -198,6 +220,8 @@ export function buildRhinoJevRequest(
       proposed_action: action,
       tool: action === "inspect" ? "RhinoInspect" : "RhinoAction",
       proposed_parameters: parameters,
+      ...(operationContract ? { parameter_contract: operationContract,
+        operation_note: "Only this operation's required fields are necessary; ignore the intent metadata when checking the parameter schema. Native action_targets carry is_valid/is_closed/is_planar when applicable. surface planar creates new surfaces from closed coplanar curves and preserves the input curves; pipe needs curves/radius, not an extrusion vector." } : {}),
       ...(action === "inspect" ? { parameter_contract: rhinoCapabilities("RhinoInspect"),
         operation_note: "This is native read-only geometry inspection, not a request to create geometry. measure needs only operation, observation_id and target_guids. section additionally needs origin and normal. closest_point additionally needs point. Unused optional fields are not missing parameters. count/max_items already include runtime defaults." } : {}),
       implemented_capabilities: action === "inspect" ? { inspect: "RhinoInspect reads exact area/volume/bounds, topology, intersections, sections and closest points from the observed GUIDs. These operations do not add geometry to the document, write/export files or run third-party components." } : {
@@ -206,6 +230,8 @@ export function buildRhinoJevRequest(
         loft: "Implemented RhinoCommon NURBS loft. Numerical sections create new geometry with no existing target; curve target_guids are read but never deleted. Supports rounded corners, concavity and dipped crowns.",
         curtain_wall: "Implemented native batch generator: targets one existing ccagent_loft Brep and samples its NURBS surface. Creates up to 9 grouped mesh objects for glass, mullions, transoms and bands, preserves the source and all other geometry. Panel count is a bounded numeric work budget, not deletion or file export.",
         set_view: "Implemented camera/display operation. Fits target GUIDs; portrait optionally creates a presentation viewport; isolate optionally hides other objects reversibly. No geometry deletion or files.",
+        set_layer: "Implemented attribute assignment: target_guids and layer are required; create_if_missing is an optional boolean defaulting to true, so a new output layer is valid. Does not move or delete geometry and needs no vector, color or existing destination layer.",
+        set_material: "Implemented attribute assignment: target_guids, optional name, diffuse_color RGB [0..255] and opacity [0..1]. Preserves geometry, does not export or load external material files.",
         import_export: "Implemented import/export API. Export to .3dm supports target_guids:[observed object GUIDs] and overwrite:false, writing only these objects with materials/layers to file_path without dialogs. File output always requires the independent user permission gate; that does not make its parameters invalid.",
         inspect: "RhinoInspect is an implemented read-only geometry inspection (measure/topology/divide_curve/closest_point/intersection/section). It does not change geometry or execute a third-party script. Defaults count=20,max_items=100 are optional, not missing required parameters.",
       },
@@ -310,7 +336,12 @@ export function interpretRhinoJevResponse(
   if (config.mode === "enforce") {
     const confidentRoute = (routeConfidence ?? 0) >= config.minConfidence;
     const recommendsDifferentAction = nextAction !== proposedAction;
-    if (parametersValid !== undefined && parametersValid < 0.5) {
+    // An uncertain verdict must reach the independent permission review; it
+    // must not masquerade as authoritative evidence of a stale snapshot.
+    // Mechanical schema/GUID/freshness checks have already run before Jev.
+    if (!confidentRoute || route === "ask_user") {
+      permissionBehavior = "ask";
+    } else if (parametersValid !== undefined && parametersValid < 0.5) {
       requiresReplan = true;
       permissionBehavior = "ask";
     } else if (
@@ -321,9 +352,7 @@ export function interpretRhinoJevResponse(
     } else if (route === "computer_use" && confidentRoute) {
       redirectToComputerUse = true;
     } else if (
-      route === "ask_user"
-      || !confidentRoute
-      || recommendsDifferentAction
+      recommendsDifferentAction
       || (destructive ?? 0) >= 0.35
       || (expectedProgress !== undefined && expectedProgress < 0.5)
     ) {

@@ -30,6 +30,7 @@ import type {
 } from "../../../types/message.js";
 import { writeStreamDebug } from "../../../utils/streamDebug.js";
 import { normalizeStopReason } from "./translateShared.js";
+import { APIConnectionError } from "@anthropic-ai/sdk";
 
 type OpenAIResponsesNativeEvent =
   | { type: "message_start"; id: string; model: string }
@@ -75,7 +76,9 @@ async function* parseOpenAIResponsesNative(
     } catch {
       return;
     }
-    switch (name) {
+    // Some compatible gateways emit data-only SSE with the event type in JSON.
+    const eventType = name || (typeof data.type === "string" ? data.type : undefined);
+    switch (eventType) {
       case "response.created": {
         const response = data.response as Record<string, unknown> | undefined;
         yield {
@@ -129,13 +132,19 @@ async function* parseOpenAIResponsesNative(
         }
         break;
       }
-      case "response.completed": {
+      case "response.completed":
+      case "response.incomplete": {
         const response = data.response as Record<string, unknown> | undefined;
+        const incomplete = response?.incomplete_details as Record<string, unknown> | undefined;
+        if (eventType === "response.incomplete" && incomplete?.reason !== "max_output_tokens") {
+          yield { type: "error", message: `Provider response incomplete: ${String(incomplete?.reason ?? "unknown reason")}` };
+          break;
+        }
         const usage = response?.usage as Record<string, unknown> | undefined;
         const details = usage?.output_tokens_details as Record<string, unknown> | undefined;
         yield {
           type: "message_end",
-          stop_reason: (response?.status as string) || "completed",
+          stop_reason: eventType === "response.incomplete" ? "max_tokens" : ((response?.status as string) || "completed"),
           ...(usage
             ? {
                 usage: {
@@ -148,8 +157,10 @@ async function* parseOpenAIResponsesNative(
         };
         break;
       }
+      case "response.failed":
       case "error": {
-        const error = data.error as Record<string, unknown> | undefined;
+        const response = data.response as Record<string, unknown> | undefined;
+        const error = (data.error ?? response?.error) as Record<string, unknown> | undefined;
         yield {
           type: "error",
           message: (error?.message as string) || (data.message as string) || "Unknown error",
@@ -299,12 +310,23 @@ export async function* assembleOpenAIResponses(
     }
   }
 
+  // An interrupted/empty SSE stream is not a completed assistant turn. This
+  // also prevents partially streamed tool calls from being dispatched. The
+  // shared retry wrapper retries only before any text/tool content was yielded.
+  if (rawStopReason === undefined) {
+    throw new APIConnectionError({ message: "Provider stream ended without a terminal response event; no completed response was received." });
+  }
+  if (!contentBlocks.some((block) => block.type === "tool_use" || (block.type === "text" && block.text.trim())) && rawStopReason !== "max_tokens") {
+    throw new APIConnectionError({ message: "Provider returned an empty completed response; task completion cannot be inferred." });
+  }
+
   for (const [id, block] of toolBlockById) {
     finalizeToolInput(block, toolInputJsonById.get(id));
   }
 
   const hasToolUse = contentBlocks.some((b) => b.type === "tool_use");
-  const stopReason = hasToolUse ? "tool_use" : normalizeStopReason(rawStopReason);
+  // A token-limited function call may have incomplete JSON and must not run.
+  const stopReason = rawStopReason === "max_tokens" ? "max_tokens" : hasToolUse ? "tool_use" : normalizeStopReason(rawStopReason);
 
   yield { type: "message_done", stopReason, usage };
 

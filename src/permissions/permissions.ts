@@ -77,6 +77,15 @@ export interface PermissionCheckParams {
     behavior: "allow" | "ask";
     reason: string;
   };
+  /**
+   * Mandatory one-shot review for a complete browser group when its primary
+   * Jev gate is unavailable. This is evaluated before Full Mode and allow
+   * rules so a transport failure cannot silently become an unreviewed action.
+   */
+  requiredComputerGroupReview?: {
+    behavior: "allow" | "ask";
+    reason: string;
+  };
 }
 
 interface RawSettings {
@@ -430,10 +439,19 @@ export function summarizePermissionRequest(toolName: string, input: Record<strin
   if (toolName === "WebFetch") {
     return typeof input.url === "string" ? `url=${input.url}` : "url=<empty>";
   }
-  if (toolName === "ComputerAction") {
+  if (toolName === "ComputerAction" || toolName === "ComputerActionGroup") {
     const action = typeof input.action === "string" ? input.action : "<unknown>";
     const intent = typeof input.intent === "string" ? input.intent : "<missing>";
     const risk = typeof input.risk_category === "string" ? input.risk_category : "<missing>";
+    if (toolName === "ComputerActionGroup") {
+      const actions = Array.isArray(input.actions)
+        ? input.actions.map((item) => item && typeof item === "object" && "action" in item
+            ? String((item as { action?: unknown }).action ?? "unknown")
+            : "unknown")
+        : [];
+      const goal = typeof input.goal === "string" ? input.goal : "<missing>";
+      return `actions=${actions.join(" -> ") || "<missing>"}, risk=${risk}, goal=${goal}`;
+    }
     return `action=${action}, risk=${risk}, intent=${intent}`;
   }
   if (toolName === "RhinoAction") {
@@ -460,7 +478,8 @@ export function buildPermissionRuleHint(toolName: string, input: Record<string, 
     const host = extractUrlHost(input);
     return host ? `WebFetch(domain:${host})` : "WebFetch";
   }
-  if (toolName === "ComputerAction") {
+  if (toolName === "ComputerAction" || toolName === "ComputerActionGroup") {
+    if (toolName === "ComputerActionGroup") return "ComputerActionGroup(browser ordinary *)";
     const action = typeof input.action === "string" ? input.action : "*";
     return `ComputerAction(${action})`;
   }
@@ -487,10 +506,13 @@ function getRiskLabel(tool: Tool, input: Record<string, unknown>): string {
     return "Low risk: read-only tool";
   }
 
-  if (tool.name === "ComputerAction" || tool.name === "ComputerNavigate") {
+  if (tool.name === "ComputerAction" || tool.name === "ComputerActionGroup" || tool.name === "ComputerNavigate") {
     const category = typeof input.risk_category === "string" ? input.risk_category : "unknown";
     if (tool.name === "ComputerNavigate") {
       return "Medium risk: bounded Jev-controlled Windows navigation";
+    }
+    if (tool.name === "ComputerActionGroup") {
+      return "Medium risk: one Jev-approved ordinary browser action group";
     }
     return category === "ordinary"
       ? "Medium risk: controls a Windows application"
@@ -705,7 +727,7 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
   // High-impact UI actions ask at action-time even in Full Mode and even when
   // an allow rule exists. Password changes and safety bypasses require user
   // hand-off and are denied. The tool independently enforces the same denies.
-  if (params.tool.name === "ComputerAction") {
+  if (params.tool.name === "ComputerAction" || params.tool.name === "ComputerActionGroup") {
     const category =
       typeof params.input.risk_category === "string"
         ? params.input.risk_category
@@ -713,9 +735,33 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     if (category === "change_password" || category === "bypass_safety") {
       return { behavior: "deny", reason: "Computer Use action requires user hand-off", request };
     }
+    if (params.tool.name === "ComputerActionGroup" && category !== "ordinary") {
+      return { behavior: "deny", reason: "browser action groups are restricted to ordinary actions", request };
+    }
     if (category !== "ordinary") {
       return { behavior: "ask", reason: "high-impact Computer Use action requires fresh confirmation", request };
     }
+  }
+
+  // Jev-unavailable browser groups must remain one indivisible plan. The
+  // fallback reviewer may approve the complete ordinary group, or require one
+  // foreground confirmation. Plan Mode and explicit deny rules still win;
+  // Full Mode, allow rules, and hook allow cannot bypass an `ask` verdict.
+  if (params.tool.name === "ComputerActionGroup" && params.requiredComputerGroupReview) {
+    if (mode === "plan") {
+      return { behavior: "deny", reason: "plan mode blocks ComputerActionGroup", request };
+    }
+    if (
+      matchesAnyRule(sessionRules.deny, params.tool.name, params.input) ||
+      matchesAnyRule(settings.deny, params.tool.name, params.input)
+    ) {
+      return { behavior: "deny", reason: "matched deny rule", request };
+    }
+    return {
+      behavior: params.requiredComputerGroupReview.behavior,
+      reason: params.requiredComputerGroupReview.reason,
+      request,
+    };
   }
 
   // Rhino has its own deterministic confirmation floor. Jev may route and
@@ -839,6 +885,21 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
 
   if (matchesAnyRule(sessionRules.allow, params.tool.name, params.input) || matchesAnyRule(settings.allow, params.tool.name, params.input)) {
     return { behavior: "allow", reason: "matched allow rule", request };
+  }
+
+  // ComputerActionGroup is the one-gate browser fast path. Its specialized
+  // Jev decision may replace the ordinary default-mode prompt only after hard
+  // policy, Plan Mode, and explicit deny rules have run. Hooks are enforced by
+  // the caller independently and can still deny or request confirmation.
+  if (
+    params.tool.name === "ComputerActionGroup" &&
+    params.precomputedAutoDecision?.behavior === "allow"
+  ) {
+    return {
+      behavior: "allow",
+      reason: params.precomputedAutoDecision.reason,
+      request,
+    };
   }
 
   // Sandbox auto-allow gate. If the user has the sandbox on AND policy

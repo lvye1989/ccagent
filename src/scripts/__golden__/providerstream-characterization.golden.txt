@@ -286,14 +286,20 @@ body: {
   ]
 }
 -- EVENTS --
-{"type":"message_done","stopReason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}
+{"type":"text","text":"ok"}
+{"type":"message_done","stopReason":"completed","usage":{"input_tokens":0,"output_tokens":0}}
 -- RESULT --
 {
   "assistantMessage": {
-    "content": [],
+    "content": [
+      {
+        "text": "ok",
+        "type": "text"
+      }
+    ],
     "role": "assistant"
   },
-  "stopReason": "end_turn",
+  "stopReason": "completed",
   "usage": {
     "input_tokens": 0,
     "output_tokens": 0
@@ -332,14 +338,20 @@ body: {
   "stream": true
 }
 -- EVENTS --
-{"type":"message_done","stopReason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}
+{"type":"text","text":"ok"}
+{"type":"message_done","stopReason":"completed","usage":{"input_tokens":0,"output_tokens":0}}
 -- RESULT --
 {
   "assistantMessage": {
-    "content": [],
+    "content": [
+      {
+        "text": "ok",
+        "type": "text"
+      }
+    ],
     "role": "assistant"
   },
-  "stopReason": "end_turn",
+  "stopReason": "completed",
   "usage": {
     "input_tokens": 0,
     "output_tokens": 0
@@ -370,14 +382,20 @@ body: {
   "stream": true
 }
 -- EVENTS --
-{"type":"message_done","stopReason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}
+{"type":"text","text":"ok"}
+{"type":"message_done","stopReason":"completed","usage":{"input_tokens":0,"output_tokens":0}}
 -- RESULT --
 {
   "assistantMessage": {
-    "content": [],
+    "content": [
+      {
+        "text": "ok",
+        "type": "text"
+      }
+    ],
     "role": "assistant"
   },
-  "stopReason": "end_turn",
+  "stopReason": "completed",
   "usage": {
     "input_tokens": 0,
     "output_tokens": 0
@@ -407,14 +425,20 @@ body: {
   "stream": true
 }
 -- EVENTS --
-{"type":"message_done","stopReason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}
+{"type":"text","text":"ok"}
+{"type":"message_done","stopReason":"completed","usage":{"input_tokens":0,"output_tokens":0}}
 -- RESULT --
 {
   "assistantMessage": {
-    "content": [],
+    "content": [
+      {
+        "text": "ok",
+        "type": "text"
+      }
+    ],
     "role": "assistant"
   },
-  "stopReason": "end_turn",
+  "stopReason": "completed",
   "usage": {
     "input_tokens": 0,
     "output_tokens": 0

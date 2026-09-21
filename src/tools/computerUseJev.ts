@@ -69,7 +69,10 @@ export interface ComputerUseJevDecision {
   targetProbability?: number;
   alignmentProbability?: number;
   injectionProbability?: number;
+  transportAttempts?: number;
   permissionBehavior?: "allow" | "ask";
+  /** Jev could not review a browser group; review the intact group once. */
+  requiresFallbackReview?: boolean;
   forceDeny?: boolean;
   forceReobserve?: boolean;
   summary: string;
@@ -100,7 +103,7 @@ export interface ComputerNavigationJevDecision {
   summary: string;
 }
 
-const TARGETED_ACTIONS = new Set(["click", "drag", "set_value", "type_text", "press_key"]);
+const TARGETED_ACTIONS = new Set(["click", "drag", "set_value", "type_text", "press_key", "browser_action_group"]);
 
 function envBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || !value.trim()) return fallback;
@@ -144,7 +147,7 @@ export function getComputerUseJevConfig(): ComputerUseJevConfig {
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),
     model: safeModel(process.env.JEV_MODEL),
-    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 5_000, 500, 30_000),
+    timeoutMs: envNumber(process.env.JEV_TIMEOUT_MS, 8_000, 500, 30_000),
     minConfidence: envNumber(process.env.JEV_MIN_CONFIDENCE, 0.8, 0.5, 0.99),
   };
 }
@@ -166,7 +169,7 @@ function riskCriteria(): Record<ComputerUseRiskCategory, string> {
   };
 }
 
-/** Build one batched Decisions request for an LLM-proposed desktop action. */
+/** Build one Decisions request for an LLM-proposed desktop action or fixed action group. */
 export function buildComputerUseJevRequest(state: ComputerUseJevState): JevDecisionRequest {
   return {
     state: {
@@ -180,9 +183,9 @@ export function buildComputerUseJevRequest(state: ComputerUseJevState): JevDecis
     questions: {
       disposition: {
         type: "choice",
-        instructions: "How should CCAGENT handle the proposed single desktop action?",
+        instructions: "How should CCAGENT handle the proposed desktop action or fixed browser action group? Judge the group as one indivisible plan.",
         criteria: {
-          execute: "The action is supported by the current observation, aligned with the user goal, and ordinary/reversible.",
+          execute: "The action or every action in the fixed group is supported by the current observation, aligned with the user goal, and ordinary/reversible.",
           reobserve: "The target or window state is missing, stale, ambiguous, loading, or likely changed; observe again before acting.",
           confirm: "The action could have an external, sensitive, destructive, financial, installation, medical, CAPTCHA, or account effect and needs the user.",
           deny: "The action changes authentication secrets, bypasses safety, targets a protected surface, or clearly conflicts with the user goal.",
@@ -190,7 +193,7 @@ export function buildComputerUseJevRequest(state: ComputerUseJevState): JevDecis
       },
       risk_category: {
         type: "choice",
-        instructions: "Classify the practical effect of this exact proposed action. Choose ordinary only when no higher-impact category applies.",
+        instructions: "Classify the practical effect of this exact proposed action or the highest-risk action in the fixed group. Choose ordinary only when no higher-impact category applies.",
         criteria: riskCriteria(),
       },
       target_present: {
@@ -367,6 +370,7 @@ export function interpretComputerUseJevResponse(
     targetProbability !== undefined ? `target=${targetProbability.toFixed(2)}` : "",
     alignmentProbability !== undefined ? `aligned=${alignmentProbability.toFixed(2)}` : "",
     injectionProbability !== undefined ? `injection=${injectionProbability.toFixed(2)}` : "",
+    `attempts=${response.attempts ?? 1}`,
   ].filter(Boolean);
 
   return {
@@ -382,6 +386,7 @@ export function interpretComputerUseJevResponse(
     targetProbability,
     alignmentProbability,
     injectionProbability,
+    transportAttempts: response.attempts ?? 1,
     permissionBehavior,
     ...(forceDeny ? { forceDeny: true } : {}),
     ...(forceReobserve ? { forceReobserve: true } : {}),
@@ -422,6 +427,11 @@ export async function decideComputerUseWithJev(
       endpoint: config.endpoint,
       model: config.model,
       timeoutMs: config.timeoutMs,
+      // A fixed browser group is one read-only decision request and no desktop
+      // input has been sent yet, so one transient retry is safe and avoids
+      // decomposing the plan after a momentary OpenRouter timeout.
+      maxAttempts: action === "browser_action_group" ? 2 : 1,
+      retryDelayMs: 250,
       signal,
     });
     return interpretComputerUseJevResponse(response, originalRisk, action, config);

@@ -856,41 +856,23 @@ export function usePromptInput({
     textInput.handleKey(input, key);
   });
 
-  const showModeSelector = useMemo(() => {
-    const trimmed = inputValue.trim().toLowerCase();
-    const show = trimmed === "/mode" || trimmed === "/mode ";
-    if (!show) {
-      setSelectedModeIndex(-1);
-    }
-    return show;
-  }, [inputValue]);
+  const selectorCommand = inputValue.trim().toLowerCase();
+  const showModeSelector = selectorCommand === "/mode";
+  const showTaskModeSelector = selectorCommand === "/tasks";
+  const showThinkSelector = selectorCommand === "/think";
+  const showEffortSelector = selectorCommand === "/effort";
 
-  const showTaskModeSelector = useMemo(() => {
-    const trimmed = inputValue.trim().toLowerCase();
-    const show = trimmed === "/tasks" || trimmed === "/tasks ";
-    if (!show) {
-      setSelectedTaskModeIndex(-1);
-    }
-    return show;
-  }, [inputValue]);
-
-  const showThinkSelector = useMemo(() => {
-    const trimmed = inputValue.trim().toLowerCase();
-    const show = trimmed === "/think" || trimmed === "/think ";
-    if (!show) {
-      setSelectedThinkIndex(-1);
-    }
-    return show;
-  }, [inputValue]);
-
-  const showEffortSelector = useMemo(() => {
-    const trimmed = inputValue.trim().toLowerCase();
-    const show = trimmed === "/effort" || trimmed === "/effort ";
-    if (!show) {
-      setSelectedEffortIndex(-1);
-    }
-    return show;
-  }, [inputValue]);
+  // Render calculations (including useMemo) must stay pure. App deliberately
+  // rebuilds the live skill command array on every render; setting state while
+  // deriving suggestions therefore loops even when resetting to the same index.
+  // Reset closed palettes after commit, with scalar dependencies and guards.
+  useEffect(() => {
+    if (!showModeSelector && selectedModeIndex !== -1) setSelectedModeIndex(-1);
+    if (!showTaskModeSelector && selectedTaskModeIndex !== -1) setSelectedTaskModeIndex(-1);
+    if (!showThinkSelector && selectedThinkIndex !== -1) setSelectedThinkIndex(-1);
+    if (!showEffortSelector && selectedEffortIndex !== -1) setSelectedEffortIndex(-1);
+  }, [showModeSelector, selectedModeIndex, showTaskModeSelector, selectedTaskModeIndex,
+    showThinkSelector, selectedThinkIndex, showEffortSelector, selectedEffortIndex]);
 
   const filteredCommands = useMemo(() => {
     if (!inputValue.startsWith("/")) {
@@ -955,9 +937,16 @@ export function usePromptInput({
     }
   }, [hasPermissionPrompt, selectedPermissionIndex]);
 
+  useEffect(() => {
+    if (!showCommandSuggestions && selectedCommandIndex !== -1) setSelectedCommandIndex(-1);
+  }, [showCommandSuggestions, selectedCommandIndex]);
+
+  useEffect(() => {
+    if (!showFileSuggestions && selectedFileIndex !== 0) setSelectedFileIndex(0);
+  }, [showFileSuggestions, selectedFileIndex]);
+
   const commandSuggestions: CommandSuggestion[] = useMemo(() => {
     if (!showCommandSuggestions) {
-      setSelectedCommandIndex(-1);
       return [];
     }
     // Auto-select the first match so Enter/Tab work without arrowing first.
@@ -1019,7 +1008,6 @@ export function usePromptInput({
 
   const fileSuggestions: FileSuggestion[] = useMemo(() => {
     if (!showFileSuggestions) {
-      if (selectedFileIndex !== 0) setSelectedFileIndex(0);
       return [];
     }
     const clamped =

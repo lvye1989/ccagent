@@ -4,6 +4,23 @@ All notable changes to CCAGENT are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject empty/truncated Responses streams instead of reporting successful task
+  completion; handle data-only events, failures and token-limit recovery. Added
+  11 regression checks and corrected four protocol characterization fixtures.
+- Give Jev the selected Rhino operation's exact parameter contract and native
+  curve closure/planarity evidence, so oblique window outlines are not judged
+  from bounding boxes alone. Bound background metadata without labeling a complete
+  native observation as truncated. Uncertain verdicts request independent permission
+  review; high-confidence replan/reobserve decisions remain enforced.
+- Match native Rhino preview captures to the viewport aspect ratio instead of
+  forcing wide courtyard models into a portrait bitmap.
+- Fixed the interactive CLI crashing at startup with React's "Too many
+  re-renders" error. Prompt palettes no longer set state during render/memo
+  calculation; selection resets happen after commit, preserving live skill
+  updates. Added 21 real Ink interaction/startup regressions to the release gate.
+
 ### Security
 
 - Gate project/local model profiles and environment injection on explicit project

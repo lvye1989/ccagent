@@ -229,6 +229,11 @@ const OAI_LENGTH_STREAM = [
   `data: [DONE]\n\n`,
 ];
 const OAI_MINIMAL = [`data: [DONE]\n\n`];
+// Responses fixtures must use the Responses protocol, not Chat's [DONE].
+const RESPONSES_MINIMAL = [
+  `event: response.output_text.delta\ndata: {"delta":"ok"}\n\n`,
+  `event: response.completed\ndata: {"response":{"status":"completed"}}\n\n`,
+];
 
 // Responses API stream carrying a reasoning-summary item alongside text —
 // exercises the native reasoning-summary parsing (openaiResponsesNative.ts).
@@ -293,13 +298,13 @@ async function buildRecording(): Promise<string> {
     name: "openai-responses tool history",
     profile: oai("openai-responses", "oair"),
     params: params(TOOL_HISTORY_MSGS, { system: SYSTEM, tools: TOOLS }),
-    chunks: OAI_MINIMAL,
+    chunks: RESPONSES_MINIMAL,
   }));
   push("openai-responses / image → input_image", await record({
     name: "openai-responses image",
     profile: oai("openai-responses", "oair"),
     params: params(IMAGE_MSGS),
-    chunks: OAI_MINIMAL,
+    chunks: RESPONSES_MINIMAL,
   }));
 
   // Stage 34 regression coverage: /effort and /think must reach the wire
@@ -311,7 +316,7 @@ async function buildRecording(): Promise<string> {
     name: "openai-responses effort=high",
     profile: oai("openai-responses", "oair"),
     params: params(TEXT_MSGS),
-    chunks: OAI_MINIMAL,
+    chunks: RESPONSES_MINIMAL,
   }));
   setSessionEffortLevel(undefined);
 
@@ -320,7 +325,7 @@ async function buildRecording(): Promise<string> {
     name: "openai-responses think off",
     profile: oai("openai-responses", "oair"),
     params: params(TEXT_MSGS),
-    chunks: OAI_MINIMAL,
+    chunks: RESPONSES_MINIMAL,
   }));
   setSessionThinkingConfig(undefined);
 

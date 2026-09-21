@@ -59,6 +59,8 @@ export type JevAnswer = JevChoiceAnswer | JevScoreAnswer | JevNoulAnswer;
 export interface JevDecisionResponse {
   model: string;
   answers: Record<string, JevAnswer>;
+  /** Local transport attempts used to obtain this response (not provider data). */
+  attempts?: number;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -71,8 +73,48 @@ export interface OpenRouterJevOptions {
   endpoint?: string;
   model?: string;
   timeoutMs?: number;
+  /**
+   * Total request attempts. Decisions are read-only and safe to retry, but the
+   * default remains one so callers opt in only for latency-sensitive paths.
+   */
+  maxAttempts?: number;
+  /** Delay before a retry of a transient transport/HTTP failure. */
+  retryDelayMs?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+}
+
+export type OpenRouterJevErrorKind =
+  | "timeout"
+  | "network"
+  | "http"
+  | "protocol"
+  | "aborted";
+
+/** Structured failure used to distinguish safe transient retries from hard failures. */
+export class OpenRouterJevError extends Error {
+  readonly kind: OpenRouterJevErrorKind;
+  readonly retryable: boolean;
+  readonly status?: number;
+  readonly attempts: number;
+
+  constructor(
+    message: string,
+    options: {
+      kind: OpenRouterJevErrorKind;
+      retryable: boolean;
+      status?: number;
+      attempts?: number;
+      cause?: unknown;
+    },
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "OpenRouterJevError";
+    this.kind = options.kind;
+    this.retryable = options.retryable;
+    this.status = options.status;
+    this.attempts = options.attempts ?? 1;
+  }
 }
 
 function finiteProbability(value: unknown): number | undefined {
@@ -165,6 +207,44 @@ function abortError(signal?: AbortSignal): Error {
   return new Error("Jev request aborted.");
 }
 
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function boundedInteger(value: number | undefined, fallback: number, min: number, max: number): number {
+  return Number.isInteger(value) && (value as number) >= min && (value as number) <= max
+    ? value as number
+    : fallback;
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(abortError(signal));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function finalAttemptError(error: OpenRouterJevError, attempts: number): OpenRouterJevError {
+  if (attempts <= 1) return error;
+  const base = error.message.replace(/[.]$/, "");
+  return new OpenRouterJevError(`${base} after ${attempts} attempts.`, {
+    kind: error.kind,
+    retryable: error.retryable,
+    status: error.status,
+    attempts,
+    cause: error,
+  });
+}
+
 /** Call OpenRouter's Decisions endpoint with privacy-preserving routing. */
 export async function callOpenRouterJev(
   request: JevDecisionRequest,
@@ -172,16 +252,41 @@ export async function callOpenRouterJev(
 ): Promise<JevDecisionResponse> {
   const apiKey = options.apiKey.trim();
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured.");
-  const timeoutMs = options.timeoutMs ?? 5_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("Jev request timed out.")), timeoutMs);
-  const onAbort = () => controller.abort(abortError(options.signal));
-  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const timeoutMs = options.timeoutMs ?? 8_000;
+  const maxAttempts = boundedInteger(options.maxAttempts, 1, 1, 3);
+  const retryDelayMs = boundedInteger(options.retryDelayMs, 250, 0, 2_000);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const endpoint = options.endpoint ?? DEFAULT_OPENROUTER_JEV_ENDPOINT;
+  const body = JSON.stringify({
+    model: options.model ?? DEFAULT_OPENROUTER_JEV_MODEL,
+    state: request.state,
+    questions: request.questions,
+    provider: {
+      zdr: true,
+      data_collection: "deny",
+    },
+  });
 
-  try {
-    const response = await (options.fetchImpl ?? fetch)(
-      options.endpoint ?? DEFAULT_OPENROUTER_JEV_ENDPOINT,
-      {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (options.signal?.aborted) {
+      throw new OpenRouterJevError(abortError(options.signal).message, {
+        kind: "aborted",
+        retryable: false,
+        attempts: attempt - 1,
+      });
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("Jev request timed out."));
+    }, timeoutMs);
+    const onAbort = () => controller.abort(abortError(options.signal));
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await fetchImpl(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -189,43 +294,97 @@ export async function callOpenRouterJev(
           "HTTP-Referer": "https://github.com/lvye1989/ccagent",
           "X-OpenRouter-Title": "CCAGENT",
         },
-        body: JSON.stringify({
-          model: options.model ?? DEFAULT_OPENROUTER_JEV_MODEL,
-          state: request.state,
-          questions: request.questions,
-          provider: {
-            zdr: true,
-            data_collection: "deny",
-          },
-        }),
+        body,
         signal: controller.signal,
-      },
-    );
+      });
 
-    const text = await response.text();
-    let decoded: unknown;
-    try {
-      decoded = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`OpenRouter Jev returned non-JSON HTTP ${response.status}.`);
+      const text = await response.text();
+      let decoded: unknown = null;
+      if (text) {
+        try {
+          decoded = JSON.parse(text);
+        } catch (error) {
+          if (!response.ok) {
+            throw new OpenRouterJevError(`OpenRouter Jev returned non-JSON HTTP ${response.status}.`, {
+              kind: "http",
+              retryable: retryableHttpStatus(response.status),
+              status: response.status,
+              cause: error,
+            });
+          }
+          throw new OpenRouterJevError(`OpenRouter Jev returned non-JSON HTTP ${response.status}.`, {
+            kind: "protocol",
+            retryable: false,
+            status: response.status,
+            cause: error,
+          });
+        }
+      }
+      if (!response.ok) {
+        const raw = decoded && typeof decoded === "object"
+          ? decoded as Record<string, unknown>
+          : {};
+        const nested = raw.error && typeof raw.error === "object"
+          ? raw.error as Record<string, unknown>
+          : {};
+        const message = typeof nested.message === "string"
+          ? nested.message
+          : typeof raw.message === "string"
+            ? raw.message
+            : `HTTP ${response.status}`;
+        throw new OpenRouterJevError(`OpenRouter Jev request failed: ${message.slice(0, 300)}`, {
+          kind: "http",
+          retryable: retryableHttpStatus(response.status),
+          status: response.status,
+        });
+      }
+      try {
+        return { ...parseJevDecisionResponse(decoded), attempts: attempt };
+      } catch (error) {
+        throw new OpenRouterJevError(
+          error instanceof Error ? error.message : String(error),
+          { kind: "protocol", retryable: false, status: response.status, cause: error },
+        );
+      }
+    } catch (error) {
+      let classified: OpenRouterJevError;
+      if (error instanceof OpenRouterJevError) {
+        classified = error;
+      } else if (options.signal?.aborted) {
+        classified = new OpenRouterJevError(abortError(options.signal).message, {
+          kind: "aborted",
+          retryable: false,
+          attempts: attempt,
+          cause: error,
+        });
+      } else if (timedOut) {
+        classified = new OpenRouterJevError("Jev request timed out.", {
+          kind: "timeout",
+          retryable: true,
+          attempts: attempt,
+          cause: error,
+        });
+      } else {
+        classified = new OpenRouterJevError(
+          `OpenRouter Jev network request failed: ${error instanceof Error ? error.message : String(error)}`,
+          { kind: "network", retryable: true, attempts: attempt, cause: error },
+        );
+      }
+
+      if (!classified.retryable || attempt >= maxAttempts) {
+        throw finalAttemptError(classified, attempt);
+      }
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
     }
-    if (!response.ok) {
-      const raw = decoded && typeof decoded === "object"
-        ? decoded as Record<string, unknown>
-        : {};
-      const nested = raw.error && typeof raw.error === "object"
-        ? raw.error as Record<string, unknown>
-        : {};
-      const message = typeof nested.message === "string"
-        ? nested.message
-        : typeof raw.message === "string"
-          ? raw.message
-          : `HTTP ${response.status}`;
-      throw new Error(`OpenRouter Jev request failed: ${message.slice(0, 300)}`);
-    }
-    return parseJevDecisionResponse(decoded);
-  } finally {
-    clearTimeout(timer);
-    options.signal?.removeEventListener("abort", onAbort);
+
+    await waitForRetry(retryDelayMs, options.signal);
   }
+
+  throw new OpenRouterJevError("OpenRouter Jev request failed.", {
+    kind: "network",
+    retryable: false,
+    attempts: maxAttempts,
+  });
 }

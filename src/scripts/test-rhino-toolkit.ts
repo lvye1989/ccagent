@@ -51,6 +51,34 @@ test("GH input work budget enforced",()=>assert.throws(()=>parseGrasshopper({def
 
 const observation:RhinoJevObservation={observationId:"obs",capturedAt:new Date().toISOString(),document:{},layers:[],selection:[],objects:[{guid:id},{guid:rail}],command:{},undo:{}};
 test("Jev sees sweep rails",()=>assert.equal(((buildRhinoJevRequest("surface",cases.surface,observation).state as any).observation.action_targets as unknown[]).length,2));
+test("Jev receives only the selected surface parameter contract",()=>{
+  const state=buildRhinoJevRequest("surface",{operation:"planar",target_guids:[id]},observation).state as any;
+  assert.equal(state.parameter_contract.properties.operation.const,"planar");
+  assert.deepEqual(state.parameter_contract.required,["operation","target_guids"]);
+  assert.equal(state.parameter_contract.properties.radius,undefined);
+});
+test("Uncertain Jev target scores request independent permission review, never auto-allow",()=>{
+  const decision=interpretRhinoJevResponse({model:"fixture",answers:{route:{type:"choice",choice:"rhino_api",confidence:.36},next_action:{type:"choice",choice:"set_layer",confidence:.6},target_valid:{type:"noul",noul:.42},parameters_valid:{type:"noul",noul:.51}}},"set_layer",{mode:"enforce",model:"fixture",minConfidence:.8},{target_guids:[id],layer:"PhotoCourt_Pool"});
+  assert.equal(decision.permissionBehavior,"ask");
+  assert.notEqual(decision.forceObserve,true);
+});
+test("Jev preserves native curve closure and planarity evidence",()=>{
+  const curve={guid:id,type:"Curve",is_valid:true,is_closed:true,is_planar:true,degree:1};
+  const state=buildRhinoJevRequest("surface",{operation:"planar",target_guids:[id]},{...observation,objects:[curve]}).state as any;
+  assert.equal(state.observation.action_targets[0].is_closed,true);
+  assert.equal(state.observation.action_targets[0].is_planar,true);
+});
+test("Large Rhino scenes bound background metadata without losing target accounting",()=>{
+  const objects=Array.from({length:240},(_,i)=>({guid:`00000000-0000-4000-8000-${String(i+1).padStart(12,"0")}`,type:"Curve",is_valid:true}));
+  const targets=objects.slice(100,180).map(o=>o.guid);
+  const state=buildRhinoJevRequest("surface",{operation:"pipe",radius:.1,target_guids:targets},{...observation,objects}).state as any;
+  assert.equal(state.observation.objects.length,16);
+  assert.equal(state.observation.action_targets.length,60);
+  assert.equal(state.observation.target_summary.observed_count,80);
+  assert.deepEqual(state.observation.target_summary.missing_guids,[]);
+  assert.equal(state.observation.target_summary.metadata_sample_truncated,true);
+  assert.equal(state.observation.objects_truncated,false);
+});
 test("Jev sees GH geometry targets",()=>assert.ok(requiresTargetValidation("run_grasshopper",parseGrasshopper(gh,process.cwd()))));
 test("new curves do not request nonexistent targets",()=>assert.equal(requiresTargetValidation("create_curve",cases.create_curve),false));
 test("targeted mesh with low target validity still requires observation",()=>assert.equal(interpretRhinoJevResponse({model:"typesafe/jev-test",answers:{route:{type:"choice",choice:"rhino_api",confidence:0.99},next_action:{type:"choice",choice:"mesh",confidence:0.99},target_valid:{type:"noul",noul:0.2}}},"mesh",{mode:"enforce",model:"typesafe/jev-test",minConfidence:0.8},cases.mesh).forceObserve,true));
