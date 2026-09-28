@@ -104,6 +104,73 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}… [truncated ${text.length - max} chars]`;
 }
 
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, "<redacted-private-key>")
+    .replace(/\b(sk-or-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})\b/g, "<redacted-key>")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, "$1<redacted>")
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|credential|authorization|cookie|session[_-]?id)\s*[:=]\s*)[^\s,;&]+/gi, "$1<redacted>")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "<redacted-email>")
+    .replace(/(?<!\d)(?:\+?\d{1,3}[ -]?)?(?:1[3-9]\d{9}|\(?\d{3}\)?[ -]\d{3,4}[ -]\d{4})(?!\d)/g, "<redacted-phone>");
+}
+
+function summarizeUrlForClassifier(value: string): unknown {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return { protocol: url.protocol, destination: "withheld-non-http-url" };
+    }
+    return {
+      origin: url.origin,
+      path: truncate(redactSensitiveText(url.pathname), 500),
+      query_keys: [...new Set(url.searchParams.keys())].slice(0, 40),
+      query_values_withheld: url.search.length > 0,
+      fragment_present: Boolean(url.hash),
+    };
+  } catch {
+    return truncate(redactSensitiveText(value), 500);
+  }
+}
+
+function summarizeValueForClassifier(key: string, value: unknown): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lower = key.toLowerCase();
+    if (/password|secret|token|api.?key|credential|authorization|cookie|session.?id/.test(lower)) return "<redacted>";
+    if (lower === "url" || lower.endsWith("_url")) return summarizeUrlForClassifier(value);
+    if (["content", "new_string", "old_string", "text"].includes(lower)) {
+      return {
+        kind: "withheld-content",
+        length: value.length,
+        multiline: /[\r\n]/.test(value),
+      };
+    }
+    return truncate(redactSensitiveText(value), 1_200);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => summarizeValueForClassifier(key, item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, 40)
+        .map(([nestedKey, nestedValue]) => [nestedKey, summarizeValueForClassifier(nestedKey, nestedValue)]),
+    );
+  }
+  return String(value);
+}
+
+/** Bounded, secret-redacted representation used by every fallback reviewer. */
+export function sanitizeClassifierToolInput(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input)
+      .slice(0, 60)
+      .map(([key, value]) => [key, summarizeValueForClassifier(key, value)]),
+  );
+}
+
 function extractText(content: ContentBlockParam[]): string {
   return content
     .filter(
@@ -129,7 +196,7 @@ function buildTranscript(messages: MessageParam[]): string {
 
     if (typeof content === "string") {
       if (message.role === "user" && content.trim()) {
-        entries.push(`USER: ${truncate(content.trim(), MAX_ENTRY_CHARS)}`);
+        entries.push(`USER: ${truncate(redactSensitiveText(content.trim()), MAX_ENTRY_CHARS)}`);
       }
       continue;
     }
@@ -139,7 +206,7 @@ function buildTranscript(messages: MessageParam[]): string {
     if (message.role === "user") {
       const text = extractText(content);
       if (text) {
-        entries.push(`USER: ${truncate(text, MAX_ENTRY_CHARS)}`);
+        entries.push(`USER: ${truncate(redactSensitiveText(text), MAX_ENTRY_CHARS)}`);
       }
       // Tool results are the environment's output, not user intent — note
       // them tersely so the action sequence stays legible.
@@ -161,7 +228,11 @@ function buildTranscript(messages: MessageParam[]): string {
     for (const block of toolUses) {
       entries.push(
         `AGENT CALLED ${block.name}: ${truncate(
-          JSON.stringify(block.input ?? {}),
+          JSON.stringify(sanitizeClassifierToolInput(
+            block.input && typeof block.input === "object"
+              ? block.input as Record<string, unknown>
+              : {},
+          )),
           MAX_ENTRY_CHARS,
         )}`,
       );
@@ -176,7 +247,10 @@ export function formatActionForClassifier(
   toolName: string,
   toolInput: Record<string, unknown>,
 ): string {
-  const inputJson = truncate(JSON.stringify(toolInput ?? {}), MAX_INPUT_CHARS);
+  const inputJson = truncate(
+    JSON.stringify(sanitizeClassifierToolInput(toolInput ?? {})),
+    MAX_INPUT_CHARS,
+  );
   return `The agent now wants to call the tool \`${toolName}\` with this input:\n${inputJson}`;
 }
 

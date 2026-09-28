@@ -13,6 +13,7 @@ import {
 } from "../tools/rhinoJev.js";
 import { parseRhinoActionInput, rhinoActionTool, rhinoObserveTool } from "../tools/rhinoTools.js";
 import type { JevDecisionResponse } from "../services/jev/openRouterJev.js";
+import { resolveVisionProfile } from "../services/vision/analyzeImage.js";
 
 let failures = 0;
 
@@ -73,9 +74,61 @@ async function main(): Promise<void> {
     "rhino_agent has only structured Rhino and bounded Computer Use tools",
   );
   assert((rhino?.getSystemPrompt() ?? "").includes("Never call Bash or PowerShell"), "agent prompt forbids shell-based Rhino automation");
+  assert(
+    (rhino?.getSystemPrompt() ?? "").includes("RhinoObserve({capture:true, vision_analysis:true})"),
+    "agent prompt requires native capture plus configured vision analysis for visual QA",
+  );
+  assert(
+    (rhino?.getSystemPrompt() ?? "").includes("visual_evidence_error") &&
+      (rhino?.getSystemPrompt() ?? "").includes("routine GUID/freshness checks"),
+    "agent prompt distinguishes failed visual QA from low-latency structural observations",
+  );
   assert(findToolByName("RhinoObserve") === rhinoObserveTool, "RhinoObserve is registered");
   assert(findToolByName("RhinoAction") === rhinoActionTool, "RhinoAction is registered");
   assert(rhinoObserveTool.isReadOnly() && !rhinoActionTool.isReadOnly(), "observe is read-only and action is mutating");
+  const observeProperties = rhinoObserveTool.inputSchema.properties as Record<string, unknown> | undefined;
+  assert(
+    Boolean(observeProperties?.vision_analysis),
+    "RhinoObserve publishes the opt-in vision_analysis schema",
+  );
+  const invalidVisionObserve = await rhinoObserveTool.call(
+    { vision_analysis: true },
+    { cwd: process.cwd() },
+  );
+  assert(
+    invalidVisionObserve.isError === true && String(invalidVisionObserve.content).includes("requires capture:true"),
+    "vision_analysis cannot run without a native Rhino viewport capture",
+  );
+
+  const visionEnvNames = ["QWEN_MODEL", "QWEN_PROTOCOL", "QWEN_BASE_URL", "QWEN_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_API_KEY", "CCAGENT_HOME"] as const;
+  const previousVisionEnv = Object.fromEntries(visionEnvNames.map((name) => [name, process.env[name]]));
+  try {
+    process.env.CCAGENT_HOME = path.join(fixtureRoot, "vision-home");
+    process.env.QWEN_MODEL = "qwen-vision-fixture";
+    process.env.QWEN_PROTOCOL = "openai-chat";
+    process.env.QWEN_BASE_URL = "https://vision.invalid/v1";
+    process.env.QWEN_API_KEY = "TEST_ONLY";
+    delete process.env.DASHSCOPE_BASE_URL;
+    delete process.env.DASHSCOPE_API_KEY;
+    const envProfile = await resolveVisionProfile(path.join(fixtureRoot, "vision-cwd"));
+    assert(
+      envProfile?.id === "qwen-vision" && envProfile.protocol === "openai-chat" &&
+        envProfile.model === "qwen-vision-fixture" && envProfile.baseURL === "https://vision.invalid/v1",
+      "Rhino vision analysis resolves the isolated Qwen environment profile without a live request",
+    );
+    process.env.QWEN_PROTOCOL = "anthropic";
+    const unsupportedEnvProfile = await resolveVisionProfile(path.join(fixtureRoot, "vision-cwd-invalid"));
+    assert(
+      unsupportedEnvProfile?.id !== "qwen-vision",
+      "ad-hoc QWEN_* configuration rejects the unsupported Anthropic routing path",
+    );
+  } finally {
+    for (const name of visionEnvNames) {
+      const value = previousVisionEnv[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 
   console.log("\n[2] Strict action schemas");
   assert(["create_curve","surface","solid_edit","mesh","subd","group_manage"].every(a => (RHINO_ACTIONS as readonly string[]).includes(a)), "common modeling action families are registered");
@@ -155,21 +208,28 @@ async function main(): Promise<void> {
     cwd: process.cwd(),
     settings,
   });
-  assert(booleanDecision.behavior === "ask", "deleting boolean inputs asks even in Full Mode");
+  assert(booleanDecision.behavior === "allow", "Full Mode does not prompt for deleting boolean inputs");
   const exportDecision = await checkPermission({
     tool: rhinoActionTool,
     input: { action: "import_export", parameters: { operation: "export", overwrite: false } },
     cwd: process.cwd(),
     settings,
   });
-  assert(exportDecision.behavior === "ask", "export asks even in Full Mode");
+  assert(exportDecision.behavior === "allow", "Full Mode does not prompt for an explicitly proposed export");
   const grasshopperDecision = await checkPermission({
     tool: rhinoActionTool,
     input: { action: "run_grasshopper", parameters: {} },
     cwd: process.cwd(),
     settings,
   });
-  assert(grasshopperDecision.behavior === "ask", "third-party Grasshopper execution asks even in Full Mode");
+  assert(grasshopperDecision.behavior === "allow", "Full Mode does not prompt for centrally gated Grasshopper execution");
+  const defaultExportDecision = await checkPermission({
+    tool: rhinoActionTool,
+    input: { action: "import_export", parameters: { operation: "export", overwrite: false } },
+    cwd: process.cwd(),
+    settings: { mode: "default", allow: [], deny: [] },
+  });
+  assert(defaultExportDecision.behavior === "ask", "export still asks outside Full Mode");
   assert(matchesPermissionRule("RhinoAction(transform)", "RhinoAction", { action: "transform" }), "Rhino allow rules can be action-scoped");
   assert(!matchesPermissionRule("RhinoAction(transform)", "RhinoAction", { action: "import_export" }), "transform allow rule cannot authorize export");
 

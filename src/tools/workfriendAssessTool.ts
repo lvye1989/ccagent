@@ -14,6 +14,7 @@ function requiredText(input: Record<string, unknown>, key: string): string {
 
 export const workfriendAssessTool: Tool = {
   name: "WorkfriendAssess",
+  decisionPolicy: "specialized_jev",
   description:
     "Use OpenRouter Jev to score non-clinical workplace mood strain and stress load from 0-4, classify the work state, and choose the next Workfriend action. " +
     "Call after the user has answered the relevant Workfriend questions, before giving recommendations. " +

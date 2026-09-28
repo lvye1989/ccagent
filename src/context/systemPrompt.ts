@@ -13,7 +13,10 @@ import { getEnabledAgents } from "../agents/registry.js";
 import { getActiveOutputStyleConfig } from "../styles/registry.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolTempRoot } from "../utils/paths.js";
-import { COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE } from "../tools/computerUseGuidance.js";
+import {
+  BROWSER_SEARCH_FAST_PATH_GUIDANCE,
+  COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE,
+} from "../tools/computerUseGuidance.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +51,7 @@ const IDENTITY_SECTIONS = [
 // an old project memory must not push a known browser search back onto the
 // expensive one-action/one-observation path.
 const COMPUTER_USE_INSTRUCTION_SECTIONS = [
+  BROWSER_SEARCH_FAST_PATH_GUIDANCE,
   COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE,
   "Jev is a preflight decision gate, not a planner: it cannot merge separate ComputerAction calls after you choose them. Plan the complete ordinary browser sequence before selecting the tool.",
 ];

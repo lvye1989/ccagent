@@ -1,5 +1,6 @@
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { RHINO_EXTENDED_ACTIONS, RHINO_EXTENDED_HELP, rhinoTargetGuids, rhinoCapabilities } from "./rhinoCatalog.js";
+import type { EnabledToolManifest } from "./index.js";
 import {
   callOpenRouterJev,
   DEFAULT_OPENROUTER_JEV_ENDPOINT,
@@ -27,11 +28,47 @@ export const RHINO_ACTIONS = [
   "undo",
 ] as const;
 
+/** Only these ordinary actions may run inside a bounded RhinoSequence. */
+export const RHINO_FAST_ACTIONS = [
+  "inspect", "create_geometry", "create_curve", "create_solid", "loft",
+  "curtain_wall", "floor_plates", "extrude", "transform", "copy_objects",
+  "set_layer", "set_material", "set_view",
+] as const;
+
 export type RhinoActionName = typeof RHINO_ACTIONS[number];
 export type RhinoJevProposedAction = RhinoActionName | "inspect";
 export type RhinoJevRoute = "rhino_api" | "computer_use" | "ask_user";
 export type RhinoJevNextAction = RhinoActionName | "inspect";
 export type RhinoJevMode = "off" | "shadow" | "enforce";
+
+const LEGACY_OPERATIONS: Partial<Record<RhinoJevProposedAction, readonly string[]>> = {
+  create_geometry: ["point", "line", "polyline", "box", "sphere", "cylinder"],
+  transform: ["translate", "rotate", "scale"],
+  boolean: ["union", "difference", "intersection"],
+  import_export: ["import", "export"],
+};
+
+function schemaOperations(action: RhinoJevProposedAction): string[] {
+  if (LEGACY_OPERATIONS[action]) return [...LEGACY_OPERATIONS[action]];
+  if (action !== "inspect" && action !== "run_grasshopper" && !(RHINO_EXTENDED_ACTIONS as readonly string[]).includes(action)) return [];
+  const raw = rhinoCapabilities(action === "inspect" ? "RhinoInspect" : action) as Record<string, any>;
+  const schema = action === "inspect" ? raw.schema : raw;
+  const variants = Array.isArray(schema?.oneOf) ? schema.oneOf : [schema];
+  const operations: string[] = variants.flatMap((variant: Record<string, any>): string[] => {
+    const operation = variant?.properties?.operation;
+    return typeof operation?.const === "string" ? [operation.const]
+      : Array.isArray(operation?.enum) ? operation.enum.filter((value: unknown): value is string => typeof value === "string") : [];
+  });
+  return [...new Set(operations)];
+}
+
+/** Discoverable Rhino capabilities. Availability does not grant execution permission. */
+export const RHINO_TOOL_CATALOG = (["inspect", ...RHINO_ACTIONS] as RhinoJevProposedAction[]).map(action => ({
+  tool: action === "inspect" ? "RhinoInspect" : "RhinoAction",
+  action,
+  operations: schemaOperations(action),
+  sequence_candidate: (RHINO_FAST_ACTIONS as readonly string[]).includes(action),
+}));
 
 const TARGETED_RHINO_ACTIONS = new Set<RhinoActionName>([
   "transform",
@@ -192,6 +229,7 @@ export function buildRhinoJevRequest(
   observation: RhinoJevObservation,
   messages: MessageParam[] = [],
   fast = false,
+  manifest?: EnabledToolManifest,
 ): JevDecisionRequest {
   // Supply the exact chosen operation, not unrelated requirements from the
   // entire toolkit (e.g. planar needs curves, not an extrusion vector).
@@ -202,10 +240,13 @@ export function buildRhinoJevRequest(
       ? schema.oneOf.find((branch: any) => branch.properties?.operation?.const === parameters.operation) ?? schema
       : schema;
   }
+  const registeredRhinoTools = ["RhinoObserve", "RhinoInspect", "RhinoAction", "RhinoSequence"]
+    .filter(name => !manifest || manifest.tools.some(tool => tool.name === name));
+  const availableCatalog = RHINO_TOOL_CATALOG.filter(entry => registeredRhinoTools.includes(entry.tool));
   const nextActionCriteria: Record<string, string> = {
     inspect: "Observe Rhino again only when document, target, selection, units, or command state is insufficient or stale. Invalid proposed parameters require correction or ask_user, not repeated observation.",
   };
-  for (const candidate of (fast ? [action] : [...RHINO_ACTIONS, ...(action === "inspect" ? [action] : [])])) {
+  for (const candidate of (fast ? [action] : availableCatalog.map(entry => entry.action).filter(candidate => candidate !== "inspect" || action === "inspect"))) {
     nextActionCriteria[candidate] = candidate === action
       ? `Proceed with the already proposed, schema-validated ${candidate} action if its targets and parameters are sound.`
       : `Recommend ${candidate} instead; CCAGENT must return to the LLM and must not silently substitute it for the proposed action.`;
@@ -216,6 +257,17 @@ export function buildRhinoJevRequest(
       architecture: "Prefer RhinoCommon API for structured geometry operations. Use Computer Use only for unsupported UI/plugin surfaces. Ask the user for ambiguity or high-impact effects.",
       recent_user_context: recentConversation(messages, fast ? 2000 : 500),
       observation: compactObservation(observation, parameters, fast),
+      tools_list: {
+        source: "internal_cached_manifest",
+        ...(manifest ? { registry_revision: manifest.revision } : {}),
+        selected_tool: action === "inspect" ? "RhinoInspect" : "RhinoAction",
+        selected_action: action,
+        top_level_tools: registeredRhinoTools,
+        catalog: availableCatalog,
+        available_actions: availableCatalog.map(entry => entry.action),
+        allowed_actions: fast ? [action] : availableCatalog.map(entry => entry.action),
+        note: "The catalog lists implemented Rhino action families and their operations, not independent callable tools. Only the selected, prevalidated action may execute in this step. A different recommendation returns to the LLM; Jev cannot invent parameters or execute arbitrary commands.",
+      },
       ...(fast ? { bounded_sequence: "Execute only this exact prevalidated plan step. No free-form parameters or substitute actions. Choose ask_user for uncertainty. inspect means execute the proposed read-only inspection when proposed_action is inspect; otherwise it means refresh observation." } : {}),
       proposed_action: action,
       tool: action === "inspect" ? "RhinoInspect" : "RhinoAction",
@@ -418,6 +470,7 @@ export async function decideRhinoActionWithJev(
   messages: MessageParam[] = [],
   signal?: AbortSignal,
   fast = false,
+  manifest?: EnabledToolManifest,
 ): Promise<RhinoJevDecision> {
   const config = getRhinoJevConfig();
   if (!config.enabled) {
@@ -434,7 +487,7 @@ export async function decideRhinoActionWithJev(
   const started = Date.now();
   try {
     const response = await callOpenRouterJev(
-      buildRhinoJevRequest(action, parameters, observation, messages, fast),
+      buildRhinoJevRequest(action, parameters, observation, messages, fast, manifest),
       {
         apiKey: config.apiKey,
         endpoint: config.endpoint,

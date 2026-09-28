@@ -108,6 +108,36 @@ export interface LoadedProfiles {
 }
 
 /**
+ * Merge trusted task-role routing entries (for example `image -> qwen-omni`).
+ * Project values participate only after the normal project-trust gate.
+ */
+export async function loadModelRoles(
+  cwd: string = process.cwd(),
+): Promise<Record<string, string>> {
+  const roles: Record<string, string> = {};
+  for (const source of await loadTrustedSettingSources(cwd)) {
+    const rawRoles = source.raw?.modelRoles;
+    if (!rawRoles || typeof rawRoles !== "object" || Array.isArray(rawRoles)) continue;
+    for (const [key, value] of Object.entries(rawRoles as Record<string, unknown>)) {
+      if (typeof value === "string" && value.trim()) roles[key] = value.trim();
+    }
+  }
+  return roles;
+}
+
+/** Resolve the first configured role to a declared, usable model handle. */
+export async function resolveModelRole(
+  roleNames: readonly string[],
+  cwd: string = process.cwd(),
+): Promise<string | undefined> {
+  const roles = await loadModelRoles(cwd);
+  const handle = roleNames.map((name) => roles[name]).find(Boolean);
+  if (!handle) return undefined;
+  const { profiles } = await loadProfiles(cwd);
+  return profiles[handle] ? handle : undefined;
+}
+
+/**
  * Merge the `models` map (and `defaultModel`) across every settings source in
  * priority order, sanitizing privilege-sensitive fields from untrusted scopes.
  */

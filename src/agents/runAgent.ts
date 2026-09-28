@@ -48,6 +48,22 @@ import {
 
 export const DEFAULT_AGENT_MAX_TURNS = 30;
 
+/**
+ * Resolve the permission mode for a child agent.
+ *
+ * An agent definition may provide a more convenient default (the built-in
+ * Rhino agent uses Auto Mode), but it must not weaken an explicit parent
+ * boundary. Full is the user's no-prompt execution choice and Plan is the
+ * user's read-only boundary, so both always propagate to descendants.
+ */
+export function resolveSubAgentPermissionMode(
+  agentMode: PermissionMode | undefined,
+  parentMode: PermissionMode | undefined,
+): PermissionMode {
+  if (parentMode === "full" || parentMode === "plan") return parentMode;
+  return agentMode ?? parentMode ?? "default";
+}
+
 /** Streamed progress events forwarded to the parent's onProgress callback. */
 export type AgentProgressEvent =
   | { type: "tool_use_start"; toolName: string }
@@ -211,8 +227,10 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
       ? `${params.parentToolContext.sessionId}/agent-${def.agentType}-${Date.now().toString(36)}`
       : `agent-${def.agentType}-${Date.now().toString(36)}`);
 
-  const subPermissionMode: PermissionMode =
-    def.permissionMode ?? params.permissionMode ?? "default";
+  const subPermissionMode = resolveSubAgentPermissionMode(
+    def.permissionMode,
+    params.permissionMode,
+  );
 
   const subToolContext: ToolContext = {
     // Stage 20: when isolation: "worktree" is requested, the AgentTool

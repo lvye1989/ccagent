@@ -307,6 +307,18 @@ export function summarizeTool(
       const target = action === "list_windows" ? "open windows" : asString(inp.window_id);
       return { label: "ComputerObserve", target };
     }
+    case "BrowserSearch": {
+      const action = asString(inp.action);
+      const query = asString(inp.query);
+      const url = asString(inp.url);
+      const target = action === "search"
+        ? query ? `\"${shortenCommand(query)}\"` : asString(inp.engine)
+        : urlHost(url);
+      const stat = result?.includes("launch_status=accepted")
+        ? result.includes("browser_window=not independently detected") ? "opened" : "opened, browser detected"
+        : undefined;
+      return { label: "Jev Browser Search", target, stat };
+    }
     case "ComputerAction": {
       const action = asString(inp.action) ?? "action";
       const intent = asString(inp.intent);

@@ -35,6 +35,7 @@ import {
   resolveAgentTools,
 } from "../agents/resolveAgentTools.js";
 import { formatAgentsSystemReminder } from "../agents/promptInjection.js";
+import { resolveSubAgentPermissionMode } from "../agents/runAgent.js";
 import { agentTool } from "../tools/agentTool.js";
 import { toolResultText } from "../tools/Tool.js";
 import { getAllTools } from "../tools/index.js";
@@ -96,6 +97,29 @@ async function main(): Promise<void> {
   assert(
     (rhinoAgent?.getSystemPrompt() ?? "").includes("Never call Bash or PowerShell"),
     "rhino_agent prompt forbids arbitrary shell-driven Rhino commands",
+  );
+  assert(
+    (rhinoAgent?.getSystemPrompt() ?? "").includes("visual evidence -> the internal tool manifest / RhinoInspect capabilities -> RhinoObserve -> Jev -> structured execution"),
+    "rhino_agent prompt defines the vision-to-manifest-to-Jev evidence chain",
+  );
+  assert(
+    (rhinoAgent?.getSystemPrompt() ?? "").includes("RhinoObserve({capture:true, vision_analysis:true})"),
+    "rhino_agent requests opt-in viewport perception for visual validation",
+  );
+  assert(
+    (rhinoAgent?.getSystemPrompt() ?? "").includes("In Full Mode, do not request approval merely to run an in-scope tool"),
+    "rhino_agent defers approval behavior to the central Full Mode gate",
+  );
+  assert(
+    resolveSubAgentPermissionMode("auto", "full") === "full" &&
+      resolveSubAgentPermissionMode("auto", "plan") === "plan",
+    "parent Full and Plan modes cannot be weakened by an agent default",
+  );
+  assert(
+    resolveSubAgentPermissionMode("auto", "default") === "auto" &&
+      resolveSubAgentPermissionMode(undefined, "auto") === "auto" &&
+      resolveSubAgentPermissionMode(undefined, undefined) === "default",
+    "ordinary child modes retain the existing agent-default and inheritance precedence",
   );
   const explore = builtIns.find((a) => a.agentType === "Explore");
   assert(

@@ -8,8 +8,9 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Tool } from "./Tool.js";
+import type { Tool, ToolDecisionPolicy } from "./Tool.js";
 import { toolToApiParam } from "./Tool.js";
+import { resolveToolDecisionPolicy } from "./decisionPolicy.js";
 import { bashTool } from "./bashTool.js";
 import { fileEditTool } from "./fileEditTool.js";
 import { multiEditTool } from "./multiEditTool.js";
@@ -23,6 +24,7 @@ import { classicWordsTool } from "./classicWordsTool.js";
 import { listMcpResourcesTool } from "./listMcpResourcesTool.js";
 import { readMcpResourceTool } from "./readMcpResourceTool.js";
 import { powerShellTool } from "./powerShellTool.js";
+import { browserSearchTool } from "./browserSearchTool.js";
 import {
   computerActionGroupTool,
   computerActionTool,
@@ -66,6 +68,7 @@ const BUILTIN_TOOLS: Tool[] = [
   grepTool,
   bashTool,
   powerShellTool,
+  browserSearchTool,
   computerObserveTool,
   computerActionGroupTool,
   computerActionTool,
@@ -108,6 +111,25 @@ const BUILTIN_TOOLS: Tool[] = [
 ];
 
 let mcpTools: Tool[] = [];
+let toolRegistryRevision = 1;
+let lastEnabledManifestFingerprint: string | undefined;
+
+export interface EnabledToolManifestEntry {
+  name: string;
+  description: string;
+  inputSchema: Tool["inputSchema"];
+  decisionPolicy: ToolDecisionPolicy;
+}
+
+export interface EnabledToolManifest {
+  revision: number;
+  tools: EnabledToolManifestEntry[];
+}
+
+function markToolRegistryChanged(): void {
+  toolRegistryRevision++;
+  lastEnabledManifestFingerprint = undefined;
+}
 
 /**
  * Replace the registry of MCP-provided tools. Called once at startup after
@@ -115,11 +137,13 @@ let mcpTools: Tool[] = [];
  */
 export function registerMcpTools(tools: Tool[]): void {
   mcpTools = [...tools];
+  markToolRegistryChanged();
 }
 
 /** Drop the MCP-provided tools — used before re-registering after reconnect. */
 export function clearMcpTools(): void {
   mcpTools = [];
+  markToolRegistryChanged();
 }
 
 export function getAllTools(): Tool[] {
@@ -128,6 +152,44 @@ export function getAllTools(): Tool[] {
 
 export function findToolByName(name: string): Tool | undefined {
   return [...BUILTIN_TOOLS, ...mcpTools].find((tool) => tool.name === name);
+}
+
+/**
+ * Resolve a tool for dispatch only when it is enabled at execution time.
+ * Callers must use this instead of trusting an earlier model-visible list,
+ * because MCP/agent controls may close a tool while a model turn is running.
+ */
+export function findEnabledToolByName(name: string): Tool | undefined {
+  const tool = findToolByName(name);
+  return tool?.isEnabled() ? tool : undefined;
+}
+
+/**
+ * Return the current in-process tool catalogue. This is registry metadata,
+ * not a model-callable ToolsList tool, so reading it adds no LLM/network turn.
+ */
+export function getEnabledToolManifest(): EnabledToolManifest {
+  const tools = getAllTools().map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    decisionPolicy: resolveToolDecisionPolicy(tool),
+  }));
+  const fingerprint = JSON.stringify(tools);
+  if (
+    lastEnabledManifestFingerprint !== undefined &&
+    lastEnabledManifestFingerprint !== fingerprint
+  ) {
+    toolRegistryRevision++;
+  }
+  lastEnabledManifestFingerprint = fingerprint;
+  return { revision: toolRegistryRevision, tools };
+}
+
+export function getToolRegistryRevision(): number {
+  // Refresh first so dynamic built-in isEnabled() changes are reflected even
+  // when no MCP registration event occurred.
+  return getEnabledToolManifest().revision;
 }
 
 /**

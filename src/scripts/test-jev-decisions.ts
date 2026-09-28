@@ -1,12 +1,16 @@
 #!/usr/bin/env tsx
 
-import type { Tool } from "../tools/Tool.js";
+import type { Tool, ToolDecisionPolicy } from "../tools/Tool.js";
 import {
   buildToolJevRequest,
   interpretToolJevResponse,
   sanitizeToolInputForJev,
   shouldUseJevToolClassifier,
 } from "../permissions/jevToolClassifier.js";
+import {
+  formatActionForClassifier,
+  sanitizeClassifierToolInput,
+} from "../permissions/autoClassifier.js";
 import {
   applySearchRerankResponse,
   buildSearchRerankRequest,
@@ -23,11 +27,12 @@ function assert(condition: unknown, label: string): void {
   if (!condition) failures++;
 }
 
-function fakeTool(name: string, readOnly: boolean): Tool {
+function fakeTool(name: string, readOnly: boolean, decisionPolicy?: ToolDecisionPolicy): Tool {
   return {
     name,
     description: "test",
     inputSchema: { type: "object", properties: {} },
+    ...(decisionPolicy ? { decisionPolicy } : {}),
     async call() { return { content: "ok" }; },
     isReadOnly() { return readOnly; },
     isEnabled() { return true; },
@@ -45,10 +50,29 @@ async function main(): Promise<void> {
   assert(JSON.stringify(sanitized).includes("<redacted>"), "credential-like fields are redacted");
   assert(!JSON.stringify(sanitized).includes("private file body"), "file content is represented by metadata only");
   assert(!JSON.stringify(sanitized).includes("super-secret-value"), "inline command secrets are redacted");
+  const fallbackSanitized = sanitizeClassifierToolInput({
+    url: "https://example.com/private?token=never-send&email=user@example.com",
+    text: "typed private content",
+    command: "deploy --token=also-never-send",
+  });
+  const fallbackSerialized = JSON.stringify(fallbackSanitized);
+  assert(!fallbackSerialized.includes("never-send") && !fallbackSerialized.includes("typed private content"), "fallback classifier withholds URL query values and typed content");
+  assert(fallbackSerialized.includes("query_keys") && fallbackSerialized.includes("withheld-content"), "fallback classifier preserves bounded structural metadata");
+  assert(!formatActionForClassifier("BrowserSearch", {
+    action: "open_url",
+    url: "https://example.com/news?access_token=private-value",
+  }).includes("private-value"), "BrowserSearch fallback never serializes direct-URL query values");
   const request = buildToolJevRequest("Write", { file_path: "src/app.ts", content: "secret body" }, [
     { role: "user", content: "Update src/app.ts and never reveal token=abc123-private." },
-  ]);
-  assert(Boolean(request.questions.disposition && request.questions.goal_aligned), "tool decision batches disposition and alignment");
+  ], {
+    revision: 7,
+    tools: [
+      { name: "Read", description: "Read a file", inputSchema: { type: "object", properties: {} }, decisionPolicy: "local" },
+      { name: "Write", description: "Write a file", inputSchema: { type: "object", properties: { file_path: { type: "string" } } }, decisionPolicy: "generic_jev" },
+    ],
+  });
+  assert(Boolean(request.questions.disposition && request.questions.goal_aligned && request.questions.tool_match), "tool decision batches disposition, tool match, and alignment");
+  assert(JSON.stringify(request.state).includes('"registry_revision":7') && JSON.stringify(request.state).includes('"selected_tool_contract"'), "Jev receives the enabled internal tools_list revision and selected schema");
   assert(!JSON.stringify(request).includes("secret body"), "tool decision never sends write content");
   assert(!JSON.stringify(request).includes("abc123-private"), "recent user intent is secret-redacted");
   const safe = interpretToolJevResponse({
@@ -61,9 +85,24 @@ async function main(): Promise<void> {
       secret_exposure: { type: "noul", noul: 0.01 },
       external_effect: { type: "noul", noul: 0.01 },
       scope_change: { type: "noul", noul: 0.02 },
+      tool_match: { type: "noul", noul: 0.97 },
     },
   }, { mode: "enforce", model: "~typesafe/jev-latest", minConfidence: 0.8 });
   assert(safe.permissionBehavior === "allow", "scoped reversible file edits bypass the general LLM classifier");
+  const wrongTool = interpretToolJevResponse({
+    model: "typesafe/jev-test",
+    answers: {
+      disposition: { type: "choice", choice: "allow", confidence: 0.96 },
+      risk: { type: "choice", choice: "ordinary", confidence: 0.92 },
+      goal_aligned: { type: "noul", noul: 0.95 },
+      tool_match: { type: "noul", noul: 0.2 },
+      irreversible: { type: "noul", noul: 0.01 },
+      secret_exposure: { type: "noul", noul: 0.01 },
+      external_effect: { type: "noul", noul: 0.01 },
+      scope_change: { type: "noul", noul: 0.01 },
+    },
+  }, { mode: "enforce", model: "~typesafe/jev-latest", minConfidence: 0.8 });
+  assert(wrongTool.permissionBehavior === "ask", "Jev rejects a selected tool that does not match the enabled tools_list and goal");
   const external = interpretToolJevResponse({
     model: "typesafe/jev-test",
     answers: {
@@ -80,6 +119,8 @@ async function main(): Promise<void> {
   assert(shouldUseJevToolClassifier(fakeTool("Write", false)), "mutating tools use the Jev classifier");
   assert(!shouldUseJevToolClassifier(fakeTool("Read", true)), "read-only tools skip unnecessary Jev calls");
   assert(!shouldUseJevToolClassifier(fakeTool("WorkfriendAssess", false)), "Jev-backed tools do not recursively classify themselves");
+  assert(!shouldUseJevToolClassifier(fakeTool("ComputerNavigate", false)), "bounded Jev navigation skips the generic Jev classifier");
+  assert(!shouldUseJevToolClassifier(fakeTool("FixtureSpecialized", false, "specialized_jev")), "explicit specialized Jev policy skips the generic classifier");
   assert(!shouldUseJevToolClassifier(fakeTool("Agent", false)), "open-ended sub-agent routing remains with the main LLM");
 
   console.log("\n[2] Jev search reranking");
@@ -124,6 +165,11 @@ async function main(): Promise<void> {
   assert(
     "parameters_valid" in createRequest.questions && "route" in createRequest.questions,
     "target-less create_geometry still validates route and parameters",
+  );
+  assert(
+    JSON.stringify(createRequest.state).includes('"source":"internal_cached_manifest"') &&
+      JSON.stringify(createRequest.state).includes('"selected_tool":"RhinoAction"'),
+    "Rhino Jev receives the bounded internal tools_list and selected structured tool",
   );
   const layerRequest = buildRhinoJevRequest(
     "set_layer",

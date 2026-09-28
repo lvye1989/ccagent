@@ -422,7 +422,7 @@ async function main(): Promise<void> {
     precomputedAutoDecision: { behavior: "allow", reason: "invalid attempted downgrade" },
   });
   assert(highRiskGroupDenied.behavior === "deny", "browser-group fast path cannot bypass the ordinary-risk floor");
-  const fallbackAskOverridesFullAndAllow = await checkPermission({
+  const fallbackAskBypassedByFull = await checkPermission({
     tool: computerActionGroupTool,
     input: validBrowserGroup,
     cwd,
@@ -431,8 +431,8 @@ async function main(): Promise<void> {
     requiredComputerGroupReview: { behavior: "ask", reason: "confirm the intact browser group once" },
   });
   assert(
-    fallbackAskOverridesFullAndAllow.behavior === "ask",
-    "mandatory whole-group fallback review cannot be bypassed by Full Mode, an allow rule, or a precomputed allow",
+    fallbackAskBypassedByFull.behavior === "allow",
+    "Full Mode bypasses an ordinary whole-group fallback prompt without weakening the group safety floor",
   );
   const fallbackAllowExecutes = await checkPermission({
     tool: computerActionGroupTool,
@@ -450,14 +450,22 @@ async function main(): Promise<void> {
     requiredComputerGroupReview: { behavior: "allow", reason: "must not bypass Plan Mode" },
   });
   assert(fallbackPlanDenied.behavior === "deny", "whole-group fallback approval cannot bypass Plan Mode");
-  const fallbackRuleDenied = await checkPermission({
+  const fallbackRuleBypassedInFull = await checkPermission({
     tool: computerActionGroupTool,
     input: validBrowserGroup,
     cwd,
     settings: { mode: "full", allow: [], deny: ["ComputerActionGroup"] },
     requiredComputerGroupReview: { behavior: "allow", reason: "must not bypass an explicit deny rule" },
   });
-  assert(fallbackRuleDenied.behavior === "deny", "whole-group fallback approval cannot bypass an explicit deny rule");
+  assert(fallbackRuleBypassedInFull.behavior === "allow", "Full Mode bypasses configured allow/deny rules for an ordinary browser group");
+  const fallbackRuleDeniedInDefault = await checkPermission({
+    tool: computerActionGroupTool,
+    input: validBrowserGroup,
+    cwd,
+    settings: { mode: "default", allow: [], deny: ["ComputerActionGroup"] },
+    requiredComputerGroupReview: { behavior: "allow", reason: "must not bypass an explicit deny rule" },
+  });
+  assert(fallbackRuleDeniedInDefault.behavior === "deny", "whole-group fallback approval cannot bypass an explicit deny rule outside Full Mode");
 
   console.log("\n[4] Jev + LLM Computer Use decision gate");
   const originalJevTimeout = process.env.JEV_TIMEOUT_MS;

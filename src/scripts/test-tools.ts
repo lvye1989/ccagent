@@ -15,14 +15,22 @@ await loadEnv();
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getAllTools, findToolByName, getToolsApiParams } from "../tools/index.js";
+import {
+  clearMcpTools,
+  findEnabledToolByName,
+  findToolByName,
+  getAllTools,
+  getEnabledToolManifest,
+  getToolsApiParams,
+  registerMcpTools,
+} from "../tools/index.js";
 import { fileEditTool } from "../tools/fileEditTool.js";
 import { fileReadTool } from "../tools/fileReadTool.js";
 import { fileWriteTool } from "../tools/fileWriteTool.js";
 import { grepTool } from "../tools/grepTool.js";
 import { globTool } from "../tools/globTool.js";
 import { multiEditTool } from "../tools/multiEditTool.js";
-import { toolResultText, type ToolContext } from "../tools/Tool.js";
+import { toolResultText, type Tool, type ToolContext } from "../tools/Tool.js";
 
 const ctx: ToolContext = { cwd: process.cwd() };
 
@@ -161,7 +169,43 @@ async function main() {
     await fs.rm(outside, { recursive: true, force: true });
   }
 
-  // 6. API params format
+  // 6. Internal manifest + execution-time enabled lookup
+  const initialManifest = getEnabledToolManifest();
+  const readEntry = initialManifest.tools.find((tool) => tool.name === "Read");
+  const writeEntry = initialManifest.tools.find((tool) => tool.name === "Write");
+  const navigateEntry = initialManifest.tools.find((tool) => tool.name === "ComputerNavigate");
+  assert(readEntry?.decisionPolicy === "local", "Manifest resolves read-only tools to local policy");
+  assert(writeEntry?.decisionPolicy === "generic_jev", "Manifest resolves ordinary mutating tools to generic Jev");
+  if (navigateEntry) {
+    assert(navigateEntry.decisionPolicy === "specialized_jev", "Manifest marks ComputerNavigate as specialized Jev");
+  }
+
+  let fixtureEnabled = true;
+  const fixtureTool: Tool = {
+    name: "ManifestFixture",
+    description: "Manifest lifecycle fixture",
+    inputSchema: { type: "object", properties: {} },
+    decisionPolicy: "generic_jev",
+    async call() { return { content: "ok" }; },
+    isReadOnly: () => false,
+    isEnabled: () => fixtureEnabled,
+  };
+  try {
+    registerMcpTools([fixtureTool]);
+    const openedManifest = getEnabledToolManifest();
+    assert(openedManifest.revision > initialManifest.revision, "Registry replacement advances the manifest revision");
+    assert(findEnabledToolByName(fixtureTool.name) === fixtureTool, "Enabled lookup returns an open tool");
+    fixtureEnabled = false;
+    const closedManifest = getEnabledToolManifest();
+    assert(closedManifest.revision > openedManifest.revision, "Dynamic isEnabled changes advance the manifest revision");
+    assert(!closedManifest.tools.some((tool) => tool.name === fixtureTool.name), "Disabled tools disappear from the manifest");
+    assert(findToolByName(fixtureTool.name) === fixtureTool, "Legacy lookup can still inspect a registered disabled tool");
+    assert(findEnabledToolByName(fixtureTool.name) === undefined, "Dispatch lookup rejects a tool disabled after planning");
+  } finally {
+    clearMcpTools();
+  }
+
+  // 7. API params format
   console.log("\n── Test: API parameter conversion ──\n");
   const apiParams = getToolsApiParams();
   console.log(`✓ getToolsApiParams() returned ${apiParams.length} tool(s)`);

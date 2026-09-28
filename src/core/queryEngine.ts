@@ -22,7 +22,7 @@ import { getToolsApiParams } from "../tools/index.js";
 import { buildUserMessageContent } from "./attachImages.js";
 import type { ToolContext } from "../tools/Tool.js";
 import type { Usage } from "../types/message.js";
-import { resolveProfile, type ModelProfile } from "../services/api/providers/profile.js";
+import { resolveModelRole, resolveProfile, type ModelProfile } from "../services/api/providers/profile.js";
 import { getPlanFilePath, planExists as checkPlanExists } from "../context/plans.js";
 import { getPlanModeAttachment, getPlanModeExitAttachment } from "../context/planAttachments.js";
 import { getTaskMode, setTaskMode } from "../state/taskModeStore.js";
@@ -728,6 +728,25 @@ export class QueryEngine {
       if (built.attached.length > 0) {
         const names = built.attached.map((a) => a.ref).join(", ");
         yield { type: "notice", tone: "info", title: "Image attached", body: names };
+        // Route a successfully attached image to the configured vision role
+        // for this turn only. Explicit `/model` or command-level overrides
+        // remain authoritative. The vision model extracts evidence; native
+        // tools and Jev still own validation and execution.
+        if (!this.sessionModelOverride && !this.turnModelOverride) {
+          const visionModel = await resolveModelRole(
+            ["image", "multimodal", "vision"],
+            this.toolContext.cwd,
+          );
+          if (visionModel) {
+            this.turnModelOverride = visionModel;
+            yield {
+              type: "notice",
+              tone: "info",
+              title: "Vision model",
+              body: `This image turn is routed to ${visionModel}.`,
+            };
+          }
+        }
       }
       const userMessage: MessageParam = {
         role: "user",

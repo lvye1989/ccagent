@@ -96,7 +96,7 @@ async function main(): Promise<void> {
       cwd: root,
       mode: "full",
     });
-    assert(defaultPermission.behavior === "ask" && fullPermission.behavior === "ask", "wellbeing-text transfer requires fresh consent even in Full Mode");
+    assert(defaultPermission.behavior === "ask" && fullPermission.behavior === "allow", "Full Mode bypasses the Workfriend permission prompt while default mode still asks");
 
     console.log("\n[3] question-card limit");
     const makeQuestion = (n: number) => ({

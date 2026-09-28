@@ -166,6 +166,21 @@ export interface ToolResult {
  */
 export const DEFAULT_MAX_RESULT_SIZE_CHARS = 100_000;
 
+/**
+ * How an enabled tool participates in the pre-execution decision pipeline.
+ *
+ * - local: no remote Jev decision is needed; deterministic policy still runs.
+ * - generic_jev: use the shared Jev tool classifier when the active mode asks for it.
+ * - specialized_jev: the tool has a purpose-built typed Jev gate and must not
+ *   also pass through the generic classifier.
+ * - permission_only: leave the decision to the central permission policy/user.
+ */
+export type ToolDecisionPolicy =
+  | "local"
+  | "generic_jev"
+  | "specialized_jev"
+  | "permission_only";
+
 export interface Tool {
   /** Unique tool name, sent to the API and used for lookup. */
   readonly name: string;
@@ -178,6 +193,12 @@ export interface Tool {
    * This is sent directly to the Anthropic API as `input_schema`.
    */
   readonly inputSchema: Anthropic.Tool["input_schema"];
+
+  /**
+   * Optional explicit decision route. When omitted, read-only tools resolve to
+   * `local` and mutating tools resolve to `generic_jev`.
+   */
+  readonly decisionPolicy?: ToolDecisionPolicy;
 
   /**
    * Maximum character count for the tool result content.

@@ -723,10 +723,11 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     ruleHint: buildPermissionRuleHint(params.tool.name, params.input),
   };
 
-  // Computer Use has a stricter confirmation floor than ordinary tools.
-  // High-impact UI actions ask at action-time even in Full Mode and even when
-  // an allow rule exists. Password changes and safety bypasses require user
-  // hand-off and are denied. The tool independently enforces the same denies.
+  // Computer Use retains a non-bypassable action-time safety floor. Password
+  // changes and safety bypasses require user hand-off, browser groups are an
+  // ordinary-navigation primitive only, and every other non-ordinary input
+  // still requires fresh confirmation even in Full Mode. The tool
+  // independently enforces the same constraints.
   if (params.tool.name === "ComputerAction" || params.tool.name === "ComputerActionGroup") {
     const category =
       typeof params.input.risk_category === "string"
@@ -743,10 +744,21 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     }
   }
 
+  // Full Mode mirrors an explicit `approvalPolicy: never` / unrestricted
+  // session: no ordinary permission verdict may open an approval prompt.
+  // This deliberately precedes classifier fallback, Rhino/Workfriend consent
+  // prompts, allow/deny rules, and WebFetch domain checks. Deterministic tool
+  // validation, the complete Computer Use action-time floor above, hooks,
+  // path/freshness checks, and an enabled shell sandbox remain independent
+  // enforcement layers.
+  if (mode === "full") {
+    return { behavior: "allow", reason: "full permission mode bypass", request };
+  }
+
   // Jev-unavailable browser groups must remain one indivisible plan. The
   // fallback reviewer may approve the complete ordinary group, or require one
-  // foreground confirmation. Plan Mode and explicit deny rules still win;
-  // Full Mode, allow rules, and hook allow cannot bypass an `ask` verdict.
+  // foreground confirmation. Plan Mode and explicit deny rules still win in
+  // prompted modes; Full Mode has already taken its no-prompt fast path.
   if (params.tool.name === "ComputerActionGroup" && params.requiredComputerGroupReview) {
     if (mode === "plan") {
       return { behavior: "deny", reason: "plan mode blocks ComputerActionGroup", request };
@@ -767,8 +779,7 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
   // Rhino has its own deterministic confirmation floor. Jev may route and
   // validate ordinary structured geometry operations, but it cannot waive a
   // confirmation for deleting source geometry, exporting/overwriting files,
-  // or running a third-party Grasshopper definition. This applies even in
-  // Full Mode and even when a persistent allow rule exists.
+  // or running a third-party Grasshopper definition in prompted modes.
   if (params.tool.name === "RhinoAction") {
     const action = typeof params.input.action === "string" ? params.input.action : "unknown";
     const parameters = params.input.parameters && typeof params.input.parameters === "object" && !Array.isArray(params.input.parameters)
@@ -789,20 +800,11 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
   }
 
   // Workfriend assessments transmit user-selected work and wellbeing text to
-  // OpenRouter. Require a fresh consent prompt in every mode, including Full,
-  // before any external request is made.
+  // OpenRouter. Require a fresh consent prompt in prompted modes before any
+  // external request is made; Full Mode is the user's explicit no-prompt
+  // execution policy.
   if (params.tool.name === "WorkfriendAssess") {
     return { behavior: "ask", reason: "external wellbeing-text assessment requires fresh confirmation", request };
-  }
-
-  // Full Mode is an explicit user-controlled bypass of the permission rule
-  // engine. It intentionally precedes WebFetch domain checks, deny rules,
-  // dangerous-command detection, and the Auto Mode classifier so no tool call
-  // can fall back to a permission-engine confirmation. Tool-level validation,
-  // hooks, workspace path boundaries, and an enabled shell sandbox remain
-  // independent enforcement layers.
-  if (mode === "full") {
-    return { behavior: "allow", reason: "full permission mode bypass", request };
   }
 
   // WebFetch domain permission runs in all modes, before any read-only
@@ -887,12 +889,13 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     return { behavior: "allow", reason: "matched allow rule", request };
   }
 
-  // ComputerActionGroup is the one-gate browser fast path. Its specialized
-  // Jev decision may replace the ordinary default-mode prompt only after hard
-  // policy, Plan Mode, and explicit deny rules have run. Hooks are enforced by
-  // the caller independently and can still deny or request confirmation.
+  // BrowserSearch and ComputerActionGroup are one-gate browser fast paths.
+  // Their specialized Jev decision may replace the ordinary default-mode
+  // prompt only after hard policy, Plan Mode, and explicit deny rules have
+  // run. Hooks are enforced by the caller independently and can still deny or
+  // request confirmation outside Full Mode.
   if (
-    params.tool.name === "ComputerActionGroup" &&
+    (params.tool.name === "BrowserSearch" || params.tool.name === "ComputerActionGroup") &&
     params.precomputedAutoDecision?.behavior === "allow"
   ) {
     return {

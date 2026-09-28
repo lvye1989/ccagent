@@ -84,8 +84,10 @@ test("new curves do not request nonexistent targets",()=>assert.equal(requiresTa
 test("targeted mesh with low target validity still requires observation",()=>assert.equal(interpretRhinoJevResponse({model:"typesafe/jev-test",answers:{route:{type:"choice",choice:"rhino_api",confidence:0.99},next_action:{type:"choice",choice:"mesh",confidence:0.99},target_valid:{type:"noul",noul:0.2}}},"mesh",{mode:"enforce",model:"typesafe/jev-test",minConfidence:0.8},cases.mesh).forceObserve,true));
 
 for(const [action,parameters] of [["object_state",{operation:"delete",target_guids:[id]}],["curve_edit",{operation:"join",target_guids:[id],delete_inputs:true}],["solid_edit",{...cases.solid_edit,delete_inputs:true}],["mesh",{...cases.mesh,delete_inputs:true}],["layer_manage",{operation:"delete_empty",layer:"A"}],["run_grasshopper",{definition_path:"fixture.gh",operation:"inspect"}],["run_grasshopper",{definition_path:"fixture.gh",operation:"bake"}]] as const){
-  const decision=await checkPermission({tool:rhinoActionTool,input:{action,parameters},cwd:process.cwd(),settings:{mode:"full",allow:["RhinoAction(*)"],deny:[]}});
-  test(`${action}/${(parameters as Record<string,unknown>).operation}: fresh permission required`,()=>assert.equal(decision.behavior,"ask"));
+  const fullDecision=await checkPermission({tool:rhinoActionTool,input:{action,parameters},cwd:process.cwd(),settings:{mode:"full",allow:["RhinoAction(*)"],deny:[]}});
+  test(`${action}/${(parameters as Record<string,unknown>).operation}: Full Mode suppresses ordinary permission prompts`,()=>assert.equal(fullDecision.behavior,"allow"));
+  const defaultDecision=await checkPermission({tool:rhinoActionTool,input:{action,parameters},cwd:process.cwd(),settings:{mode:"default",allow:[],deny:[]}});
+  test(`${action}/${(parameters as Record<string,unknown>).operation}: prompted modes retain fresh permission`,()=>assert.equal(defaultDecision.behavior,"ask"));
 }
 test("read-only inspector is registered",()=>assert.equal(findToolByName("RhinoInspect"),rhinoInspectTool));
 test("inspector is read-only",()=>assert.ok(rhinoInspectTool.isReadOnly()));

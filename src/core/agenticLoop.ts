@@ -18,7 +18,7 @@ import { streamMessage } from "../services/api/streaming.js";
 import { ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
 import type { QuerySource } from "../services/api/withRetry.js";
 import { compactMessages } from "../context/compaction.js";
-import { findToolByName } from "../tools/index.js";
+import { findEnabledToolByName, getEnabledToolManifest } from "../tools/index.js";
 import { truncateToolResult, type ToolContext, type ToolResult } from "../tools/Tool.js";
 import { appendTextToContent, prependTextToContent } from "../tools/contentBlocks.js";
 import {
@@ -26,6 +26,13 @@ import {
   preflightComputerActionWithJev,
   validateComputerActionGroupPlan,
 } from "../tools/computerUseTools.js";
+import {
+  grantBrowserSearchExecution,
+  preflightBrowserSearchWithJev,
+  revokeBrowserSearchExecution,
+  validateBrowserSearchInput,
+  type BrowserSearchFinalPermission,
+} from "../tools/browserSearchTool.js";
 import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js";
 import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev } from "../tools/rhinoTools.js";
 import { canExecuteRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
@@ -305,7 +312,7 @@ interface ToolBatch {
 function partitionToolCalls(blocks: ToolUseBlock[]): ToolBatch[] {
   const batches: ToolBatch[] = [];
   for (const block of blocks) {
-    const tool = findToolByName(block.name);
+    const tool = findEnabledToolByName(block.name);
     const safe = !!tool?.isConcurrencySafe?.(
       (block.input as Record<string, unknown>) ?? {},
     );
@@ -345,10 +352,10 @@ async function runOneToolBlock(
 ): Promise<RunOneToolReturn> {
   let toolDispatched = false;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
-  const tool = findToolByName(block.name);
+  const tool = findEnabledToolByName(block.name);
   if (!tool) {
     const result: ToolResult = {
-      content: `Error: Unknown tool "${block.name}"`,
+      content: `Error: Tool "${block.name}" is unknown or was disabled after the model selected it. Refresh the enabled tools list before retrying.`,
       isError: true,
     };
     return {
@@ -397,6 +404,19 @@ async function runOneToolBlock(
     const liveMode = context.getPermissionMode?.() as PermissionMode | undefined;
     const effectiveMode = liveMode ?? options.permissionMode;
 
+    if (block.name === "BrowserSearch") {
+      const validationError = validateBrowserSearchInput(toolInput);
+      if (validationError) {
+        const result: ToolResult = {
+          content: `BrowserSearch rejected locally before Jev: ${validationError} No browser was opened.`,
+          isError: true,
+        };
+        return {
+          execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+        };
+      }
+    }
+
     if (block.name === "ComputerActionGroup") {
       const validationError = validateComputerActionGroupPlan(toolInput);
       if (validationError) {
@@ -414,8 +434,24 @@ async function runOneToolBlock(
     // It never lowers the LLM-declared risk. In Auto Mode a confident Jev
     // decision can replace the slower general-purpose classifier call; all
     // deterministic deny rules and the high-impact confirmation floor remain.
-    if (block.name === "ComputerAction" || block.name === "ComputerActionGroup" || block.name === "RhinoAction") {
+    if (block.name === "BrowserSearch" || block.name === "ComputerAction" || block.name === "ComputerActionGroup" || block.name === "RhinoAction") {
       setToolStatus(block.id, "classifier");
+    }
+    const browserSearchJevDecision = block.name === "BrowserSearch"
+      ? await preflightBrowserSearchWithJev(
+          toolInput,
+          context,
+          options.conversationMessages,
+        )
+      : null;
+    if (browserSearchJevDecision?.forceDeny) {
+      const result: ToolResult = {
+        content: `Jev Browser Search gate denied this request. ${browserSearchJevDecision.summary}`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+      };
     }
     const jevDecision = block.name === "ComputerAction"
       ? await preflightComputerActionWithJev(
@@ -451,7 +487,7 @@ async function runOneToolBlock(
     let computerGroupFallbackReview: {
       behavior: "allow" | "ask";
       reason: string;
-      trace: "llm_allow" | "manual_required";
+      trace: "llm_allow" | "manual_required" | "full_validated";
     } | undefined;
     if (block.name === "ComputerActionGroup" && jevDecision?.requiresFallbackReview) {
       if (context.abortSignal?.aborted) {
@@ -463,35 +499,103 @@ async function runOneToolBlock(
           execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
         };
       }
-      setToolStatus(block.id, "classifier");
-      const fallbackVerdict = await classifyAutoModeAction({
-        messages: options.conversationMessages ?? [],
-        toolName: block.name,
-        toolInput,
-        allowRules: [
-          ...(options.permissionSettings?.allow ?? []),
-          ...(options.sessionPermissionRules?.allow ?? []),
-        ],
-        denyRules: [
-          ...(options.permissionSettings?.deny ?? []),
-          ...(options.sessionPermissionRules?.deny ?? []),
-        ],
-        model: options.model,
-      });
-      if (!fallbackVerdict.unavailable && !fallbackVerdict.shouldBlock) {
+      if (effectiveMode === "full") {
         computerGroupFallbackReview = {
           behavior: "allow",
-          reason: `Whole-group fallback LLM review approved the intact browser plan: ${fallbackVerdict.reason}`,
-          trace: "llm_allow",
+          reason: "Full Mode accepted the locally validated ordinary browser group without an extra fallback-model round trip.",
+          trace: "full_validated",
         };
       } else {
-        computerGroupFallbackReview = {
+        setToolStatus(block.id, "classifier");
+        const fallbackVerdict = await classifyAutoModeAction({
+          messages: options.conversationMessages ?? [],
+          toolName: block.name,
+          toolInput,
+          allowRules: [
+            ...(options.permissionSettings?.allow ?? []),
+            ...(options.sessionPermissionRules?.allow ?? []),
+          ],
+          denyRules: [
+            ...(options.permissionSettings?.deny ?? []),
+            ...(options.sessionPermissionRules?.deny ?? []),
+          ],
+          model: options.model,
+        });
+        if (!fallbackVerdict.unavailable && !fallbackVerdict.shouldBlock) {
+          computerGroupFallbackReview = {
+            behavior: "allow",
+            reason: `Whole-group fallback LLM review approved the intact browser plan: ${fallbackVerdict.reason}`,
+            trace: "llm_allow",
+          };
+        } else {
+          computerGroupFallbackReview = {
+            behavior: "ask",
+            reason: fallbackVerdict.unavailable
+              ? `Jev and the whole-group fallback reviewer were unavailable; confirm the intact browser plan once (${fallbackVerdict.reason}).`
+              : `Whole-group fallback LLM review requires one confirmation: ${fallbackVerdict.reason}`,
+            trace: "manual_required",
+          };
+        }
+      }
+    }
+    let browserSearchFallbackReview: {
+      behavior: "allow" | "ask";
+      reason: string;
+      trace: "llm_allow" | "manual_required" | "full_validated";
+    } | undefined;
+    if (block.name === "BrowserSearch" && browserSearchJevDecision?.requiresFallbackReview) {
+      if (context.abortSignal?.aborted) {
+        const result: ToolResult = {
+          content: "BrowserSearch was cancelled before fallback review. No browser was opened.",
+          isError: true,
+        };
+        return {
+          execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+        };
+      }
+      if (browserSearchJevDecision.sensitiveInputWithheld) {
+        browserSearchFallbackReview = {
           behavior: "ask",
-          reason: fallbackVerdict.unavailable
-            ? `Jev and the whole-group fallback reviewer were unavailable; confirm the intact browser plan once (${fallbackVerdict.reason}).`
-            : `Whole-group fallback LLM review requires one confirmation: ${fallbackVerdict.reason}`,
+          reason: "BrowserSearch contains secret-like material; it was withheld from remote reviewers and requires user confirmation before external navigation.",
           trace: "manual_required",
         };
+      } else if (effectiveMode === "full") {
+        browserSearchFallbackReview = {
+          behavior: "allow",
+          reason: "Full Mode accepted the locally validated one-shot BrowserSearch without an extra fallback-model round trip.",
+          trace: "full_validated",
+        };
+      } else {
+        setToolStatus(block.id, "classifier");
+        const fallbackVerdict = await classifyAutoModeAction({
+          messages: options.conversationMessages ?? [],
+          toolName: block.name,
+          toolInput,
+          allowRules: [
+            ...(options.permissionSettings?.allow ?? []),
+            ...(options.sessionPermissionRules?.allow ?? []),
+          ],
+          denyRules: [
+            ...(options.permissionSettings?.deny ?? []),
+            ...(options.sessionPermissionRules?.deny ?? []),
+          ],
+          model: options.model,
+        });
+        if (!fallbackVerdict.unavailable && !fallbackVerdict.shouldBlock) {
+          browserSearchFallbackReview = {
+            behavior: "allow",
+            reason: `Whole-request fallback LLM review approved BrowserSearch: ${fallbackVerdict.reason}`,
+            trace: "llm_allow",
+          };
+        } else {
+          browserSearchFallbackReview = {
+            behavior: "ask",
+            reason: fallbackVerdict.unavailable
+              ? `Jev and the whole-request fallback reviewer were unavailable; confirm BrowserSearch once (${fallbackVerdict.reason}).`
+              : `Whole-request fallback review requires one confirmation: ${fallbackVerdict.reason}`,
+            trace: "manual_required",
+          };
+        }
       }
     }
     if (
@@ -500,15 +604,19 @@ async function runOneToolBlock(
     ) {
       toolInput = { ...toolInput, risk_category: jevDecision.effectiveRisk };
     }
+    const rhinoToolManifest = block.name === "RhinoAction" || (options.rhinoFastLane && block.name === "RhinoInspect")
+      ? getEnabledToolManifest()
+      : undefined;
     const rhinoJevDecision = block.name === "RhinoAction"
       ? await preflightRhinoActionWithJev(
           toolInput,
           context,
           options.conversationMessages,
           options.rhinoFastLane,
+          rhinoToolManifest,
         )
       : options.rhinoFastLane && block.name === "RhinoInspect"
-        ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages)
+        ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages, rhinoToolManifest)
         : undefined;
     if (options.rhinoFastLane && block.name !== "RhinoObserve" && (!rhinoJevDecision || !canExecuteRhinoFastStep(
       rhinoJevDecision, (block.name === "RhinoInspect" ? "inspect" : toolInput.action) as RhinoJevProposedAction,
@@ -547,15 +655,27 @@ async function runOneToolBlock(
     if (effectiveMode === "auto") {
       setToolStatus(block.id, "classifier");
     }
+    const toolManifest = effectiveMode === "auto" && shouldUseJevToolClassifier(tool)
+      ? getEnabledToolManifest()
+      : undefined;
     const toolJevDecision = effectiveMode === "auto" && !jevDecision && block.name !== "RhinoAction" && block.name !== "RhinoSequence" && !options.rhinoFastLane && shouldUseJevToolClassifier(tool)
       ? await decideToolUseWithJev(
           block.name,
           toolInput,
           options.conversationMessages,
           context.abortSignal,
+          toolManifest,
         )
       : null;
-    const precomputedJevDecision = jevDecision?.permissionBehavior
+    const browserSearchPermissionBehavior = browserSearchFallbackReview?.behavior
+      ?? browserSearchJevDecision?.permissionBehavior;
+    const precomputedJevDecision = browserSearchPermissionBehavior
+      ? {
+          behavior: browserSearchPermissionBehavior,
+          reason: browserSearchFallbackReview?.reason
+            ?? `Jev Browser Search decision: ${browserSearchJevDecision?.summary ?? "unknown"}`,
+        }
+      : jevDecision?.permissionBehavior
       ? {
           behavior: jevDecision.permissionBehavior,
           reason: `Jev Computer Use decision: ${jevDecision.summary}`,
@@ -593,28 +713,48 @@ async function runOneToolBlock(
         : {}),
     });
 
-    // Jev's request-time confirmation is an independent Computer Use safety
-    // layer, so it also applies in Full Mode where the generic permission
-    // engine is intentionally bypassed.
-    if (jevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
+    // In prompted modes, a specialized Jev "ask" result upgrades the central
+    // verdict. Full Mode suppresses ordinary prompts; the deterministic
+    // high-impact Computer Use floor above remains non-bypassable.
+    if (effectiveMode !== "full" && jevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
       permission = {
         ...permission,
         behavior: "ask",
         reason: `Jev Computer Use decision requires confirmation: ${jevDecision.summary}`,
       };
     }
-    if (computerGroupFallbackReview?.behavior === "ask" && permission.behavior !== "deny") {
+    if (effectiveMode !== "full" && computerGroupFallbackReview?.behavior === "ask" && permission.behavior !== "deny") {
       permission = {
         ...permission,
         behavior: "ask",
         reason: computerGroupFallbackReview.reason,
       };
     }
-    if (rhinoJevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
+    if (effectiveMode !== "full" && rhinoJevDecision?.permissionBehavior === "ask" && permission.behavior !== "deny") {
       permission = {
         ...permission,
         behavior: "ask",
         reason: `Jev Rhino decision requires confirmation: ${rhinoJevDecision.summary}`,
+      };
+    }
+    const browserSearchRequiresFreshConfirmation =
+      block.name === "BrowserSearch" &&
+      (
+        browserSearchJevDecision?.sensitiveInputWithheld === true ||
+        browserSearchJevDecision?.risk === "sensitive_query" ||
+        browserSearchJevDecision?.risk === "misaligned" ||
+        /secret-like|credential|private secret/i.test(browserSearchJevDecision?.summary ?? "")
+      );
+    if (
+      browserSearchRequiresFreshConfirmation &&
+      browserSearchPermissionBehavior === "ask" &&
+      permission.behavior !== "deny"
+    ) {
+      permission = {
+        ...permission,
+        behavior: "ask",
+        reason: browserSearchFallbackReview?.reason
+          ?? `BrowserSearch may transmit sensitive or misaligned data: ${browserSearchJevDecision?.summary ?? "review required"}`,
       };
     }
 
@@ -631,8 +771,10 @@ async function runOneToolBlock(
       isComputerInputTool &&
       (
         computerRiskCategory !== "ordinary" ||
-        jevDecision?.permissionBehavior === "ask" ||
-        computerGroupFallbackReview?.behavior === "ask"
+        (effectiveMode !== "full" && (
+          jevDecision?.permissionBehavior === "ask" ||
+          computerGroupFallbackReview?.behavior === "ask"
+        ))
       );
     const rhinoParameters =
       block.name === "RhinoAction" && toolInput.parameters && typeof toolInput.parameters === "object" && !Array.isArray(toolInput.parameters)
@@ -647,14 +789,20 @@ async function runOneToolBlock(
       || (rhinoAction === "import_export" && rhinoParameters.operation === "export")
       || rhinoAction === "run_grasshopper";
     const rhinoRequiresFreshConfirmation =
-      block.name === "RhinoAction" && (rhinoHighImpact || rhinoJevDecision?.permissionBehavior === "ask");
-    if (preOutcome.permissionBehavior === "allow" && !options.rhinoFastLane && !computerRequiresFreshConfirmation && !rhinoRequiresFreshConfirmation) {
+      effectiveMode !== "full" && block.name === "RhinoAction" && (rhinoHighImpact || rhinoJevDecision?.permissionBehavior === "ask");
+    if (
+      preOutcome.permissionBehavior === "allow" &&
+      !options.rhinoFastLane &&
+      !computerRequiresFreshConfirmation &&
+      !rhinoRequiresFreshConfirmation &&
+      !browserSearchRequiresFreshConfirmation
+    ) {
       permission = {
         ...permission,
         behavior: "allow",
         reason: preOutcome.permissionDecisionReason || "Allowed by PreToolUse hook",
       };
-    } else if (preOutcome.permissionBehavior === "ask" && permission.behavior !== "deny") {
+    } else if (effectiveMode !== "full" && preOutcome.permissionBehavior === "ask" && permission.behavior !== "deny") {
       permission = {
         ...permission,
         behavior: "ask",
@@ -662,7 +810,9 @@ async function runOneToolBlock(
       };
     }
 
-    let permissionTrace = permission.behavior === "allow" ? "auto_allowed" : permission.behavior;
+    let permissionTrace = permission.behavior === "allow"
+      ? effectiveMode === "full" ? "full_access" : "auto_allowed"
+      : permission.behavior;
     if (permission.behavior === "deny") {
       const jevTrace = jevDecision?.configured
         ? `\nJev Computer Use: ${jevDecision.summary}`
@@ -737,6 +887,41 @@ async function runOneToolBlock(
       }
     }
 
+    if (block.name === "BrowserSearch" && browserSearchJevDecision) {
+      try {
+        const wasUserApproved = permissionTrace === "allow_once" || permissionTrace === "allow_always";
+        const finalPermission: BrowserSearchFinalPermission | undefined =
+          permissionTrace === "auto_allowed" ||
+          permissionTrace === "full_access" ||
+          permissionTrace === "allow_once" ||
+          permissionTrace === "allow_always"
+            ? permissionTrace
+            : undefined;
+        if (!finalPermission) {
+          throw new Error(`Unexpected final permission trace: ${permissionTrace}`);
+        }
+        grantBrowserSearchExecution(block.id, toolInput, browserSearchJevDecision, {
+          finalPermission,
+          independentlyReviewed:
+            browserSearchJevDecision.permissionBehavior === "allow" ||
+            browserSearchFallbackReview?.behavior === "allow" ||
+            wasUserApproved ||
+            (effectiveMode === "full" && !browserSearchRequiresFreshConfirmation),
+          sessionId: context.sessionId,
+        });
+      } catch (error) {
+        revokeBrowserSearchExecution(block.id, context.sessionId);
+        const result: ToolResult = {
+          content: `BrowserSearch was not executed because the central Jev/permission grant failed: ${error instanceof Error ? error.message : String(error)} No browser was opened.`,
+          isError: true,
+        };
+        return {
+          execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+          permissionRequest: surfacedRequest,
+        };
+      }
+    }
+
     // Stamp the tool_use id onto the per-call context so tools that
     // need to publish out-of-band updates (currently just AgentTool's
     // sub-agent progress store) can correlate their events back to
@@ -780,9 +965,26 @@ async function runOneToolBlock(
 
     // Permission cleared (or never needed) — the tool is now executing.
     if (options.rhinoFastLane && context.abortSignal?.aborted) throw new Error("Rhino fast lane aborted before native execution");
+    // The tool registry can change while a remote decision or user prompt is
+    // in flight (for example `/mcp close`). Never dispatch the stale object
+    // that was resolved before those awaits; require the same tool instance to
+    // still be enabled at the final execution boundary.
+    const dispatchTool = findEnabledToolByName(block.name);
+    if (!dispatchTool || dispatchTool !== tool) {
+      if (block.name === "BrowserSearch") revokeBrowserSearchExecution(block.id, context.sessionId);
+      const result: ToolResult = {
+        content: `Tool "${block.name}" changed or was disabled while its execution was being reviewed. Nothing was dispatched; refresh the enabled tools list and retry.`,
+        isError: true,
+      };
+      return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
+        permissionRequest: surfacedRequest,
+      };
+    }
+
     setToolStatus(block.id, "running");
     toolDispatched = true;
-    const rawResult = await tool.call(toolInput, callContext);
+    const rawResult = await dispatchTool.call(toolInput, callContext);
     let result: ToolResult = {
       ...rawResult,
       content: truncateToolResult(rawResult.content, tool.maxResultSizeChars),
@@ -811,7 +1013,7 @@ async function runOneToolBlock(
         ...result,
         content: prependTextToContent(
           result.content,
-          `[Jev Tool Auto ${toolJevDecision.mode}]\n${toolJevDecision.summary}, final_permission=${permissionTrace}\n\n`,
+          `[Jev Tool ${toolJevDecision.mode}]\n${toolJevDecision.summary}, tools_list_revision=${toolManifest?.revision ?? "unknown"}, final_permission=${permissionTrace}\n\n`,
         ),
       };
     }

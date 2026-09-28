@@ -4,10 +4,10 @@ import { z } from "zod";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { parseRhinoActionInput } from "./rhinoTools.js";
 import { RHINO_INSPECT_SCHEMA } from "./rhinoCatalog.js";
-import { getRhinoJevConfig, type RhinoJevDecision } from "./rhinoJev.js";
+import { getRhinoJevConfig, RHINO_FAST_ACTIONS, type RhinoJevDecision } from "./rhinoJev.js";
 import { writeRhinoProjectReport } from "./rhinoProject.js";
 
-const ACTIONS = ["inspect", "create_geometry", "create_curve", "create_solid", "loft", "curtain_wall", "floor_plates", "extrude", "transform", "copy_objects", "set_layer", "set_material", "set_view"] as const;
+const ACTIONS = RHINO_FAST_ACTIONS;
 const stepSchema = z.object({
   id: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,47}$/),
   action: z.enum(ACTIONS), parameters: z.record(z.string(), z.unknown()),
@@ -147,6 +147,7 @@ async function execute(plan: Plan, context: ToolContext): Promise<ToolResult> {
 const ledger = new Map<string, { hash: string; result: Promise<ToolResult> }>();
 export const rhinoSequenceTool: Tool = {
   name: "RhinoSequence",
+  decisionPolicy: "specialized_jev",
   description: "Fast bounded Rhino plan: submit 1-8 validated ordinary steps once. Jev decides each exact step; the runtime observes/verifies automatically through the normal permission gate without intermediate LLM turns. Actions: inspect (read-only RhinoInspect parameters), create_geometry/create_curve/create_solid, loft, curtain_wall, floor_plates, extrude, transform, copy_objects, set_layer, set_material, set_view. targets_from binds only actual created GUIDs of one earlier step. No export/import/delete/boolean/undo/GH/third-party scripts or isolate:true. Stops on uncertainty/error, never auto-retries mutations. Reusing a plan_id within this session returns the original receipt; new work needs a new plan_id.",
   inputSchema: z.toJSONSchema(schema, { io: "input" }) as Tool["inputSchema"],
   maxResultSizeChars: 100_000,

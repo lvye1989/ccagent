@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { rhinoSequenceTool, parseRhinoSequence } from "../tools/rhinoSequence.js";
-import { buildRhinoJevRequest, canExecuteRhinoFastStep, interpretRhinoJevResponse, type RhinoJevDecision } from "../tools/rhinoJev.js";
+import { buildRhinoJevRequest, canExecuteRhinoFastStep, interpretRhinoJevResponse, RHINO_ACTIONS, RHINO_TOOL_CATALOG, type RhinoJevDecision } from "../tools/rhinoJev.js";
 import { runTools } from "../core/agenticLoop.js";
+import { getEnabledToolManifest } from "../tools/index.js";
+import { RHINO_EXTENDED_ACTIONS } from "../tools/rhinoCatalog.js";
 import type { ToolContext, ToolResult } from "../tools/Tool.js";
 import { resetSettingsCache } from "../config/sources.js";
 
@@ -52,8 +54,19 @@ try {
   check(!canExecuteRhinoFastStep({ ...decision, nextAction: "transform", targetValid: undefined }, "transform", { target_guids: [guid] }), "Referenced targets require target_valid evidence");
   const observed = { observationId: "test", capturedAt: new Date().toISOString(), document: {}, layers: [], objects: [], selection: [], command: {}, undo: {} };
   const full = buildRhinoJevRequest("create_geometry", {}, observed);
-  const fast = buildRhinoJevRequest("create_geometry", {}, observed, [], true);
+  const manifest = getEnabledToolManifest();
+  const fast = buildRhinoJevRequest("create_geometry", {}, observed, [], true, manifest);
   check(JSON.stringify(fast).length < JSON.stringify(full).length, "Fast Jev request omits unrelated action choices");
+  const toolsList = (fast.state as any).tools_list;
+  check(toolsList.registry_revision === manifest.revision && toolsList.top_level_tools.includes("RhinoAction"), "Rhino Jev uses the live enabled-tool registry after observation");
+  check(toolsList.catalog.length === RHINO_ACTIONS.length + 1 && RHINO_ACTIONS.every(action => toolsList.available_actions.includes(action)), "Fast Jev sees every implemented Rhino action family");
+  check(toolsList.catalog.find((entry: any) => entry.action === "surface").operations.includes("sweep2")
+    && toolsList.catalog.find((entry: any) => entry.action === "run_grasshopper").operations.includes("bake")
+    && toolsList.catalog.find((entry: any) => entry.action === "inspect").operations.includes("section"), "Rhino tools_list includes extended, Grasshopper and inspection operations");
+  check(RHINO_TOOL_CATALOG.filter(entry => (RHINO_EXTENDED_ACTIONS as readonly string[]).includes(entry.action)).reduce((count, entry) => count + entry.operations.length, 0) === 67, "All 67 implemented extended Rhino operations are discoverable");
+  check(toolsList.allowed_actions.length === 1 && toolsList.allowed_actions[0] === "create_geometry", "Full discovery never expands the executable fast step");
+  const withoutInspect = buildRhinoJevRequest("create_geometry", {}, observed, [], true, { ...manifest, tools: manifest.tools.filter(tool => tool.name !== "RhinoInspect") });
+  check(!(withoutInspect.state as any).tools_list.available_actions.includes("inspect"), "Disabled Rhino tools are absent from Jev discovery");
   const inspection = interpretRhinoJevResponse({ model: "test", answers: { route: { type: "choice", choice: "rhino_api", confidence: 0.99 }, next_action: { type: "choice", choice: "inspect" }, parameters_valid: { type: "noul", noul: 0.99 }, target_valid: { type: "noul", noul: 0.99 }, destructive: { type: "noul", noul: 0.01 }, expected_progress: { type: "noul", noul: 0.99 } } }, "inspect", { mode: "enforce", model: "test", minConfidence: 0.8 }, { target_guids: [guid] });
   check(!inspection.forceObserve && canExecuteRhinoFastStep(inspection, "inspect", { target_guids: [guid] }), "Jev can select exact read-only inspection without a reobserve loop");
   for (const action of ["import_export", "run_grasshopper", "undo", "boolean", "object_state", "Bash"]) {
