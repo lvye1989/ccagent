@@ -392,7 +392,7 @@ The direct bridge currently targets **Rhino 8 on Windows** and uses the installe
 
 #### Jev fast dispatch
 
-The built-in `rhino_agent` prefers `RhinoSequence` for known ordinary multi-step
+The built-in `rhino_agent` prefers `RhinoSequence` for known multi-step
 work. The LLM proposes 1–8 structured steps once; Jev decides each exact step,
 and the runtime observes, runs the central permission/hooks path, executes and
 verifies without intermediate LLM turns. `targets_from` binds actual GUIDs
@@ -400,14 +400,16 @@ created by an earlier step. Inspections can also be batched.
 After each native observation, Jev receives the current enabled Rhino tool
 registry and a compact `tools_list` of all implemented RhinoAction families,
 their common operations, and RhinoInspect operations. The selected step also
-has its exact parameter contract. Discovery does not widen the sequence
-whitelist or let Jev replace the proposed action; a different recommendation
-returns to the agent for a new validated call.
+has its exact parameter contract. Every implemented action and sub-operation is
+sequence-eligible. Discovery does not authorize another action beyond the exact
+prevalidated step; a different recommendation returns to the agent for a new call.
 
 Enabled by default with a configured OpenRouter key and Jev `enforce`; set
 `CCAGENT_RHINO_FAST=0` to disable. Export/import, deletion, overwrite, booleans,
-undo and third-party GH are excluded from the fast whitelist. They retain their
-ordinary confirmation in Default/Auto; Full Mode follows the boundary above.
+undo and third-party GH can now be planned in the sequence. Every leaf still
+passes the specialized Jev and central permission gates. High-impact steps
+require confirmation in Default/Auto; a background task without prompt access
+hands off before that step. Full Mode follows the boundary above.
 Missing/low-confidence evidence, stale observations, document changes or tool
 errors stop the sequence for LLM/user review. No automatic mutation retries or
 rollback; after 90 seconds no further step starts. A `plan_id` is executed only

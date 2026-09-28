@@ -50,7 +50,7 @@ for (const [layer, count] of [...byLayer.entries()].sort()) {
 }
 
 const guids = villa.map((item) => String(item.guid));
-const span = villa.reduce(
+const span = villa.reduce<{ min: number[]; max: number[] }>(
   (acc, item) => {
     const box = item.bounding_box as { min: number[]; max: number[] } | undefined;
     if (!box) return acc;

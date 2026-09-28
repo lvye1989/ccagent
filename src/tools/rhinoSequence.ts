@@ -27,17 +27,17 @@ export function validateRhinoFastInput(name: string, input: Record<string, unkno
   if (name === "RhinoObserve") return;
   if (name === "RhinoInspect") {
     const p = RHINO_INSPECT_SCHEMA.parse(input);
-    if (p.operation === "capabilities" || !p.target_guids?.length || !p.observation_id) throw new Error("Fast inspection requires observed geometry targets");
+    if (p.operation === "capabilities") return;
+    if (!p.target_guids?.length || !p.observation_id) throw new Error("Fast geometry inspection requires observed targets");
     if (p.operation === "closest_point" && !p.point) throw new Error("closest_point requires point");
     if (p.operation === "section" && (!p.origin || !p.normal)) throw new Error("section requires origin and normal");
     if (p.operation === "intersection" && p.target_guids.length !== 2) throw new Error("intersection requires exactly two target_guids");
     return;
   }
   if (name !== "RhinoAction" || !ACTIONS.includes(input.action as typeof ACTIONS[number]) || input.action === "inspect") {
-    throw new Error("Action is outside the Rhino fast whitelist; use separately gated RhinoAction");
+    throw new Error("Action is outside the implemented Rhino catalog");
   }
-  const p = parseRhinoActionInput(input, cwd).parameters;
-  if (p.delete_inputs === true || p.overwrite === true || p.isolate === true) throw new Error("Destructive/overwrite/isolation operations cannot run in the fast lane");
+  parseRhinoActionInput(input, cwd);
 }
 
 export function parseRhinoSequence(input: Record<string, unknown>, cwd: string): Plan {
@@ -104,7 +104,9 @@ async function execute(plan: Plan, context: ToolContext): Promise<ToolResult> {
       // Record success BEFORE verifying. A subsequent observation failure must
       // never suggest the additive action was not executed and should be retried.
       const created = (call.data.createdGuids ?? call.data.created_guids ?? []) as string[];
-      const receipt = { id: step.id, action: step.action, executed: true, verified: false, result: call.data, jev: call.decision, verified_targets: [] as Record<string, unknown>[] };
+      const deleted = (call.data.deletedGuids ?? call.data.deleted_guids ?? []) as string[];
+      const receipt = { id: step.id, action: step.action, executed: true, verified: false, result: call.data, jev: call.decision,
+        verified_targets: [] as Record<string, unknown>[], observed_deleted_guids: [] as string[], verification_scope: "" };
       steps.push(receipt); bindings.set(step.id, created);
       if (call.gateError) throw new Error(`Step executed but post-execution gate stopped continuation: ${call.gateError}`);
       const after = (await invoke("RhinoObserve", { object_limit: 500 })).data;
@@ -112,14 +114,25 @@ async function execute(plan: Plan, context: ToolContext): Promise<ToolResult> {
         || after.document.path !== observation.document.path || after.document.name !== observation.document.name) {
         throw new Error("Document changed or verification was truncated; stop without retry/rollback");
       }
-      const actual = new Map<string, any>(after.objects.map((obj: any) => [obj.guid, obj]));
-      if (observation.objects.some((obj: any) => !actual.has(obj.guid))) throw new Error("Unexpected object removal detected; stop for review");
-      if (created.some(id => !actual.has(id) || actual.get(id).is_valid === false)) throw new Error("Created object missing/invalid after action; stop for review");
-      const checkedIds = [...new Set([...created, ...((parameters.target_guids as string[] | undefined) ?? [])])];
+      const actual = new Map<string, any>(after.objects.map((obj: any) => [String(obj.guid).toLowerCase(), obj]));
+      const beforeIds = new Set<string>(observation.objects.map((obj: any) => String(obj.guid).toLowerCase()));
+      const removed: string[] = [...beforeIds].filter(id => !actual.has(id));
+      const declaredDeleted = new Set(deleted.map(id => id.toLowerCase()));
+      const declaredCreated = new Set(created.map(id => id.toLowerCase()));
+      const added = [...actual.keys()].filter(id => !beforeIds.has(id));
+      if (step.action !== "undo" && (removed.some(id => !declaredDeleted.has(id))
+        || deleted.some(id => !beforeIds.has(id.toLowerCase()) || actual.has(id.toLowerCase()))
+        || added.some(id => !declaredCreated.has(id)))) {
+        throw new Error("Observed object additions or removals differ from the action receipt; stop for review");
+      }
+      if (created.some(id => !actual.has(id.toLowerCase()) || actual.get(id.toLowerCase()).is_valid === false)) throw new Error("Created object missing/invalid after action; stop for review");
+      const checkedIds = [...new Set([...created, ...((parameters.target_guids as string[] | undefined) ?? [])])].filter(id => !declaredDeleted.has(id.toLowerCase()));
       receipt.verified_targets = checkedIds.slice(0, 30).map(id => {
-        const object = actual.get(id) ?? {};
+        const object = actual.get(id.toLowerCase()) ?? {};
         return { guid: id, type: object.type, is_valid: object.is_valid, is_solid: object.is_solid, bounding_box: object.bounding_box };
       });
+      receipt.observed_deleted_guids = removed;
+      receipt.verification_scope = step.action === "undo" ? "fresh document state after undo" : "document identity and reported object changes";
       receipt.verified = true;
       observation = after;
     }
@@ -131,7 +144,7 @@ async function execute(plan: Plan, context: ToolContext): Promise<ToolResult> {
     final_observation_id: observation?.observation_id, document: observation?.document, capture_path: observation?.capture_path,
     metrics: { elapsed_ms: Date.now() - started, tool_attempts: nativeCalls, jev_calls: decisions.filter(d => d.durationMs !== undefined).length,
       jev_ms: decisions.reduce((sum, d) => sum + (d.durationMs ?? 0), 0), llm_round_trips_inside_sequence: 0 },
-    next_step: status === "handoff" ? "Return to LLM/user. Never replay executed or uncertain steps; inspect uncertain effects first. Export, deletion and GH require ordinary separately confirmed RhinoAction." : "Verify the summary; do not replay this plan_id." };
+    next_step: status === "handoff" ? "Return to LLM/user. Never replay executed or uncertain steps; inspect uncertain effects first. A confirmation-gated step may be resumed only in a new plan after review." : "Verify the summary; do not replay this plan_id." };
   let reportPath: string | undefined;
   try { reportPath = writeRhinoProjectReport(`fast-${plan.plan_id}-${randomUUID()}.json`, { plan, ...report, decisions }); }
   catch (error) { status = "handoff"; report.status = status; report.reason = `Audit report failed: ${errorText(error)}`; }
@@ -148,7 +161,7 @@ const ledger = new Map<string, { hash: string; result: Promise<ToolResult> }>();
 export const rhinoSequenceTool: Tool = {
   name: "RhinoSequence",
   decisionPolicy: "specialized_jev",
-  description: "Fast bounded Rhino plan: submit 1-8 validated ordinary steps once. Jev decides each exact step; the runtime observes/verifies automatically through the normal permission gate without intermediate LLM turns. Actions: inspect (read-only RhinoInspect parameters), create_geometry/create_curve/create_solid, loft, curtain_wall, floor_plates, extrude, transform, copy_objects, set_layer, set_material, set_view. targets_from binds only actual created GUIDs of one earlier step. No export/import/delete/boolean/undo/GH/third-party scripts or isolate:true. Stops on uncertainty/error, never auto-retries mutations. Reusing a plan_id within this session returns the original receipt; new work needs a new plan_id.",
+  description: "Fast bounded Rhino plan: submit 1-8 validated steps once. Every implemented RhinoAction family and RhinoInspect operation is eligible. Jev reviews each exact step; the central gate still prompts for high-impact effects when foreground approval is available, otherwise the sequence hands off without executing that step. The runtime observes/verifies after each dispatched step without intermediate LLM turns. targets_from binds only actual created GUIDs of one earlier step. Stops on uncertainty/error, never auto-retries mutations. Reusing a plan_id within this session returns the original receipt; new work needs a new plan_id.",
   inputSchema: z.toJSONSchema(schema, { io: "input" }) as Tool["inputSchema"],
   maxResultSizeChars: 100_000,
   async call(input, context) {

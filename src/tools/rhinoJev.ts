@@ -28,12 +28,8 @@ export const RHINO_ACTIONS = [
   "undo",
 ] as const;
 
-/** Only these ordinary actions may run inside a bounded RhinoSequence. */
-export const RHINO_FAST_ACTIONS = [
-  "inspect", "create_geometry", "create_curve", "create_solid", "loft",
-  "curtain_wall", "floor_plates", "extrude", "transform", "copy_objects",
-  "set_layer", "set_material", "set_view",
-] as const;
+/** Every implemented Rhino action is sequence-eligible; each leaf keeps its own gate. */
+export const RHINO_FAST_ACTIONS = ["inspect", ...RHINO_ACTIONS] as const;
 
 export type RhinoActionName = typeof RHINO_ACTIONS[number];
 export type RhinoJevProposedAction = RhinoActionName | "inspect";
@@ -521,6 +517,18 @@ export function canExecuteRhinoFastStep(decision: RhinoJevDecision, action: Rhin
     && !decision.forceObserve && !decision.requiresReplan && !decision.redirectToComputerUse
     && (decision.routeConfidence ?? 0) >= getRhinoJevConfig().minConfidence
     && (decision.parametersValid ?? 0) >= 0.65 && (decision.destructive ?? 1) < 0.35
+    && (decision.expectedProgress ?? 0) >= 0.5
+    && (!requiresTargetValidation(action, parameters) || (decision.targetValid ?? 0) >= 0.65);
+}
+
+/** High-impact steps may reach the central permission gate, but never auto-grant it. */
+export function canDispatchRhinoFastStep(decision: RhinoJevDecision, action: RhinoJevProposedAction, parameters: Record<string, unknown>): boolean {
+  if (canExecuteRhinoFastStep(decision, action, parameters)) return true;
+  return decision.available && decision.mode === "enforce" && decision.route === "rhino_api"
+    && decision.nextAction === action && decision.permissionBehavior === "ask"
+    && !decision.forceObserve && !decision.requiresReplan && !decision.redirectToComputerUse
+    && (decision.routeConfidence ?? 0) >= getRhinoJevConfig().minConfidence
+    && (decision.parametersValid ?? 0) >= 0.65 && (decision.destructive ?? 0) >= 0.35
     && (decision.expectedProgress ?? 0) >= 0.5
     && (!requiresTargetValidation(action, parameters) || (decision.targetValid ?? 0) >= 0.65);
 }

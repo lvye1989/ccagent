@@ -35,7 +35,7 @@ import {
 } from "../tools/browserSearchTool.js";
 import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js";
 import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev } from "../tools/rhinoTools.js";
-import { canExecuteRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
+import { canDispatchRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
 import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
 import {
   decideToolUseWithJev,
@@ -607,6 +607,7 @@ async function runOneToolBlock(
     const rhinoToolManifest = block.name === "RhinoAction" || (options.rhinoFastLane && block.name === "RhinoInspect")
       ? getEnabledToolManifest()
       : undefined;
+    const rhinoCapabilitiesStep = options.rhinoFastLane && block.name === "RhinoInspect" && toolInput.operation === "capabilities";
     const rhinoJevDecision = block.name === "RhinoAction"
       ? await preflightRhinoActionWithJev(
           toolInput,
@@ -615,10 +616,10 @@ async function runOneToolBlock(
           options.rhinoFastLane,
           rhinoToolManifest,
         )
-      : options.rhinoFastLane && block.name === "RhinoInspect"
+      : options.rhinoFastLane && block.name === "RhinoInspect" && !rhinoCapabilitiesStep
         ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages, rhinoToolManifest)
         : undefined;
-    if (options.rhinoFastLane && block.name !== "RhinoObserve" && (!rhinoJevDecision || !canExecuteRhinoFastStep(
+    if (options.rhinoFastLane && block.name !== "RhinoObserve" && !rhinoCapabilitiesStep && (!rhinoJevDecision || !canDispatchRhinoFastStep(
       rhinoJevDecision, (block.name === "RhinoInspect" ? "inspect" : toolInput.action) as RhinoJevProposedAction,
       (block.name === "RhinoInspect" ? toolInput : toolInput.parameters) as Record<string, unknown>,
     ))) {
@@ -785,7 +786,9 @@ async function runOneToolBlock(
       : undefined;
     const rhinoHighImpact =
       (rhinoAction === "boolean" && rhinoParameters.delete_inputs !== false)
-      || (rhinoAction === "extrude" && rhinoParameters.delete_inputs === true)
+      || rhinoParameters.delete_inputs === true
+      || (rhinoAction === "object_state" && rhinoParameters.operation === "delete")
+      || (rhinoAction === "layer_manage" && rhinoParameters.operation === "delete_empty")
       || (rhinoAction === "import_export" && rhinoParameters.operation === "export")
       || rhinoAction === "run_grasshopper";
     const rhinoRequiresFreshConfirmation =
@@ -933,7 +936,7 @@ async function runOneToolBlock(
       ...(block.name === "RhinoSequence" && !options.rhinoFastLane ? {
         runRhinoFastTool: async (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>) => {
           const leaf = await runOneToolBlock({ type: "tool_use", id: `${block.id}-fast-${Math.random().toString(36).slice(2)}`, name, input }, context,
-            { ...options, rhinoFastLane: true, shouldAvoidPermissionPrompts: true });
+            { ...options, rhinoFastLane: true, shouldAvoidPermissionPrompts: options.shouldAvoidPermissionPrompts });
           return { result: leaf.execution.result, rawResult: leaf.rawResult, jevDecision: leaf.rhinoJevDecision, toolDispatched: leaf.toolDispatched };
         },
       } : {}),
