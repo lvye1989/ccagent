@@ -663,9 +663,3 @@ npm publish --dry-run
 ## License
 
 [MIT](./LICENSE)
-
-
-cd C:\Users\Windows11\Desktop\ccagent-0.1.1
-npm run build
-npm pack
-npm install -g --force .\ccdagent-0.1.2.tgz

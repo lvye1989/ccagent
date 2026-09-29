@@ -16,6 +16,7 @@ import {
 } from "../context/autoCompact.js";
 import { selectCompactionTail } from "../context/compaction.js";
 import { query } from "../core/agenticLoop.js";
+import { resetGlobalStateCache, trustProject } from "../config/globalState.js";
 
 console.log("=== model-aware context windows ===");
 assert.equal(getContextWindowForModel("deepseek-flash"), 1_048_576);
@@ -69,6 +70,8 @@ assert.equal(
 console.log("=== proactive agent-loop compaction ===");
 const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-context-"));
 const projectDir = path.join(testRoot, "project");
+const previousHome = process.env.CCAGENT_HOME;
+process.env.CCAGENT_HOME = path.join(testRoot, "user-home");
 await fs.mkdir(path.join(projectDir, ".ccagent"), { recursive: true });
 await fs.writeFile(
   path.join(projectDir, ".ccagent", "settings.json"),
@@ -84,6 +87,9 @@ await fs.writeFile(
     },
   }),
 );
+// The fixture defines a provider in project settings, so grant trust to this
+// isolated fixture explicitly rather than depending on the caller's state.
+await trustProject(projectDir);
 process.env.CTX_TEST_KEY = "test-only";
 
 const originalFetch = globalThis.fetch;
@@ -145,7 +151,16 @@ try {
   process.chdir(originalCwd);
   globalThis.fetch = originalFetch;
   delete process.env.CTX_TEST_KEY;
-  await fs.rm(testRoot, { recursive: true, force: true });
+  if (previousHome === undefined) delete process.env.CCAGENT_HOME;
+  else process.env.CCAGENT_HOME = previousHome;
+  resetGlobalStateCache();
+  const resolvedTmp = path.resolve(os.tmpdir());
+  const resolvedRoot = path.resolve(testRoot);
+  const relative = path.relative(resolvedTmp, resolvedRoot);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !path.basename(resolvedRoot).startsWith("ccagent-context-")) {
+    throw new Error("Refusing to remove context fixture outside the expected temporary root");
+  }
+  await fs.rm(resolvedRoot, { recursive: true, force: true });
 }
 
 console.log("All context-compaction checks passed.");

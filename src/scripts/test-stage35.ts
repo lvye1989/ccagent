@@ -31,6 +31,7 @@ import type { CommandContext } from "../core/queryEngine/commands/context.js";
 // ── Point HOME at a sandbox BEFORE importing anything that resolves paths. ──
 const SANDBOX_HOME = await fs.mkdtemp(path.join(os.tmpdir(), "ea-stage35-home-"));
 process.env.HOME = SANDBOX_HOME;
+process.env.CCAGENT_HOME = SANDBOX_HOME;
 
 const { PluginManifestSchema, MarketplaceManifestSchema } = await import("../plugins/schemas.js");
 const { applyNamespace, splitNamespace, mcpServerNamespace } = await import("../plugins/namespace.js");
