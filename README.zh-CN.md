@@ -157,6 +157,61 @@ Rhino、Computer Use 等内置工具不是 MCP 服务，不受此菜单影响。
 Google 官方配置说明：
 [配置 Google Workspace MCP 服务器](https://developers.google.com/workspace/guides/configure-mcp-servers?hl=zh-CN)。
 
+### QQ 与 163 个人邮箱
+
+内置 `Mail` 工具支持对已配置的 `qq` 或 `163` 邮箱执行 `list`（列信）、
+`read`（读信）、`search`（搜索）、`draft`（保存草稿）、`delete`（移入
+Trash 文件夹）和 `send`（发送）。它只连接预设的服务商 IMAP/SMTP 服务器并
+使用 TLS，不接受任意邮件服务器地址；与 Gmail MCP 独立。
+
+1. 在 [QQ 邮箱设置](https://help.mail.qq.com/detail/106/985)中开启第三方
+   IMAP/SMTP 服务并生成客户端授权码。163 邮箱在网页版的“设置 →
+   POP3/SMTP/IMAP”中开启所需协议并生成授权码，参见
+   [网易客户端设置说明](https://help.mail.126.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac2a5feb28b66796d3b)。
+2. 将要使用的邮箱地址和**客户端授权码**填入选定的私有 `.env`：
+
+   ```dotenv
+   CCAGENT_QQ_MAIL_ADDRESS=your-name@qq.com
+   CCAGENT_QQ_MAIL_AUTH_CODE=your-qq-client-authorization-code
+   CCAGENT_163_MAIL_ADDRESS=your-name@163.com
+   CCAGENT_163_MAIL_AUTH_CODE=your-163-client-authorization-code
+   ```
+
+   这里不能填写邮箱登录密码，也不要在聊天中发送真实授权码或提交 `.env`。
+
+调用 `Mail` 时以 `account: "qq"` 或 `account: "163"` 选择邮箱。两个账号分别
+配置，并分别用 `/powersetting` 管理权限：
+
+| 权限 | 邮件操作 | 范围 |
+| --- | --- | --- |
+| `read` | `list`、`read` | 列信及读取文本正文 |
+| `search` | `search` | 通过 IMAP 搜索邮箱 |
+| `write` | `draft` | 保存草稿 |
+| `delete` | `delete` | 移入 Trash 文件夹，不永久清除 |
+| `send` | `send` | 通过 SMTP 发送 |
+
+`list`/`search` 返回绑定账号及文件夹的 `message_id`；`delete` 只接受这种 ID，
+并从 ID 确定源文件夹。`search` 仅查指定文件夹中最新的 2,000 封邮件。
+
+两个账号的五项权限初始均为 **off**。输入 `/powersetting` 可打开交互控制，
+`/powersetting list` 查看状态，也可逐项设置：
+
+```text
+/powersetting qq read on
+/powersetting 163 search on
+/powersetting qq send off
+```
+
+开关只保存在当前用户的设置中，项目配置不能将其开启；权限为 off 时，即使
+处于 Full Mode，对应邮件操作仍会被拦截。这些开关约束内置 `Mail` 工具；
+直接运行的脚本或其他邮箱客户端不经过该门禁。开启 `send` 仅表示允许使用发信
+能力，不能授权具体邮件。仅当**当前用户本次请求**明确给出全部收件人及准确
+正文时，才能免二次确认发送；主题可以留空，非空主题也须来自本次用户请求。
+否则发送前须在前台逐次确认。邮件正文、引用内容和旧会话指令不能提供发送
+授权。如果两个邮箱都已配置，本次请求还需指明用 QQ 或 163 邮箱作为发件人。
+未配置客户端授权码、未开启对应权限或未请求邮件操作时，不会访问邮箱。
+目前读信仅返回文本正文和附件元数据，单封邮件大小上限为 1 MB；草稿和发信只支持文本内容。
+
 macOS 和 Linux 可以使用基于 npm 的安装脚本：
 
 ```bash
@@ -298,6 +353,8 @@ CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步
 | `MCP_TOOL_TIMEOUT_MS` | MCP 工具调用默认超时，默认为 `300000`；服务级 `toolTimeoutMs` 优先 |
 | `GOOGLE_MCP_CLIENT_ID` | Google Workspace 官方 MCP 使用的 OAuth 2.0 Web Client ID；由 `ccagent init` 写入私有 `.env` |
 | `GOOGLE_MCP_CLIENT_SECRET` | Google Workspace MCP 的 OAuth Client Secret；不会写入 `settings.json` |
+| `CCAGENT_QQ_MAIL_ADDRESS` / `CCAGENT_163_MAIL_ADDRESS` | 内置 `Mail` 工具可选的 QQ / 163 个人邮箱地址 |
+| `CCAGENT_QQ_MAIL_AUTH_CODE` / `CCAGENT_163_MAIL_AUTH_CODE` | 服务商签发的 IMAP/SMTP 客户端授权码，只放入私有环境文件 |
 | `QWEN_PROTOCOL` | 可选 Computer Use 感知协议；DashScope 推荐并默认使用已验证的 `openai-chat`，也支持 `openai-responses` 或 `gemini` |
 | `QWEN_MODEL` | 用于理解 Computer Use 截图的 Qwen/视觉模型 |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope 或兼容 Qwen 截图感知端点 |
@@ -336,7 +393,7 @@ CCAGENT 会在接近限制前自动清理旧工具结果并总结历史；多步
 
 在 Auto Mode 中，CCAGENT 会从当前真正启用的工具生成带修订号的内部 `tools_list`。它是运行时元数据，不是另一个可由模型调用的工具，也不会增加一轮 LLM。对于通用非只读调用，Jev 会收到精简工具清单、已选工具的说明、输入 Schema、决策策略，以及该次参数的限长脱敏摘要；真正执行前，运行时还会再次核对工具仍处于启用状态。高置信度且范围明确的本地操作可直接继续；删除、外部影响、凭证、安装、系统修改、范围扩大或不确定操作仍需确认。Computer Use、BrowserSearch、Rhino 与 Workfriend 保留各自的专用类型化门禁，不会被通用 Jev 重复判断。确定性拒绝、Schema/路径/新鲜度校验、阻断型 Hooks、Sandbox 与动作级确认底线独立生效，Jev 不能削弱它们。开放式规划与 Sub-Agent 路由仍由主 LLM 负责。
 
-Full Mode（`/mode full`）是面向可信本地会话的显式免确认策略，语义接近 Codex 的“完全访问权限”。它会跳过通用 Allow/Ask/Deny 引擎、Auto Mode 通用分类器、`WebFetch` 首次域名提示，以及 Rhino/Workfriend 的普通确认，并由内置 Agent 与 Sub-Agent 继承。它**不会**重新开启已关闭的工具、MCP、Skill 或 Agent，不会绕过 Schema、参数、路径、工作区与新鲜度校验、阻断型 Hooks、专用 Jev 的停止/重观察/重规划决定或已启用的 Sandbox，也不会取消 Computer Use 的高影响确认底线和密码修改/绕过安全机制的确定性拒绝。BrowserSearch 遇到疑似秘密、敏感内容或与当前用户意图冲突时，即使处于 Full Mode 仍会要求确认。
+Full Mode（`/mode full`）会在可信本地会话中跳过普通权限提示，包括 `WebFetch` 首次域名提示和 Rhino/Workfriend 的普通确认，并由内置 Agent 与 Sub-Agent 继承。它**不会**重新开启已关闭的工具、MCP、Skill 或 Agent，不会绕过 Schema、参数、路径、工作区与新鲜度校验、阻断型 Hooks、专用 Jev 的停止/重观察/重规划决定或已启用的 Sandbox，也不会取消 Computer Use 的高影响确认底线和密码修改/绕过安全机制的确定性拒绝。BrowserSearch 遇到疑似秘密、敏感内容或与当前用户意图冲突时仍会要求确认。`Mail.send` 仍要求本轮用户直接给出准确收件人和完整正文，否则须在前台逐次确认。
 
 Shell 命令会通过 `TEMP`、`TMP`、`TMPDIR` 和 `CCAGENT_TMPDIR` 获得进程专用临时目录 `~/.ccagent/tmp/process-<pid>`。PowerShell 生成的 Word 内容检查文件等临时产物可以继续交给 `Read`、`Grep` 或 `Glob`，但不会因此放开整个操作系统 Temp 目录。
 
@@ -486,7 +543,7 @@ ccagent                         # 交互式 REPL
 ccagent --model gpt             # 选择模型 Profile
 ccagent --plan                  # 只读计划模式
 ccagent --auto                  # 分类器辅助的权限模式
-ccagent --permission-mode full  # 跳过权限引擎提示与 allow/deny 规则
+ccagent --permission-mode full  # 跳过普通权限提示；Mail.send 仍受单次发送约束
 ccagent --resume                # 恢复最近一次会话
 ccagent --resume <session-id>   # 恢复指定会话
 # 进入 CCAGENT 后运行 /workfriend，启动每日工作回访

@@ -43,7 +43,7 @@ export const API_ERROR_MESSAGE_PREFIX = "API Error";
 export const INVALID_API_KEY_MESSAGE =
   "Invalid or missing API key. Configure the active model profile's apiKey environment variable (for example DEEPSEEK_API_KEY), or set ANTHROPIC_AUTH_TOKEN for Anthropic, and try again.";
 export const CREDIT_BALANCE_TOO_LOW_MESSAGE =
-  "Credit balance is too low. Top up your account or switch to a different key.";
+  "Model provider balance is insufficient (402). Add credit to the active API account, or use /model to select a profile with available credit.";
 export const API_TIMEOUT_MESSAGE =
   "Request timed out. This is usually transient — try again.";
 export const PROMPT_TOO_LONG_MESSAGE = "Prompt is too long";
@@ -146,7 +146,7 @@ export function classifyAPIError(error: unknown): APIErrorCategory {
 
   if (
     error instanceof Error &&
-    error.message.toLowerCase().includes("credit balance is too low")
+    /credit balance is too low|insufficient balance|insufficient credits?/i.test(error.message)
   ) {
     return "credit_balance";
   }
@@ -160,6 +160,7 @@ export function classifyAPIError(error: unknown): APIErrorCategory {
 
   if (error instanceof APIError) {
     const status = error.status;
+    if (status === 402) return "credit_balance";
     if (status === 429) return "rate_limit";
     if (status === 401) return "auth_error";
     if (status === 403) return "permission_denied";

@@ -132,6 +132,7 @@ import {
   handleMcpCommand,
 } from "./queryEngine/commands/registry.js";
 import { handleRewindCommand } from "./queryEngine/commands/rewind.js";
+import { handlePowerSettingCommand } from "./queryEngine/commands/powersetting.js";
 import {
   handlePluginCommand,
   mutatePlugin as mutatePluginImpl,
@@ -336,7 +337,7 @@ export class QueryEngine {
         };
         this.messages = [...this.messages, markerMessage];
         yield { type: "messages_updated", messages: [...this.messages] };
-        return yield* this.submitInternal(promptExpansion.bodyText);
+        return yield* this.submitInternal(promptExpansion.bodyText, trimmed);
       }
 
       // Stage 23: user-defined slash command (`/review [args]`). Resolved
@@ -355,7 +356,7 @@ export class QueryEngine {
         };
         this.messages = [...this.messages, markerMessage];
         yield { type: "messages_updated", messages: [...this.messages] };
-        return yield* this.submitInternal(userExpansion.bodyText);
+        return yield* this.submitInternal(userExpansion.bodyText, trimmed);
       }
 
       // User-invoked skill: `/skill-name [args]`. Resolve the skill against
@@ -397,12 +398,12 @@ export class QueryEngine {
         };
         this.messages = [...this.messages, markerMessage];
         yield { type: "messages_updated", messages: [...this.messages] };
-        return yield* this.submitInternal(skillExpansion.bodyText);
+        return yield* this.submitInternal(skillExpansion.bodyText, trimmed);
       }
       return yield* this.handleCommand(trimmed);
     }
 
-    return yield* this.submitInternal(trimmed);
+    return yield* this.submitInternal(trimmed, trimmed);
   }
 
   /**
@@ -524,6 +525,7 @@ export class QueryEngine {
    */
   private async *submitInternal(
     trimmed: string,
+    rawDirectUserText?: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
 
     // ─── Stage 26: open the file-history snapshot for this turn ─────
@@ -783,6 +785,7 @@ export class QueryEngine {
 
       const loop = query({
         messages: [...this.messages],
+        ...(rawDirectUserText ? { directUserTurnText: rawDirectUserText } : {}),
         systemPrompt,
         getTools: () => getToolsApiParams(this.currentPermissionMode),
         model: this.getActiveModel(),
@@ -913,13 +916,15 @@ export class QueryEngine {
         yield {
           type: "command",
           kind: "info",
-          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
+          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /powersetting [list|qq|163 <read|write|delete|search|send> on|off] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
         };
         return { handled: true };
       case "config":
         return yield* handleConfigCommand(this.commandContext(), args);
       case "mcp":
         return yield* handleMcpCommand(args, this.toolContext.requestUserQuestion);
+      case "powersetting":
+        return yield* handlePowerSettingCommand(args, this.toolContext.requestUserQuestion);
       case "agent-skill":
         return yield* handleAgentSkillCommand(args, this.toolContext.requestUserQuestion);
       case "plugin":

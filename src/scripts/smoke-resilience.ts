@@ -26,6 +26,7 @@ import {
   parsePromptTooLongTokenCounts,
   getRetryAfterMs,
   getUserFacingErrorMessage,
+  CREDIT_BALANCE_TOO_LOW_MESSAGE,
 } from "../services/api/errors.js";
 import {
   getRetryDelay,
@@ -64,6 +65,22 @@ function abortError(): Error {
   return e;
 }
 
+/** Reproduce the 402 gateway response without making a provider request. */
+const insufficientBalanceBody = JSON.stringify({
+  error: {
+    message: "Insufficient Balance (request_id: test-request)",
+    type: "unknown_error",
+    param: null,
+    code: "invalid_request_error",
+  },
+});
+function insufficientBalanceError(): APIError {
+  return apiError(402, insufficientBalanceBody);
+}
+function insufficientBalanceWrappedError(): Error {
+  return new Error(`API Error: 402 ${insufficientBalanceBody}`);
+}
+
 async function main(): Promise<void> {
   section("[1] Error classification");
   assert(classifyAPIError(apiError(429, "rate limited")) === "rate_limit", "429 → rate_limit");
@@ -92,6 +109,15 @@ async function main(): Promise<void> {
     classifyAPIError(new Error("Your credit balance is too low")) === "credit_balance",
     "credit balance → credit_balance",
   );
+  assert(
+    classifyAPIError(insufficientBalanceError()) === "credit_balance",
+    "402 Insufficient Balance JSON → credit_balance",
+  );
+  assert(
+    classifyAPIError(insufficientBalanceWrappedError()) === "credit_balance",
+    "402 Insufficient Balance wrapped text → credit_balance",
+  );
+  assert(classifyAPIError(apiError(402, "Payment Required")) === "credit_balance", "402 status → credit_balance");
   assert(classifyAPIError(new APIConnectionError({ message: "ECONNRESET" })) === "connection_error", "conn error → connection_error");
   assert(classifyAPIError(abortError()) === "aborted", "AbortError → aborted");
   assert(classifyAPIError(new Error("weird")) === "unknown", "unknown → unknown");
@@ -104,6 +130,8 @@ async function main(): Promise<void> {
   assert(isRetryableError(apiError(409, "x")) === true, "409 retryable");
   assert(isRetryableError(new APIConnectionError({ message: "down" })) === true, "connection retryable");
   assert(isRetryableError(apiError(401, "x")) === false, "401 NOT retryable");
+  assert(isRetryableError(insufficientBalanceError()) === false, "402 Insufficient Balance NOT retryable");
+  assert(isRetryableError(insufficientBalanceWrappedError()) === false, "402 wrapped text NOT retryable");
   assert(isRetryableError(apiError(400, "bad")) === false, "400 NOT retryable");
   assert(isRetryableError(apiError(404, "x")) === false, "404 NOT retryable");
   assert(isRetryableError(apiError(413, "prompt is too long")) === false, "413 prompt-too-long NOT retryable");
@@ -160,6 +188,11 @@ async function main(): Promise<void> {
   assert(trueCount === MAX_529_RETRIES - 1, `foreground 529 retries ${MAX_529_RETRIES - 1}× then bails (cap ${MAX_529_RETRIES})`);
   // deterministic error → never retried regardless of source
   assert(decideRetry(apiError(401, "x"), 1, { maxRetries: 10 }).retry === false, "decideRetry: 401 → no retry");
+  const insufficientBalanceRetry = decideRetry(insufficientBalanceError(), 1, { maxRetries: 10 });
+  assert(
+    insufficientBalanceRetry.retry === false && insufficientBalanceRetry.delayMs === 0,
+    "decideRetry: 402 Insufficient Balance stops immediately",
+  );
   // exhausted attempts
   assert(decideRetry(apiError(500, "x"), 11, { maxRetries: 10 }).retry === false, "decideRetry: attempt > maxRetries → no retry");
   assert(decideRetry(apiError(500, "x"), 1, { maxRetries: 10 }).retry === true, "decideRetry: 500 within budget → retry");
@@ -182,6 +215,14 @@ async function main(): Promise<void> {
   assert(!forbiddenMessage.includes("API key"), "403 message is not mislabeled as an API-key failure");
   assert(getUserFacingErrorMessage(apiError(404, "x"), "claude-foo").includes("claude-foo"), "model_not_found message includes model");
   assert(getUserFacingErrorMessage(apiError(529, "x")).includes("overloaded"), "529 message mentions overloaded");
+  assert(
+    getUserFacingErrorMessage(insufficientBalanceError()) === CREDIT_BALANCE_TOO_LOW_MESSAGE,
+    "402 Insufficient Balance gives account balance guidance without raw gateway JSON",
+  );
+  assert(
+    getUserFacingErrorMessage(insufficientBalanceWrappedError()) === CREDIT_BALANCE_TOO_LOW_MESSAGE,
+    "402 wrapped text gives the same account balance guidance",
+  );
 
   section("[7] callWithRetry — real re-invocation behavior");
   process.env.CCAGENT_MAX_RETRIES = "5"; // fast + deterministic
@@ -213,6 +254,24 @@ async function main(): Promise<void> {
       threw = true;
     }
     assert(threw && calls === 1, "callWithRetry: 401 throws on first attempt (no retry)");
+  }
+  // A balance rejection is deterministic even when the gateway uses code=invalid_request_error.
+  {
+    let calls = 0;
+    let retries = 0;
+    let threw = false;
+    try {
+      await callWithRetry(
+        async () => {
+          calls++;
+          throw insufficientBalanceError();
+        },
+        { maxRetries: 10, onRetry: () => retries++ },
+      );
+    } catch {
+      threw = true;
+    }
+    assert(threw && calls === 1 && retries === 0, "callWithRetry: 402 Insufficient Balance fails once without retry");
   }
   // (c) always-500 → gives up after maxRetries+1 attempts
   {

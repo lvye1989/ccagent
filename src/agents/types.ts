@@ -99,6 +99,8 @@ export interface AgentRunResult {
   outputTokens: number;
   turnCount: number;
   reason: LoopTerminationReason;
+  /** Last surfaced model error when the loop stops with model_error. */
+  modelError?: string;
   /** Non-fatal warnings collected during the run (e.g. unknown tool
    * names referenced in the agent's `tools:` field). */
   warnings?: string[];

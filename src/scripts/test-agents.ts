@@ -36,7 +36,8 @@ import {
 } from "../agents/resolveAgentTools.js";
 import { formatAgentsSystemReminder } from "../agents/promptInjection.js";
 import { resolveSubAgentPermissionMode } from "../agents/runAgent.js";
-import { agentTool } from "../tools/agentTool.js";
+import type { AgentRunResult } from "../agents/types.js";
+import { agentTool, formatAgentRunToolResult } from "../tools/agentTool.js";
 import { toolResultText } from "../tools/Tool.js";
 import { getAllTools } from "../tools/index.js";
 import { checkPermission } from "../permissions/permissions.js";
@@ -121,6 +122,34 @@ async function main(): Promise<void> {
       resolveSubAgentPermissionMode(undefined, "auto") === "auto" &&
       resolveSubAgentPermissionMode(undefined, undefined) === "default",
     "ordinary child modes retain the existing agent-default and inheritance precedence",
+  );
+  const failedRun: AgentRunResult = {
+    agentType: "Explore",
+    finalText: "(No completed assistant response before the model request failed.)",
+    messages: [],
+    totalToolUseCount: 0,
+    totalDurationMs: 100,
+    totalTokens: 50,
+    inputTokens: 50,
+    outputTokens: 0,
+    turnCount: 1,
+    reason: "model_error",
+    modelError: "Credit balance is too low. Switch to a funded profile.",
+  };
+  const failedResult = formatAgentRunToolResult({ agentType: "Explore", result: failedRun });
+  assert(
+    failedResult.isError === true &&
+      failedResult.content.includes("Sub-agent 'Explore' failed.") &&
+      failedResult.content.includes(failedRun.modelError!),
+    "model_error is returned as a failed Agent tool result with the provider error",
+  );
+  const completedResult = formatAgentRunToolResult({
+    agentType: "Explore",
+    result: { ...failedRun, reason: "completed", modelError: undefined, finalText: "done" },
+  });
+  assert(
+    completedResult.isError !== true && completedResult.content.includes("Sub-agent 'Explore' completed."),
+    "successful Agent tool results remain completed",
   );
   const explore = builtIns.find((a) => a.agentType === "Explore");
   assert(

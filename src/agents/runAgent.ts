@@ -150,7 +150,7 @@ export interface RunChildAgentParams {
  * if the loop terminated mid-tool-call, the very last assistant message
  * may be a pure tool_use block — we want the last *textual* response.
  */
-function extractFinalAssistantText(messages: MessageParam[]): string {
+function extractFinalAssistantText(messages: MessageParam[], failed = false): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (m.role !== "assistant") continue;
@@ -166,7 +166,9 @@ function extractFinalAssistantText(messages: MessageParam[]): string {
     const joined = textBlocks.map((b) => b.text).join("\n").trim();
     if (joined) return joined;
   }
-  return "(Sub-agent completed but produced no text output.)";
+  return failed
+    ? "(No completed assistant response before the model request failed.)"
+    : "(Sub-agent completed but produced no text output.)";
 }
 
 function countToolUses(messages: MessageParam[]): number {
@@ -318,6 +320,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
   let totalUsage: Usage = { input_tokens: 0, output_tokens: 0 };
   let turnCount = 0;
   let reason: LoopTerminationReason = "completed";
+  let lastModelError: string | undefined;
 
   while (true) {
     const { value, done } = await loop.next();
@@ -329,6 +332,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
       break;
     }
     if (value.type === "tool_use_done" && value.result.isError) markRhinoTaskFailure();
+    if (value.type === "error") lastModelError = value.error.message;
     if (params.onProgress) {
       switch (value.type) {
         case "tool_use_start":
@@ -365,7 +369,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
   }
 
   const totalToolUseCount = countToolUses(finalMessages);
-  const finalText = extractFinalAssistantText(finalMessages);
+  const finalText = extractFinalAssistantText(finalMessages, reason === "model_error");
   const totalDurationMs = Date.now() - startTime;
   const totalTokens = (totalUsage.input_tokens ?? 0) + (totalUsage.output_tokens ?? 0);
 
@@ -387,6 +391,9 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     outputTokens: totalUsage.output_tokens ?? 0,
     turnCount,
     reason,
+    ...(reason === "model_error"
+      ? { modelError: lastModelError ?? "The model request failed before completion." }
+      : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 }

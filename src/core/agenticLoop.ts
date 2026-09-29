@@ -37,6 +37,9 @@ import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js
 import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev, type RhinoJevPreapproval } from "../tools/rhinoTools.js";
 import { getCachedRhinoObservation } from "../tools/rhinoBackend.js";
 import { canDispatchRhinoFastStep, decideRhinoSequenceBatchWithJev, RHINO_FAST_ACTIONS, type RhinoJevBatchStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
+import { reserveMailSendAttempt } from "../tools/mailPolicy.js";
+import { isMailPowerEnabled, mailPowerForOperation } from "../config/mailPowerSettings.js";
+import { validateMailInput } from "../tools/mailTool.js";
 import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
 import {
   decideToolUseWithJev,
@@ -171,6 +174,8 @@ export interface AgenticLoopResult {
 
 export interface QueryParams {
   messages: MessageParam[];
+  /** Raw text from this foreground human turn; never derived from transcript roles. */
+  directUserTurnText?: string;
   systemPrompt?: string;
   tools?: Anthropic.Tool[];
   /** Dynamic tool list getter — called on each API iteration to reflect mode changes. */
@@ -237,6 +242,8 @@ export interface RunToolsOptions {
    * Stage 1: passed through but not yet consumed by the permission engine.
    */
   conversationMessages?: MessageParam[];
+  /** Runtime-only raw foreground human input for Mail.send authorization. */
+  directUserTurnText?: string;
   /** Active model handle, forwarded to the Auto Mode classifier. */
   model?: string;
 }
@@ -406,6 +413,14 @@ async function runOneToolBlock(
 
     const liveMode = context.getPermissionMode?.() as PermissionMode | undefined;
     const effectiveMode = liveMode ?? options.permissionMode;
+
+    if (block.name === "Mail") {
+      const validationError = validateMailInput(toolInput);
+      if (validationError) {
+        const result: ToolResult = { content: `Mail input rejected before permission check: ${validationError}`, isError: true };
+        return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result } };
+      }
+    }
 
     if (block.name === "BrowserSearch") {
       const validationError = validateBrowserSearchInput(toolInput);
@@ -704,6 +719,7 @@ async function runOneToolBlock(
       settings: options.permissionSettings,
       sessionRules: options.sessionPermissionRules,
       messages: options.conversationMessages,
+      directUserTurnText: options.directUserTurnText,
       model: options.model,
       ...(precomputedJevDecision
         ? { precomputedAutoDecision: precomputedJevDecision }
@@ -797,11 +813,14 @@ async function runOneToolBlock(
       || rhinoAction === "run_grasshopper";
     const rhinoRequiresFreshConfirmation =
       effectiveMode !== "full" && block.name === "RhinoAction" && (rhinoHighImpact || rhinoJevDecision?.permissionBehavior === "ask");
+    const mailRequiresFreshConfirmation = block.name === "Mail" && toolInput.operation === "send" && permission.behavior === "ask";
     if (
       preOutcome.permissionBehavior === "allow" &&
       !options.rhinoFastLane &&
       !computerRequiresFreshConfirmation &&
       !rhinoRequiresFreshConfirmation &&
+      !mailRequiresFreshConfirmation &&
+      !(block.name === "Mail" && permission.behavior === "deny") &&
       !browserSearchRequiresFreshConfirmation
     ) {
       permission = {
@@ -809,7 +828,7 @@ async function runOneToolBlock(
         behavior: "allow",
         reason: preOutcome.permissionDecisionReason || "Allowed by PreToolUse hook",
       };
-    } else if (effectiveMode !== "full" && preOutcome.permissionBehavior === "ask" && permission.behavior !== "deny") {
+    } else if ((effectiveMode !== "full" || block.name === "Mail") && preOutcome.permissionBehavior === "ask" && permission.behavior !== "deny") {
       permission = {
         ...permission,
         behavior: "ask",
@@ -995,6 +1014,26 @@ async function runOneToolBlock(
         execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
         permissionRequest: surfacedRequest,
       };
+    }
+
+    // A user can close one mailbox power while this call waits on a model or
+    // foreground decision. Re-read the user-owned switch at dispatch time.
+    if (block.name === "Mail" && !(await isMailPowerEnabled(toolInput.account, toolInput.operation))) {
+      const account = typeof toolInput.account === "string" ? toolInput.account : "unknown";
+      const power = mailPowerForOperation(toolInput.operation) ?? "unknown";
+      const result: ToolResult = {
+        content: `Mail ${account}.${power} is closed in /powersetting. Nothing was dispatched.`,
+        isError: true,
+      };
+      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
+    }
+
+    if (block.name === "Mail" && toolInput.operation === "send" && !reserveMailSendAttempt(context.sessionId, context.messageId, toolInput)) {
+      const result: ToolResult = {
+        content: "Mail.send was already attempted for this user turn and identical payload. It was not sent again. Check the earlier receipt or mailbox before asking the user for a new send request.",
+        isError: true,
+      };
+      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
     }
 
     setToolStatus(block.id, "running");
@@ -1584,6 +1623,7 @@ export async function* query(
         onPermissionRequest: params.onPermissionRequest,
         shouldAvoidPermissionPrompts: params.shouldAvoidPermissionPrompts,
         conversationMessages: state.messages,
+        directUserTurnText: params.directUserTurnText,
         model: params.model,
       },
     );

@@ -61,7 +61,8 @@ Options:
   --permission-mode <mode>    Permission mode: default | plan | auto | full
   --dangerously-skip-permissions
                               Headless mode only: auto-approve tool calls that
-                              would otherwise prompt (deny rules still apply).
+                              would otherwise prompt, except Mail.send without
+                              a direct user grant (deny rules still apply).
                               Without it, -p denies such calls by default.
   --settings <path>           Load an external settings.json as the flag layer
                               (inline --model / --permission-mode still win)
@@ -75,12 +76,16 @@ Commands (in REPL):
   /config [list|get|set]      Inspect or change settings (--user/--project/--local)
   /mode [default|plan|auto|full]
                               Inspect or switch permission mode. full bypasses
-                              all permission-engine prompts and rules.
+                              ordinary prompts; Mail send still requires this
+                              turn's explicit recipients and message body.
   /tasks [task|todo|reset]    Switch task system or reset the task graph
   /mcp                      Select each MCP server: Open / Close
   /mcp open|close <name>     Save a user-wide MCP switch (no restart needed)
   /mcp auth <name>           Explicitly start browser OAuth; Close cancels it
   /mcp list|tools|reconnect  Inspect status/tools or reconnect without a browser
+  /powersetting             Select QQ/163 mailbox and permission interactively
+  /powersetting list        Show QQ/163 read/write/delete/search/send switches
+  /powersetting qq read on  Enable one mailbox permission (use off to disable)
   /skills                     List loaded skills (user + project scope)
   /<skill-name> [args]        Invoke a skill by name
   /<command> [args]           Invoke a user-defined command (.ccagent/commands)

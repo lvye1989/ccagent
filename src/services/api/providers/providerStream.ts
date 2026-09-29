@@ -131,6 +131,32 @@ interface PreparedRequest {
   body: Record<string, unknown>;
 }
 
+/** The upper stack uses Anthropic tool choice; OpenAI's two APIs differ here. */
+function applyOpenAIToolChoice(
+  body: Record<string, unknown>,
+  protocol: "openai-chat" | "openai-responses",
+  choice: NonNullable<StreamRequestParams["toolChoice"]> | undefined,
+): void {
+  if (!choice) return;
+  switch (choice.type) {
+    case "tool":
+      body.tool_choice = protocol === "openai-chat"
+        ? { type: "function", function: { name: choice.name } }
+        : { type: "function", name: choice.name };
+      break;
+    case "any":
+      body.tool_choice = "required";
+      break;
+    case "auto":
+    case "none":
+      body.tool_choice = choice.type;
+      break;
+  }
+  if ("disable_parallel_tool_use" in choice && choice.disable_parallel_tool_use) {
+    body.parallel_tool_calls = false;
+  }
+}
+
 /** Translate Anthropic-shaped params into a ready-to-fetch provider request. */
 export function prepareRequest(profile: ModelProfile, params: StreamRequestParams): PreparedRequest {
   if (profile.protocol === "anthropic") {
@@ -198,6 +224,9 @@ export function prepareRequest(profile: ModelProfile, params: StreamRequestParam
   const base = stripTrailingSlash(profile.baseURL ?? DEFAULT_OPENAI_BASE_URL);
   const path = profile.protocol === "openai-responses" ? "/responses" : "/chat/completions";
   const body: Record<string, unknown> = { ...translated, stream: true };
+  // llm-bridge currently emits `{name}` for a forced Anthropic tool and drops
+  // the other choices. Supply each endpoint's native shape explicitly.
+  applyOpenAIToolChoice(body, profile.protocol, params.toolChoice);
   // Stage 34: request-side reasoning effort. Chat Completions takes a top-level
   // `reasoning_effort` string; the Responses API takes a nested `reasoning.effort`.
   // Source: doc/CURL_EXAMPLES.md §1–§2.

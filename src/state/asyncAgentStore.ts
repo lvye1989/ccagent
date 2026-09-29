@@ -154,7 +154,7 @@ export function updateAsyncAgentProgress(
   notify(agentId, next);
 }
 
-/** Mark as completed and fold in the final stats. */
+/** Fold in final stats and preserve a model failure as a failed task. */
 export function completeAsyncAgent(
   agentId: string,
   result: AgentRunResult,
@@ -164,8 +164,11 @@ export function completeAsyncAgent(
   if (!cur) return;
   const next: AsyncAgentEntry = {
     ...cur,
-    status: "completed",
+    status: result.reason === "model_error" ? "failed" : "completed",
     finalText: result.finalText,
+    ...(result.reason === "model_error"
+      ? { error: result.modelError ?? "The model request failed before completion." }
+      : {}),
     durationMs: result.totalDurationMs,
     totalTokens: result.totalTokens,
     inputTokens: result.inputTokens,

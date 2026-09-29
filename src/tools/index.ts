@@ -57,6 +57,7 @@ import { workfriendDeliverTool } from "./workfriendDeliverTool.js";
 import { agentTeamModeTool } from "./agentTeamModeTool.js";
 import { rhinoActionTool, rhinoObserveTool, rhinoInspectTool } from "./rhinoTools.js";
 import { rhinoSequenceTool } from "./rhinoSequence.js";
+import { mailTool } from "./mailTool.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 
 const BUILTIN_TOOLS: Tool[] = [
@@ -77,6 +78,7 @@ const BUILTIN_TOOLS: Tool[] = [
   rhinoInspectTool,
   rhinoActionTool,
   rhinoSequenceTool,
+  mailTool,
   markdownToPdfTool,
   wordToPdfTool,
   pdfToWordTool,

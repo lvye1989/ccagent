@@ -18,6 +18,7 @@ export const BUILTIN_COMMAND_NAMES = new Set<string>([
   "mode",
   "tasks",
   "mcp",
+  "powersetting",
   "plugin",
   "plugins",
   "marketplace",

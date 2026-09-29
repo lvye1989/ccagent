@@ -147,30 +147,35 @@ function readInput(raw: Record<string, unknown>): AgentInput {
   };
 }
 
-function formatResult(args: {
+export function formatAgentRunToolResult(args: {
   agentType: string;
   description?: string;
   result: AgentRunResult;
-}): string {
+}): ToolResult & { content: string } {
   const { agentType, description, result } = args;
+  const modelFailed = result.reason === "model_error";
   const headerLines = [
-    `Sub-agent '${agentType}' completed.`,
+    `Sub-agent '${agentType}' ${modelFailed ? "failed" : "completed"}.`,
     description ? `task: ${description}` : "",
     `turns: ${result.turnCount} | tools used: ${result.totalToolUseCount} | duration: ${result.totalDurationMs}ms`,
     `tokens: ${result.totalTokens} (input ${result.inputTokens}, output ${result.outputTokens})`,
     result.reason !== "completed" ? `stop reason: ${result.reason}` : "",
+    modelFailed ? `model error: ${result.modelError ?? "The model request failed before completion."}` : "",
     result.warnings && result.warnings.length > 0
       ? `warnings:\n${result.warnings.map((w) => `  - ${w}`).join("\n")}`
       : "",
   ].filter(Boolean);
 
-  return [
-    headerLines.join("\n"),
-    "",
-    "<sub_agent_result>",
-    result.finalText,
-    "</sub_agent_result>",
-  ].join("\n");
+  return {
+    content: [
+      headerLines.join("\n"),
+      "",
+      "<sub_agent_result>",
+      result.finalText,
+      "</sub_agent_result>",
+    ].join("\n"),
+    ...(modelFailed ? { isError: true } : {}),
+  };
 }
 
 export const agentTool: Tool = {
@@ -709,7 +714,7 @@ export const agentTool: Tool = {
         });
       }
 
-      const formatted = formatResult({ agentType, description, result });
+      const formatted = formatAgentRunToolResult({ agentType, description, result });
       const extras: string[] = [];
       if (isolationWarning) extras.push(`warning: ${isolationWarning}`);
       if (worktreeFinal.worktreePath) {
@@ -718,8 +723,10 @@ export const agentTool: Tool = {
         );
       }
       return {
-        content:
-          extras.length > 0 ? `${formatted}\n\n${extras.join("\n")}` : formatted,
+        ...formatted,
+        content: extras.length > 0
+          ? `${formatted.content}\n\n${extras.join("\n")}`
+          : formatted.content,
       };
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);

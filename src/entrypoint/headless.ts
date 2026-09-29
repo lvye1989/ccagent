@@ -21,6 +21,7 @@ import {
   loadPermissionSettings,
   type PermissionDecision,
   type PermissionMode,
+  type PermissionRequest,
 } from "../permissions/permissions.js";
 import type { ToolContext } from "../tools/Tool.js";
 import type { Usage } from "../types/message.js";
@@ -43,7 +44,8 @@ export interface RunHeadlessOptions {
   permissionMode?: PermissionMode;
   /**
    * `--dangerously-skip-permissions` (bypass). When true, any tool call that
-   * would otherwise prompt for confirmation (`ask`) is auto-approved. Unlike
+   * would otherwise prompt for confirmation (`ask`) is auto-approved, except
+   * a Mail send lacking the current user's exact recipients and body. Unlike
    * `--auto`, the permission mode stays `default`, so explicit `deny` rules in
    * settings.json are still enforced — bypass only collapses the interactive
    * `ask` step, not the security boundary.
@@ -51,6 +53,15 @@ export interface RunHeadlessOptions {
   bypassPermissions?: boolean;
   /** `--output-format` (defaults to `text`). */
   outputFormat?: OutputFormat;
+}
+
+/** Headless bypass cannot replace the current-user grant for email sending. */
+export function headlessPermissionDecision(
+  request: PermissionRequest,
+  autoApprove: boolean,
+): PermissionDecision {
+  if (request.toolName === "Mail" && request.input.operation === "send") return "deny";
+  return autoApprove ? "allow_once" : "deny";
 }
 
 /** The `result` SDK message — the single object emitted by `--output-format json`. */
@@ -202,8 +213,8 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
   // i.e. only the explicit bypass flag auto-approves; `--auto` no longer means
   // "allow everything" (it means "let the classifier decide").
   const autoApprove = options.bypassPermissions === true;
-  const onPermissionRequest = async (): Promise<PermissionDecision> =>
-    autoApprove ? "allow_once" : "deny";
+  const onPermissionRequest = async (request: PermissionRequest): Promise<PermissionDecision> =>
+    headlessPermissionDecision(request, autoApprove);
 
   const engine = new QueryEngine({
     model: resolvedModel,

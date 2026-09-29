@@ -238,22 +238,32 @@ export async function runAsyncAgentLifecycle(
     const worktreeFinal = await cleanupWorktreeIfNeeded(params.worktreeInfo);
 
     const durationMs = Date.now() - startTime;
-    await appendTaskOutput(entry.outputFile, {
-      type: "completed",
-      reason: result.reason,
-      finalText: result.finalText,
-      durationMs,
-      totalTokens: result.totalTokens,
-      toolUseCount: result.totalToolUseCount,
-    });
+    const modelFailed = result.reason === "model_error";
+    const modelError = result.modelError ?? "The model request failed before completion.";
+    if (modelFailed) {
+      await appendTaskOutput(entry.outputFile, {
+        type: "failed",
+        error: modelError,
+        durationMs,
+      });
+    } else {
+      await appendTaskOutput(entry.outputFile, {
+        type: "completed",
+        reason: result.reason,
+        finalText: result.finalText,
+        durationMs,
+        totalTokens: result.totalTokens,
+        toolUseCount: result.totalToolUseCount,
+      });
+    }
 
     completeAsyncAgent(entry.agentId, result, worktreeFinal);
 
     // Killed sub-agents have reason: "aborted" and surface a slightly
     // different status in the notification so the parent doesn't
     // mistake an ESC'd run for a successful completion.
-    const status: "completed" | "killed" =
-      result.reason === "aborted" ? "killed" : "completed";
+    const status: "completed" | "failed" | "killed" =
+      result.reason === "aborted" ? "killed" : modelFailed ? "failed" : "completed";
 
     enqueuePendingNotification({
       mode: "task-notification",
@@ -264,6 +274,7 @@ export async function runAsyncAgentLifecycle(
         ...(entry.description ? { description: entry.description } : {}),
         outputFile: entry.outputFile,
         finalText: result.finalText,
+        ...(modelFailed ? { error: modelError } : {}),
         durationMs,
         totalTokens: result.totalTokens,
         toolUseCount: result.totalToolUseCount,

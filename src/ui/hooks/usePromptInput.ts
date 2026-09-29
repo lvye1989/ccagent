@@ -88,6 +88,7 @@ const BUILTIN_COMMANDS: CommandSuggestion[] = [
   { name: "/effort", description: "Set reasoning effort (low/medium/high/max, Anthropic)" },
   { name: "/tasks", description: "Switch task tracking system (task=persistent V2, todo=session V1)" },
   { name: "/mcp", description: "Select MCP Open/Close; list, tools, auth, reconnect" },
+  { name: "/powersetting", description: "Set QQ/163 mail read, write, delete, search and send permissions" },
   { name: "/plugin", description: "Manage plugins & marketplaces (install/enable/disable/marketplace ...)" },
   { name: "/reload-plugins", description: "Atomically reload plugins and extension registries" },
   { name: "/skills", description: "List loaded skills or reload extensions (/skills reload)" },

@@ -214,6 +214,33 @@ async function main(): Promise<void> {
 
   {
     clearAllAsyncAgents();
+    registerAsyncAgent({
+      agentId: "agent-2-model-error",
+      agentType: "Explore",
+      prompt: "read code",
+      outputFile: "/tmp/agent-2-model-error.output",
+    });
+    completeAsyncAgent("agent-2-model-error", {
+      agentType: "Explore",
+      finalText: "partial response",
+      messages: [],
+      totalToolUseCount: 1,
+      totalDurationMs: 42,
+      totalTokens: 123,
+      inputTokens: 100,
+      outputTokens: 23,
+      turnCount: 2,
+      reason: "model_error",
+      modelError: "Credit balance is too low.",
+    });
+    const failed = getAsyncAgent("agent-2-model-error");
+    assert(failed?.status === "failed", "model_error run is failed in async store");
+    assert(failed?.error === "Credit balance is too low.", "async store retains model error");
+    assert(failed?.totalTokens === 123 && failed?.finalText === "partial response", "failed run keeps usage and partial output");
+  }
+
+  {
+    clearAllAsyncAgents();
     const entry = registerAsyncAgent({
       agentId: "agent-3",
       agentType: "general-purpose",

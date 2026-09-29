@@ -12,6 +12,8 @@ import {
 import { classifyAutoModeAction } from "./autoClassifier.js";
 import { stripDangerousAllowRules } from "./dangerousPatterns.js";
 import { isPreapprovedUrl } from "../tools/webFetch/preapproved.js";
+import { hasDirectMailSendGrant } from "../tools/mailPolicy.js";
+import { isMailPowerEnabled, mailPowerForOperation } from "../config/mailPowerSettings.js";
 import {
   recordClassifierDenial,
   recordClassifierSuccess,
@@ -62,6 +64,8 @@ export interface PermissionCheckParams {
    * unaffected; the auto-mode branch will consume it in a later stage.
    */
   messages?: MessageParam[];
+  /** Runtime-only text from the current foreground human input, never from transcript/tool output. */
+  directUserTurnText?: string;
   /**
    * Active model handle. Threaded through so the Auto Mode AI classifier uses
    * the user's selected profile instead of defaulting to an Anthropic model
@@ -334,6 +338,14 @@ export function matchesPermissionRule(rule: string, toolName: string, input: Rec
       : trimmedPattern === action;
   }
 
+  if (toolName === "Mail") {
+    const operation = typeof input.operation === "string" ? input.operation : "";
+    const trimmedPattern = pattern.trim();
+    return trimmedPattern.includes("*")
+      ? wildcardToRegExp(trimmedPattern).test(operation)
+      : trimmedPattern === operation;
+  }
+
   return false;
 }
 
@@ -432,6 +444,14 @@ function summarizeInput(input: Record<string, unknown>): string {
 }
 
 export function summarizePermissionRequest(toolName: string, input: Record<string, unknown>): string {
+  if (toolName === "Mail") {
+    const account = typeof input.account === "string" ? input.account : "<unknown>";
+    const operation = typeof input.operation === "string" ? input.operation : "<unknown>";
+    if (operation === "send" || operation === "draft") {
+      return `account=${account}, operation=${operation}, to=${JSON.stringify(input.to ?? [])}, cc=${JSON.stringify(input.cc ?? [])}, subject=${JSON.stringify(input.subject ?? "")}, body=${JSON.stringify(input.body ?? "")}`;
+    }
+    return `account=${account}, operation=${operation}, folder=${JSON.stringify(input.folder ?? "INBOX")}, message_id=${JSON.stringify(input.message_id ?? "")}`;
+  }
   if (toolName === "Bash") {
     const command = extractBashCommand(input);
     return command ? `command=${command}` : "command=<empty>";
@@ -465,6 +485,10 @@ export function summarizePermissionRequest(toolName: string, input: Record<strin
 }
 
 export function buildPermissionRuleHint(toolName: string, input: Record<string, unknown>): string {
+  if (toolName === "Mail") {
+    const operation = typeof input.operation === "string" ? input.operation : "*";
+    return `Mail(${operation})`;
+  }
   if (toolName === "Bash") {
     const command = extractBashCommand(input);
     const firstToken = command.split(/\s+/)[0];
@@ -491,6 +515,14 @@ export function buildPermissionRuleHint(toolName: string, input: Record<string, 
 }
 
 function getRiskLabel(tool: Tool, input: Record<string, unknown>): string {
+  if (tool.name === "Mail") {
+    const operation = input.operation;
+    if (operation === "send") return "High risk: sends an external email to the listed recipients";
+    if (operation === "delete") return "Medium risk: moves one email to Trash";
+    if (operation === "draft") return "Medium risk: saves a draft in an external mailbox";
+    if (operation === "search") return "Sensitive: searches a configured mailbox";
+    return "Sensitive: reads a configured mailbox";
+  }
   if (tool.name === "Bash") {
     const command = extractBashCommand(input);
     if (isDangerousBashCommand(command)) {
@@ -722,6 +754,49 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     risk: getRiskLabel(params.tool, params.input),
     ruleHint: buildPermissionRuleHint(params.tool.name, params.input),
   };
+
+  // Mail has an explicit, per-send authorization boundary in every mode,
+  // including Full Mode. Only the current foreground human turn can grant
+  // an unattended send; allow rules, hooks, assistant text, and mail contents
+  // do not supply that grant. The caller still runs hooks around this gate.
+  if (params.tool.name === "Mail") {
+    if (
+      matchesAnyRule(sessionRules.deny, "Mail", params.input)
+      || matchesAnyRule(settings.deny, "Mail", params.input)
+    ) {
+      return { behavior: "deny", reason: "matched Mail deny rule", request };
+    }
+    const operation = params.input.operation;
+    const account = params.input.account;
+    const power = mailPowerForOperation(operation);
+    if (!power || (account !== "qq" && account !== "163")) {
+      return { behavior: "deny", reason: "unknown Mail account or operation", request };
+    }
+    if (!(await isMailPowerEnabled(account, operation))) {
+      return { behavior: "deny", reason: `Mail ${account}.${power} is closed. Use /powersetting ${account} ${power} on to enable it.`, request };
+    }
+    if (mode === "plan" && operation !== "list" && operation !== "read" && operation !== "search") {
+      return { behavior: "deny", reason: "plan mode blocks Mail drafts, deletes, and sends", request };
+    }
+    if (operation === "list" || operation === "read") {
+      return { behavior: "allow", reason: "user-authorized mailbox reading", request };
+    }
+    if (operation === "search") {
+      return { behavior: "allow", reason: "user-enabled mailbox search", request };
+    }
+    if (operation === "draft") {
+      return { behavior: "allow", reason: "user-authorized draft saving", request };
+    }
+    if (operation === "delete") {
+      return { behavior: "allow", reason: "user-enabled move to Trash", request };
+    }
+    if (operation === "send") {
+      return hasDirectMailSendGrant(params.directUserTurnText, params.input)
+        ? { behavior: "allow", reason: "current human turn specifies the sender when needed, every recipient, exact body, and any nonempty subject", request }
+        : { behavior: "ask", reason: "email send needs the current human turn to specify every recipient, exact body, any nonempty subject, and an unambiguous sender account, or requires per-send confirmation", request };
+    }
+    return { behavior: "deny", reason: "unknown Mail operation", request };
+  }
 
   // Computer Use retains a non-bypassable action-time safety floor. Password
   // changes and safety bypasses require user hand-off, browser groups are an

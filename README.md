@@ -168,6 +168,72 @@ servers and are not affected by this menu.
 Official setup guide:
 [Configure the Google Workspace MCP servers](https://developers.google.com/workspace/guides/configure-mcp-servers).
 
+### Personal QQ and 163 mail
+
+The built-in `Mail` tool supports `list`, `read`, `search`, `draft`, `delete`, and `send` for a
+configured personal `qq` or `163` account. It connects only to the provider's
+fixed IMAP and SMTP servers over TLS; it does not accept arbitrary mail server
+addresses. This integration is separate from Gmail MCP.
+
+1. In [QQ Mail settings](https://help.mail.qq.com/detail/106/985), enable the
+   third-party IMAP/SMTP service and generate a client authorization code. For
+   163 Mail, use the web mailbox's **Settings → POP3/SMTP/IMAP** page to enable
+   the needed protocols and generate an authorization code, following
+   [NetEase's client setup guide](https://help.mail.126.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac2a5feb28b66796d3b).
+2. Put the address and client authorization code for each account you want to
+   use in the selected private `.env`:
+
+   ```dotenv
+   CCAGENT_QQ_MAIL_ADDRESS=your-name@qq.com
+   CCAGENT_QQ_MAIL_AUTH_CODE=your-qq-client-authorization-code
+   CCAGENT_163_MAIL_ADDRESS=your-name@163.com
+   CCAGENT_163_MAIL_AUTH_CODE=your-163-client-authorization-code
+   ```
+
+   Use a client authorization code, never the mailbox login password. Do not
+   paste a real code into chat or commit `.env`.
+
+`Mail` uses `account: "qq"` or `account: "163"` to select an account. Each
+account needs its own configuration and `/powersetting` permissions:
+
+| Permission | Mail operations | Scope |
+| --- | --- | --- |
+| `read` | `list`, `read` | List messages and read message text |
+| `search` | `search` | Search the mailbox through IMAP |
+| `write` | `draft` | Save a draft |
+| `delete` | `delete` | Move a message to Trash; no permanent expunge |
+| `send` | `send` | Send through SMTP |
+
+`list` and `search` return a `message_id` bound to the account and folder.
+`delete` accepts only that ID and derives the source folder from it. Search
+covers the newest 2,000 messages in the selected folder.
+
+All five permissions start **off** for both accounts. `/powersetting` opens the
+interactive control, `/powersetting list` shows the current settings, and text
+commands toggle one account and permission at a time:
+
+```text
+/powersetting qq read on
+/powersetting 163 search on
+/powersetting qq send off
+```
+
+The switches persist in the current user's settings; project settings cannot
+turn them on. A permission that is off blocks its mail operations even in Full
+Mode. These switches govern the built-in `Mail` tool; standalone scripts and
+other mail clients do not pass through this gate. Turning `send` on enables the
+sending capability but does not authorize
+an individual message: unattended sending still requires the current user's
+direct request to specify every recipient and the exact body. A subject may be
+empty; a nonempty subject must also come from the current user's request.
+Otherwise CCAGENT asks for fresh foreground confirmation before sending. When
+both accounts are configured, the request must also identify QQ or 163 as the
+sender. Mail text, quoted messages, and earlier conversation turns cannot
+authorize a send. No mailbox is accessed until its configuration is supplied,
+the relevant permission is on, and a mail operation is requested. Reading
+returns text and attachment metadata for messages up to 1 MB; drafts and sends
+are text-only.
+
 An npm-backed installer is available for macOS and Linux:
 
 ```bash
@@ -314,6 +380,8 @@ manual summary, and `/context` shows the resolved window and current estimate.
 | `MCP_TOOL_TIMEOUT_MS` | Default timeout for MCP tool calls; defaults to `300000` (server-level `toolTimeoutMs` takes precedence) |
 | `GOOGLE_MCP_CLIENT_ID` | OAuth 2.0 Web client ID used by the official Google Workspace MCP servers; written to the private `.env` by `ccagent init` |
 | `GOOGLE_MCP_CLIENT_SECRET` | OAuth client secret for Google Workspace MCP; never stored in `settings.json` |
+| `CCAGENT_QQ_MAIL_ADDRESS` / `CCAGENT_163_MAIL_ADDRESS` | Optional personal QQ / 163 mailbox addresses for the built-in `Mail` tool |
+| `CCAGENT_QQ_MAIL_AUTH_CODE` / `CCAGENT_163_MAIL_AUTH_CODE` | Provider-issued client authorization codes for IMAP/SMTP, stored only in the private environment file |
 | `QWEN_PROTOCOL` | Optional Computer Use perception protocol; the verified DashScope default is `openai-chat`, with `openai-responses` and `gemini` also supported |
 | `QWEN_MODEL` | Qwen/vision model used to interpret Computer Use screenshots |
 | `DASHSCOPE_BASE_URL` / `QWEN_BASE_URL` | DashScope or compatible Qwen endpoint for screenshot perception |
@@ -352,7 +420,7 @@ manual summary, and `/context` shows the resolved window and current estimate.
 
 In Auto Mode, CCAGENT builds an internal, revisioned `tools_list` from the tools that are actually enabled. This is runtime metadata, not another model-callable tool and not an extra LLM turn. For a generic non-read-only call, Jev receives the compact list plus the selected tool's description, input schema, decision policy, and a bounded, secret-redacted summary of the exact arguments; the runtime rechecks the enabled registry immediately before dispatch. High-confidence scoped local work can proceed, while destructive, external, credential, installation, system, broad, or uncertain operations still require confirmation. Computer Use, BrowserSearch, Rhino, and Workfriend keep their purpose-built typed gates instead of being judged twice. Deterministic deny rules, schema/path/freshness validation, blocking hooks, sandboxing, and action-specific confirmation floors run independently and cannot be weakened by Jev. Open-ended planning and sub-agent routing remain with the main LLM.
 
-Full Mode (`/mode full`) is an explicit no-prompt policy for a trusted local session, similar to Codex's full-access approval mode. It bypasses the general allow/ask/deny engine, the generic Auto Mode classifier, first-domain `WebFetch` prompts, and ordinary Rhino/Workfriend prompts, and is inherited by built-in agents and sub-agents. It does **not** re-enable a closed tool, MCP server, Skill, or Agent; bypass schemas, argument/path/workspace/freshness checks, blocking hooks, specialized Jev stop/re-observe/replan decisions, or an enabled sandbox; or remove Computer Use's high-impact confirmation floor and deterministic password/safety-bypass denials. BrowserSearch also continues to ask when the request is secret-like, sensitive, or conflicts with the current user intent.
+Full Mode (`/mode full`) bypasses ordinary permission prompts in a trusted local session, including first-domain `WebFetch` and ordinary Rhino/Workfriend prompts, and is inherited by built-in agents and sub-agents. It does **not** re-enable a closed tool, MCP server, Skill, or Agent; bypass schemas, argument/path/workspace/freshness checks, blocking hooks, specialized Jev stop/re-observe/replan decisions, or an enabled sandbox; or remove Computer Use's high-impact confirmation floor and deterministic password/safety-bypass denials. BrowserSearch continues to ask when the request is secret-like, sensitive, or conflicts with the current user intent. `Mail.send` still requires exact recipients and message content in the current user's direct request, or a fresh foreground confirmation.
 
 Shell commands receive a private per-process temporary directory at `~/.ccagent/tmp/process-<pid>` through `TEMP`, `TMP`, `TMPDIR`, and `CCAGENT_TMPDIR`. Files created there—such as Word content checks produced by PowerShell—can be consumed by `Read`, `Grep`, or `Glob` without granting those tools access to the entire operating-system temp directory.
 
@@ -521,7 +589,7 @@ ccagent                         # interactive REPL
 ccagent --model gpt             # select a model profile
 ccagent --plan                  # read-only planning mode
 ccagent --auto                  # classifier-assisted permission mode
-ccagent --permission-mode full  # bypass permission-engine prompts and rules
+ccagent --permission-mode full  # bypass ordinary permission prompts; Mail.send keeps its send boundary
 ccagent --resume                # resume the latest session
 ccagent --resume <session-id>   # resume a specific session
 # inside CCAGENT: /workfriend   # start a daily work check-in
