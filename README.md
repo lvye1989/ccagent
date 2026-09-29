@@ -377,7 +377,7 @@ The common toolkit now covers curves, surfaces, solids, meshes, SubD, copies/arr
 
 Ask CCAGENT to use `rhino_agent` for Rhino 8 modeling. The built-in agent follows an **80% RhinoCommon / 20% Computer Use** strategy:
 
-For image-led modeling, the visual model extracts geometry, proportion, material, and uncertainty evidence only. The runtime then combines its internal enabled-tool manifest with `RhinoInspect` capabilities, obtains a fresh `RhinoObserve`, lets the dedicated Rhino Jev gate choose among the structured whitelist, and only then executes. Visual output cannot invent GUIDs, grant permission, or emit arbitrary Rhino/Grasshopper commands.
+For image-led modeling, start with reference images, a prompt, and any measured dimensions. The visual model turns them into a modeling specification: visible massing, dimensions and units, facade rhythm, materials, camera assumptions, occluded areas, and uncertain estimates. `rhino_agent` can use `WebSearch` when an important dimension remains uncertain, then `WebFetch` to verify a relevant source page when needed; cite the source and label typical design ranges as assumptions rather than measurements. It then checks the enabled Rhino operation catalog and targeted `RhinoInspect` schemas, and uses `RhinoObserve` for the live document units, objects, and GUIDs. The main model plans the operations; Jev reviews the fixed plan. Visual output cannot invent GUIDs, grant permission, or emit arbitrary Rhino/Grasshopper commands.
 
 - `RhinoObserve` attaches to the running Rhino 8 instance without launching it and returns the active document name, units and tolerances, layers, current selection, object GUID/type/bounding boxes, current command state, and undo state.
 - `RhinoAction` accepts `create_geometry`, `transform`, `extrude`, `loft`, `curtain_wall`, `set_view`, `boolean`, `set_layer`, `set_material`, `run_grasshopper`, `import_export`, and `undo`. It rejects unknown fields and never accepts a Rhino command, macro, or executable script string.
@@ -392,17 +392,24 @@ The direct bridge currently targets **Rhino 8 on Windows** and uses the installe
 
 #### Jev fast dispatch
 
-The built-in `rhino_agent` prefers `RhinoSequence` for known multi-step
-work. The LLM proposes 1–8 structured steps once; Jev decides each exact step,
-and the runtime observes, runs the central permission/hooks path, executes and
-verifies without intermediate LLM turns. `targets_from` binds actual GUIDs
-created by an earlier step. Inspections can also be batched.
-After each native observation, Jev receives the current enabled Rhino tool
-registry and a compact `tools_list` of all implemented RhinoAction families,
-their common operations, and RhinoInspect operations. The selected step also
+The built-in `rhino_agent` prefers `RhinoSequence` for known multi-step work.
+The main model normally plans 4–8 meaningful steps per modeling stage, with
+15 as the hard limit. Before dispatch, the runtime validates operation schemas,
+units, paths, explicit GUIDs, and step dependencies. It submits stable steps
+for one Jev batch preflight, with a distinct decision for each step. Execution
+remains sequential: the runtime checks that a preflight decision still applies,
+requests a fresh Jev decision when a step depends on newly created GUIDs or
+changed geometry, passes that exact step through the central permission/hooks
+gate, executes it with RhinoCommon, and verifies the native result with a fresh
+observation. It needs no intermediate main-model turns while the plan remains
+valid. `targets_from` binds actual GUIDs created by an earlier step; inspections
+can also be included. Batch preflight does not grant permission for the whole plan.
+
+Jev receives a compact `tools_list` of currently enabled RhinoAction families,
+implemented sub-operations, and RhinoInspect operations. The selected step also
 has its exact parameter contract. Every implemented action and sub-operation is
 sequence-eligible. Discovery does not authorize another action beyond the exact
-prevalidated step; a different recommendation returns to the agent for a new call.
+validated step; a different recommendation returns to the agent for a new call.
 
 Enabled by default with a configured OpenRouter key and Jev `enforce`; set
 `CCAGENT_RHINO_FAST=0` to disable. Export/import, deletion, overwrite, booleans,
@@ -410,11 +417,22 @@ undo and third-party GH can now be planned in the sequence. Every leaf still
 passes the specialized Jev and central permission gates. High-impact steps
 require confirmation in Default/Auto; a background task without prompt access
 hands off before that step. Full Mode follows the boundary above.
-Missing/low-confidence evidence, stale observations, document changes or tool
-errors stop the sequence for LLM/user review. No automatic mutation retries or
-rollback; after 90 seconds no further step starts. A `plan_id` is executed only
+An invalidated batch decision triggers fresh Jev review for that step. Missing or
+low-confidence evidence, a failed Jev review, stale observations, document changes,
+denial, or native verification errors stop the sequence for LLM/user review.
+No automatic mutation retries or rollback; after
+90 seconds no further step starts. A `plan_id` is executed only
 once within an agent session, even on partial failure. Receipts distinguish
 completed, executed and uncertain steps and persist under project `reports/`.
+
+At the end of each modeling stage, align the viewport and use
+`RhinoObserve(capture:true, vision_analysis:true)` to compare the model's visual
+evidence with the reference specification; then plan only observed deviations.
+`RhinoSequence.capture_final` saves a screenshot but does not provide visual
+analysis. After geometry and visual acceptance, export the selected objects to
+`.3dm` as a separate operation and verify its path, file, and object set. Full
+Mode (`/mode full`) skips ordinary Rhino confirmation prompts but retains Jev,
+the central gate, local validation, and native verification.
 
 Run `npm run test:rhino-fast` for offline safety checks. The opt-in
 `npm run test:rhino-fast-live` uses real LLM/Jev/native calls for read-only tower

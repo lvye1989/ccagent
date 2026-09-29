@@ -70,8 +70,8 @@ async function main(): Promise<void> {
   assert(Boolean(rhino), "rhino_agent is built in");
   assert(rhino?.permissionMode === "auto", "rhino_agent uses Auto Mode for fast Jev-gated operations");
   assert(
-    rhino?.tools?.join(",") === "RhinoObserve,RhinoInspect,RhinoAction,RhinoSequence,ComputerObserve,ComputerAction,ComputerNavigate",
-    "rhino_agent has only structured Rhino and bounded Computer Use tools",
+    rhino?.tools?.join(",") === "RhinoObserve,RhinoInspect,RhinoAction,RhinoSequence,WebSearch,WebFetch,ComputerObserve,ComputerAction,ComputerNavigate",
+    "rhino_agent has structured Rhino, cited web lookup and bounded Computer Use tools",
   );
   assert((rhino?.getSystemPrompt() ?? "").includes("Never call Bash or PowerShell"), "agent prompt forbids shell-based Rhino automation");
   assert(

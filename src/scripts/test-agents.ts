@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   const rhinoAgent = builtIns.find((a) => a.agentType === "rhino_agent");
   assert(!!rhinoAgent, "rhino_agent is built-in");
   assert(
-    rhinoAgent?.tools?.join(",") === "RhinoObserve,RhinoInspect,RhinoAction,RhinoSequence,ComputerObserve,ComputerAction,ComputerNavigate",
+    rhinoAgent?.tools?.join(",") === "RhinoObserve,RhinoInspect,RhinoAction,RhinoSequence,WebSearch,WebFetch,ComputerObserve,ComputerAction,ComputerNavigate",
     "rhino_agent combines RhinoCommon tools with bounded Computer Use",
   );
   assert(
@@ -99,7 +99,8 @@ async function main(): Promise<void> {
     "rhino_agent prompt forbids arbitrary shell-driven Rhino commands",
   );
   assert(
-    (rhinoAgent?.getSystemPrompt() ?? "").includes("visual evidence -> the internal tool manifest / RhinoInspect capabilities -> RhinoObserve -> Jev -> structured execution"),
+    (rhinoAgent?.getSystemPrompt() ?? "").includes("reference images + prompt + known dimensions -> visual modeling specification")
+      && (rhinoAgent?.getSystemPrompt() ?? "").includes("RhinoInspect schema + RhinoObserve document state -> staged RhinoSequence"),
     "rhino_agent prompt defines the vision-to-manifest-to-Jev evidence chain",
   );
   assert(

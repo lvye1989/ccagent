@@ -48,6 +48,15 @@ export interface ParsedRhinoActionInput {
   parameters: Record<string, unknown>;
 }
 
+/** Trusted runtime preapproval, never accepted from a model-authored tool input. */
+export interface RhinoJevPreapproval {
+  action: string;
+  parameters: Record<string, unknown>;
+  observationId: string;
+  intent?: string;
+  decision: RhinoJevDecision;
+}
+
 function requestedTargetGuids(parameters: Record<string, unknown>): string[] {
   return rhinoTargetGuids(parameters);
 }
@@ -347,6 +356,7 @@ export async function preflightRhinoActionWithJev(
   messages: MessageParam[] = [],
   fast = false,
   manifest?: EnabledToolManifest,
+  preapproval?: RhinoJevPreapproval,
 ): Promise<RhinoJevDecision> {
   let parsed: ParsedRhinoActionInput;
   try {
@@ -368,6 +378,10 @@ export async function preflightRhinoActionWithJev(
       true,
     );
   }
+  if (preapproval && preapproval.action === parsed.action && preapproval.observationId === parsed.observationId
+    && preapproval.intent === parsed.intent && JSON.stringify(preapproval.parameters) === JSON.stringify(parsed.parameters)) {
+    return preapproval.decision;
+  }
   return await decideRhinoActionWithJev(
     parsed.action,
     { intent: parsed.intent, ...parsed.parameters },
@@ -379,13 +393,16 @@ export async function preflightRhinoActionWithJev(
   );
 }
 
-export async function preflightRhinoInspectWithJev(input: Record<string, unknown>, context: ToolContext, messages: MessageParam[] = [], manifest?: EnabledToolManifest): Promise<RhinoJevDecision> {
+export async function preflightRhinoInspectWithJev(input: Record<string, unknown>, context: ToolContext, messages: MessageParam[] = [], manifest?: EnabledToolManifest, preapproval?: RhinoJevPreapproval): Promise<RhinoJevDecision> {
   try {
     const p = RHINO_INSPECT_SCHEMA.parse(input);
     if (p.operation === "capabilities" || !p.observation_id || !p.target_guids) throw new Error("Fast inspection requires geometry targets and a fresh observation");
     const observation = getCachedRhinoObservation(p.observation_id);
     if (!observation) return unavailableDecision("Fast inspection observation is stale", true);
     assertTargetsWereObserved("transform", p, observation);
+    const { observation_id: _observationId, ...parameters } = p;
+    if (preapproval && preapproval.action === "inspect" && preapproval.observationId === p.observation_id
+      && JSON.stringify(preapproval.parameters) === JSON.stringify(parameters)) return preapproval.decision;
     return decideRhinoActionWithJev("inspect", p, observation, messages, context.abortSignal, true, manifest);
   } catch (error) { return { ...unavailableDecision(`Fast inspection validation failed: ${(error as Error).message}`), requiresReplan: true }; }
 }

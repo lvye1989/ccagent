@@ -34,8 +34,9 @@ import {
   type BrowserSearchFinalPermission,
 } from "../tools/browserSearchTool.js";
 import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js";
-import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev } from "../tools/rhinoTools.js";
-import { canDispatchRhinoFastStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
+import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev, type RhinoJevPreapproval } from "../tools/rhinoTools.js";
+import { getCachedRhinoObservation } from "../tools/rhinoBackend.js";
+import { canDispatchRhinoFastStep, decideRhinoSequenceBatchWithJev, RHINO_FAST_ACTIONS, type RhinoJevBatchStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
 import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
 import {
   decideToolUseWithJev,
@@ -222,6 +223,8 @@ export interface QueryParams {
 export interface RunToolsOptions {
   /** Runtime-only nested Rhino lane. Never comes from model input. */
   rhinoFastLane?: boolean;
+  /** Runtime-only, exact-input-bound Jev result from the sequence preflight. */
+  rhinoFastPreapproval?: RhinoJevPreapproval;
   permissionMode?: PermissionMode;
   permissionSettings?: PermissionSettings;
   sessionPermissionRules?: PermissionRuleSet;
@@ -615,9 +618,10 @@ async function runOneToolBlock(
           options.conversationMessages,
           options.rhinoFastLane,
           rhinoToolManifest,
+          options.rhinoFastLane ? options.rhinoFastPreapproval : undefined,
         )
       : options.rhinoFastLane && block.name === "RhinoInspect" && !rhinoCapabilitiesStep
-        ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages, rhinoToolManifest)
+        ? await preflightRhinoInspectWithJev(toolInput, context, options.conversationMessages, rhinoToolManifest, options.rhinoFastPreapproval)
         : undefined;
     if (options.rhinoFastLane && block.name !== "RhinoObserve" && !rhinoCapabilitiesStep && (!rhinoJevDecision || !canDispatchRhinoFastStep(
       rhinoJevDecision, (block.name === "RhinoInspect" ? "inspect" : toolInput.action) as RhinoJevProposedAction,
@@ -934,9 +938,17 @@ async function runOneToolBlock(
       toolUseId: block.id,
       ...(rhinoJevDecision ? { rhinoJevDecision } : {}),
       ...(block.name === "RhinoSequence" && !options.rhinoFastLane ? {
-        runRhinoFastTool: async (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>) => {
+        preflightRhinoFastBatch: async (steps: Array<{ id: string; action: string; parameters: Record<string, unknown> }>, observationId: string) => {
+          const observation = getCachedRhinoObservation(observationId);
+          if (!observation || observation.objectsTruncated) throw new Error("Rhino batch preflight needs a fresh complete observation");
+          if (steps.some(step => !(RHINO_FAST_ACTIONS as readonly string[]).includes(step.action))) throw new Error("Rhino batch contains an unsupported action");
+          return decideRhinoSequenceBatchWithJev(steps as RhinoJevBatchStep[], observation, options.conversationMessages, context.abortSignal, getEnabledToolManifest());
+        },
+        runRhinoFastTool: async (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>, preapproval?: {
+          action: string; parameters: Record<string, unknown>; observationId: string; intent?: string; decision: unknown;
+        }) => {
           const leaf = await runOneToolBlock({ type: "tool_use", id: `${block.id}-fast-${Math.random().toString(36).slice(2)}`, name, input }, context,
-            { ...options, rhinoFastLane: true, shouldAvoidPermissionPrompts: options.shouldAvoidPermissionPrompts });
+            { ...options, rhinoFastLane: true, rhinoFastPreapproval: preapproval as RhinoJevPreapproval | undefined, shouldAvoidPermissionPrompts: options.shouldAvoidPermissionPrompts });
           return { result: leaf.execution.result, rawResult: leaf.rawResult, jevDecision: leaf.rhinoJevDecision, toolDispatched: leaf.toolDispatched };
         },
       } : {}),

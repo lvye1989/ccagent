@@ -625,6 +625,46 @@ def _set_material(doc, parameters):
     return {"updated_guids": updated, "material_index": int(material_index), "material": material.Name}
 
 
+def _verify_3dm_export(file_path, expected_units, exported_guids, source_guids):
+    """Reopen an export before reporting success to the caller."""
+    if not os.path.isfile(file_path):
+        raise RuntimeError("Exported 3dm file does not exist: %s" % file_path)
+    file_size = os.path.getsize(file_path)
+    if file_size <= 0:
+        raise RuntimeError("Exported 3dm file is empty: %s" % file_path)
+    try:
+        saved = Rhino.FileIO.File3dm.Read(file_path)
+    except Exception as error:
+        raise RuntimeError("Could not reopen exported 3dm file: %s" % _text(error))
+    if saved is None:
+        raise RuntimeError("Could not reopen exported 3dm file: %s" % file_path)
+
+    saved_objects = list(saved.Objects)
+    if len(saved_objects) != len(exported_guids):
+        raise RuntimeError("Exported 3dm object count mismatch: expected %s, found %s" % (
+            len(exported_guids), len(saved_objects)))
+    saved_units = saved.Settings.ModelUnitSystem
+    if saved_units != expected_units:
+        raise RuntimeError("Exported 3dm units mismatch: expected %s, found %s" % (
+            _text(expected_units), _text(saved_units)))
+    saved_guids = set(_text(item.Id).lower() for item in saved_objects)
+    expected_guids = set(_text(value).lower() for value in exported_guids)
+    missing = sorted(expected_guids - saved_guids)
+    if missing:
+        raise RuntimeError("Exported 3dm is missing object GUIDs: %s" % ", ".join(missing[:5]))
+
+    source_ids = [_text(value).lower() for value in source_guids]
+    exported_ids = [_text(value).lower() for value in exported_guids]
+    return {
+        "read_back": True,
+        "file_size_bytes": file_size,
+        "read_back_object_count": len(saved_objects),
+        "units": _text(saved_units),
+        "verified_object_guid_count": len(exported_guids),
+        "source_guids_preserved": source_ids == exported_ids,
+    }
+
+
 def _import_export(doc, parameters):
     operation = str(parameters.get("operation") or "").lower()
     file_path = os.path.abspath(str(parameters.get("file_path") or ""))
@@ -668,7 +708,9 @@ def _import_export(doc, parameters):
                 options.FileVersion = 8
                 if not doc.Write3dmFile(file_path, options):
                     raise RuntimeError("Failed to write complete 3dm project")
-                return {"operation": operation, "file_path": file_path, "exported_object_count": len(all_objects), "full_document": True, "overwrote": overwrite}
+                source_guids = [_text(obj.Id) for obj in all_objects]
+                verification = _verify_3dm_export(file_path, doc.ModelUnitSystem, source_guids, source_guids)
+                return {"operation": operation, "file_path": file_path, "exported_object_count": len(all_objects), "full_document": True, "overwrote": overwrite, "verification": verification}
             # File3dm writes directly; document Export can open format dialogs
             # and block the COM call even with a fully specified destination.
             model = Rhino.FileIO.File3dm()
@@ -702,16 +744,22 @@ def _import_export(doc, parameters):
                 objects = [obj for obj in doc.Objects if obj is not None and not obj.IsDeleted]
             if not objects:
                 raise ValueError("No objects to export")
+            source_guids = []
+            exported_guids = []
             for obj in objects:
                 attributes = obj.Attributes.Duplicate()
                 attributes.LayerIndex = layer_map.get(attributes.LayerIndex, 0)
                 if attributes.MaterialIndex in material_map:
                     attributes.MaterialIndex = material_map[attributes.MaterialIndex]
-                if model.Objects.Add(obj.Geometry, attributes) == System.Guid.Empty:
+                exported_guid = model.Objects.Add(obj.Geometry, attributes)
+                if exported_guid == System.Guid.Empty:
                     raise RuntimeError("Could not add object to 3dm export")
+                source_guids.append(_text(obj.Id))
+                exported_guids.append(_text(exported_guid))
             if not model.Write(file_path, 8):
                 raise RuntimeError("Failed to write 3dm file")
-            return {"operation": operation, "file_path": file_path, "exported_object_count": len(objects), "overwrote": overwrite}
+            verification = _verify_3dm_export(file_path, doc.ModelUnitSystem, exported_guids, source_guids)
+            return {"operation": operation, "file_path": file_path, "exported_object_count": len(objects), "overwrote": overwrite, "verification": verification}
         raise ValueError("Dialog-free API export requires .3dm; use separately confirmed Computer Use for other formats. No modal export was started.")
     raise ValueError("operation must be import or export")
 

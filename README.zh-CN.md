@@ -358,7 +358,7 @@ Workfriend 会在首次问询和下班回访后调用 OpenRouter Jev，将情绪
 
 需要控制 Rhino 8 时，可以要求 CCAGENT 使用内置的 `rhino_agent`。它采用 **80% RhinoCommon 直接操作 + 20% Computer Use** 的组合：
 
-对于看图建模，视觉模型只提取几何、比例、材质与不确定性证据。运行时再把内部已启用工具清单与 `RhinoInspect` 能力结合，获取新鲜的 `RhinoObserve`，由 Rhino 专用 Jev 门禁在结构化白名单中选择，然后才执行。视觉输出不能虚构 GUID、授予权限，也不能生成任意 Rhino/Grasshopper 命令。
+看图建模从参考图、prompt 和已知实测尺寸开始。视觉模型先整理可见体量、尺寸与单位、立面节奏、材质、视角假设、遮挡部分及不确定估计，形成建模规格。如果关键尺寸仍不确定，`rhino_agent` 可调用 `WebSearch` 定向查找公开尺寸或常见设计范围，必要时用 `WebFetch` 核对来源页面并标注链接；常见范围只能作为设计假设，查不到或资料冲突时继续保留不确定性，不能把照片比例当作实测值。随后查询已启用的 Rhino 操作目录及所需 `RhinoInspect` Schema，再用 `RhinoObserve` 取得文档单位、对象和真实 GUID。主模型编制操作计划，Jev 审查固定步骤。视觉输出不能虚构 GUID、授予权限，也不能生成任意 Rhino/Grasshopper 命令。
 
 - `RhinoObserve` 连接当前正在运行的 Rhino 8，不会自行启动应用；返回活动文档名称、单位与容差、图层、当前选择、对象 GUID/类型/包围盒、当前命令状态和撤销状态。
 - `RhinoAction` 接受 `create_geometry`、`transform`、`extrude`、`loft`、`curtain_wall`、`set_view`、`boolean`、`set_layer`、`set_material`、`run_grasshopper`、`import_export` 和 `undo`。未知字段会被拒绝，不接受任意 Rhino 命令、宏或可执行脚本文本。
@@ -373,26 +373,37 @@ Workfriend 会在首次问询和下班回访后调用 OpenRouter Jev，将情绪
 
 #### Jev 快速执行通道
 
-内置 `rhino_agent` 优先使用 `RhinoSequence` 执行已明确的多步任务：主模型一次生成
-1–8 步结构化计划，Jev 逐步决定是否继续，程序自动完成观察 → 权限检查 → 工具调用 →
-结果核验，不必每步返回主模型。单个动作仍经过原有权限、钩子、快照与 Undo 机制。
-每次原生观察后，Jev 会收到当前已启用的 Rhino 工具注册信息，以及包含所有已实现
-`RhinoAction` 动作类别、常用子操作和 `RhinoInspect` 操作的精简 `tools_list`；当前步骤另附
-精确参数契约。目录中的所有已实现动作及子操作均可纳入快速计划；但每次 Jev 决策只
-处理当前已预校验的步骤，不能替换计划动作，建议改用其他动作时会交回 Agent 重新校验。
-数值放样 → 幕墙 → 材质等可以用 `targets_from` 引用前一步实际生成的 GUID；
-只读测量、剖切和最近点查询也可组合执行。Jev 不生成任意脚本、不改变计划参数。
+内置 `rhino_agent` 优先使用 `RhinoSequence` 执行已明确的多步任务。主模型通常按一个建模阶段
+规划 4–8 个有效步骤，最多 15 步。执行前，程序校验操作 Schema、单位、路径、显式 GUID 和步骤依赖，
+并对目标与判断依据已稳定的步骤向 Jev 发起一次批量预审，每步保留独立结论。执行仍按顺序进行：
+先核对该步预审是否仍适用；若依赖新生成的 GUID 或变化后的几何状态，则重新请 Jev 判断当前步骤；
+随后逐步通过中央权限和 Hooks、由 RhinoCommon 执行，再以新鲜的 RhinoObserve 核验原生结果。
+计划有效期间不必每步返回主模型。一次批量预审不等于整段计划获得执行授权；每个动作仍经过
+原有权限、快照与 Undo 机制。
+
+Jev 会收到当前已启用 Rhino 操作的精简 `tools_list`，包含已实现 `RhinoAction` 动作类别、
+子操作和 `RhinoInspect` 操作；当前步骤另附精确参数契约。目录中的所有已实现动作及子操作
+均可纳入快速计划，但目录发现不授予权限，Jev 也不能替换已校验的计划动作。数值放样 → 幕墙
+→ 材质等可用 `targets_from` 引用前一步实际生成的 GUID；只读测量、剖切和最近点查询也可
+组合执行。Jev 不生成任意脚本、不改变计划参数。
 
 默认开启，要求 OpenRouter Key 已配置且 Jev 处于 `enforce`。设 `CCAGENT_RHINO_FAST=0`
 可关闭。导出、删除、覆盖、布尔、撤销和 Grasshopper 也可列入快速计划；每一步仍经过
 专用 Jev 与中央权限门禁。Default/Auto 下高影响步骤需要确认；若后台任务无法弹出确认，
 序列会在该步骤执行前交回 Agent/用户。Full Mode 遵循上面的权限边界。
-低置信度、缺失评分、Jev 不可用、观察过期、文档变化或工具失败时立即交回主模型/用户；
-不降低阈值、不自动重试建模、不自动回滚。每段最多 8 步，执行超过 90 秒后不再启动下一步。
+预审失效时先对当前步骤重新请求 Jev；若复审仍低置信度、缺失评分、超时或不可用，
+或观察过期、文档变化、权限拒绝、原生核验失败，则交回主模型/用户。
+不降低阈值、不自动重试建模、不自动回滚。每段最多 15 步，
+执行超过 90 秒后不再启动下一步。
 
 同一 agent 会话内，同一 `plan_id` 只执行一次（包括部分失败），重试返回原记录。
 报告区分 `completed_steps`、`executed_steps` 和可能部分修改的 `uncertain_steps`，
 后续计划只能包含尚未执行且已核实的工作。报告和 Jev 耗时写入桌面项目 `reports/fast-*.json`。
+每个建模阶段结束时对齐视角，用 `RhinoObserve(capture:true, vision_analysis:true)` 将当前视口的
+视觉证据与参考图规格比较，只针对观察到的偏差编制下一段计划。`RhinoSequence.capture_final`
+只保存截图，不提供视觉分析。几何和视觉验收后，再单独导出选定对象至 `.3dm`，核验文件路径、
+文件及对象集合。Full Mode（`/mode full`）跳过 Rhino 的普通人工确认，但仍经过 Jev、
+中央门禁、本地校验和原生结果核验。
 示例请求：**“用 Jev 快速通道完成塔体放样、幕墙和材质，导出前再向我确认。”**
 
 验证命令：`npm run test:rhino-fast`；可选的 `npm run test:rhino-fast-live` 使用真实

@@ -110,8 +110,14 @@ export interface ToolContext {
    * treats it as an execution gate, never as executable model-authored data.
    */
   rhinoJevDecision?: unknown;
+  /** Runtime-only Jev preflight for independent steps of a RhinoSequence. */
+  preflightRhinoFastBatch?: (steps: Array<{ id: string; action: string; parameters: Record<string, unknown> }>, observationId: string) => Promise<{
+    decisions: Record<string, unknown>; durationMs: number;
+  }>;
   /** Runtime-only capability: every nested step still goes through the central gate and hooks. */
-  runRhinoFastTool?: (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>) => Promise<{
+  runRhinoFastTool?: (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>, preapproval?: {
+    action: string; parameters: Record<string, unknown>; observationId: string; intent?: string; decision: unknown;
+  }) => Promise<{
     result: ToolResult; rawResult?: ToolResult; jevDecision?: unknown; toolDispatched?: boolean;
   }>;
   /**

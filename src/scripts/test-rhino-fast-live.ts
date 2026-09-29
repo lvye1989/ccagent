@@ -1,6 +1,7 @@
 /** Opt-in read-only real LLM -> RhinoSequence -> Jev -> native inspection acceptance. */
 import { loadEnv } from "../utils/loadEnv.js";
 await loadEnv();
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "1";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { observeRhino } from "../tools/rhinoBackend.js";
@@ -46,6 +47,7 @@ assert.equal(calls[0].toolName, "RhinoSequence");
 assert.ok(!calls[0].result?.isError, String(calls[0].result?.content));
 const receipt = JSON.parse(String(calls[0].result?.content));
 assert.equal(receipt.status, "completed"); assert.equal(receipt.completed_steps.length, 3);
-assert.equal(receipt.metrics.jev_calls, 3); assert.equal(receipt.metrics.llm_round_trips_inside_sequence, 0);
+assert.equal(receipt.metrics.jev_calls, 1); assert.equal(receipt.metrics.jev_batch_calls, 1);
+assert.equal(receipt.batch_preflight.reused_steps.length, 3); assert.equal(receipt.metrics.llm_round_trips_inside_sequence, 0);
 assert.ok(receipt.steps.every((step: any) => step.jev.available && step.jev.mode === "enforce"));
 console.log(JSON.stringify({ passed: true, reportPath, metrics: receipt.metrics, documentUnchanged: true, overallMs: Date.now() - started }, null, 2));

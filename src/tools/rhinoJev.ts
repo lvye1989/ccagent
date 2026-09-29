@@ -34,7 +34,7 @@ export const RHINO_FAST_ACTIONS = ["inspect", ...RHINO_ACTIONS] as const;
 export type RhinoActionName = typeof RHINO_ACTIONS[number];
 export type RhinoJevProposedAction = RhinoActionName | "inspect";
 export type RhinoJevRoute = "rhino_api" | "computer_use" | "ask_user";
-export type RhinoJevNextAction = RhinoActionName | "inspect";
+export type RhinoJevNextAction = RhinoActionName | "inspect" | "handoff";
 export type RhinoJevMode = "off" | "shadow" | "enforce";
 
 const LEGACY_OPERATIONS: Partial<Record<RhinoJevProposedAction, readonly string[]>> = {
@@ -120,6 +120,18 @@ export interface RhinoJevDecision {
   redirectToComputerUse?: boolean;
   summary: string;
   durationMs?: number;
+  source?: "batch" | "single";
+}
+
+export interface RhinoJevBatchStep {
+  id: string;
+  action: RhinoJevProposedAction;
+  parameters: Record<string, unknown>;
+}
+
+export interface RhinoJevBatchResult {
+  decisions: Record<string, RhinoJevDecision>;
+  durationMs: number;
 }
 
 function envBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -241,6 +253,7 @@ export function buildRhinoJevRequest(
   const availableCatalog = RHINO_TOOL_CATALOG.filter(entry => registeredRhinoTools.includes(entry.tool));
   const nextActionCriteria: Record<string, string> = {
     inspect: "Observe Rhino again only when document, target, selection, units, or command state is insufficient or stale. Invalid proposed parameters require correction or ask_user, not repeated observation.",
+    handoff: "Do not execute the proposed step; return to the main model or user for a corrected plan or missing design choice.",
   };
   for (const candidate of (fast ? [action] : availableCatalog.map(entry => entry.action).filter(candidate => candidate !== "inspect" || action === "inspect"))) {
     nextActionCriteria[candidate] = candidate === action
@@ -331,6 +344,101 @@ export function buildRhinoJevRequest(
   };
 }
 
+/** One Decisions request for separately named judgments against one observed document. */
+export function buildRhinoJevBatchRequest(
+  steps: RhinoJevBatchStep[],
+  observation: RhinoJevObservation,
+  messages: MessageParam[] = [],
+  manifest?: EnabledToolManifest,
+): JevDecisionRequest {
+  if (steps.length < 2 || steps.length > 15 || new Set(steps.map(step => step.id)).size !== steps.length) {
+    throw new Error("Rhino Jev batch requires 2-15 uniquely named steps");
+  }
+  const requests = steps.map(step => buildRhinoJevRequest(step.action, step.parameters, observation, messages, true, manifest));
+  const firstState = requests[0].state as Record<string, any>;
+  const questions: JevDecisionRequest["questions"] = {};
+  const stepStates = requests.map((request, index) => {
+    const state = request.state as Record<string, any>;
+    for (const [name, question] of Object.entries(request.questions)) {
+      questions[`s${index}_${name}`] = {
+        ...question,
+        instructions: `Judge only the \`steps.s${index}\` field (id=${steps[index].id}); do not transfer another step's answer. ${question.instructions}`,
+      };
+    }
+    return {
+      id: steps[index].id,
+      order: index,
+      action: state.proposed_action,
+      tool: state.tool,
+      parameters: state.proposed_parameters,
+      parameter_contract: state.parameter_contract,
+      operation_note: state.operation_note,
+      target_note: state.target_note,
+      additive_only: state.additive_only,
+      action_targets: state.observation.action_targets,
+      target_summary: state.observation.target_summary,
+    };
+  });
+  return {
+    state: {
+      security_note: firstState.security_note,
+      architecture: firstState.architecture,
+      recent_user_context: firstState.recent_user_context,
+      observation: {
+        observation_id: firstState.observation.observation_id,
+        captured_at: firstState.observation.captured_at,
+        document: firstState.observation.document,
+        layers: firstState.observation.layers,
+        selection: firstState.observation.selection,
+        observed_object_count: firstState.observation.observed_object_count,
+        objects_truncated: firstState.observation.objects_truncated,
+        command: firstState.observation.command,
+        undo: firstState.observation.undo,
+      },
+      tools_list: {
+        ...firstState.tools_list,
+        selected_tool: "RhinoSequence",
+        selected_action: "sequence_batch",
+        allowed_actions: [...new Set(steps.map(step => step.action))],
+        note: "Judge each exact indexed step independently. A verdict cannot authorize a substitute operation or skip the central permission gate.",
+      },
+      steps: Object.fromEntries(stepStates.map((step, index) => [`s${index}`, step])),
+    },
+    questions,
+  };
+}
+
+export async function decideRhinoSequenceBatchWithJev(
+  steps: RhinoJevBatchStep[],
+  observation: RhinoJevObservation,
+  messages: MessageParam[] = [],
+  signal?: AbortSignal,
+  manifest?: EnabledToolManifest,
+): Promise<RhinoJevBatchResult> {
+  const config = getRhinoJevConfig();
+  if (!config.enabled || config.mode !== "enforce") throw new Error("Rhino Jev batch requires enforce mode");
+  const started = Date.now();
+  let response: JevDecisionResponse;
+  try {
+    response = await callOpenRouterJev(buildRhinoJevBatchRequest(steps, observation, messages, manifest), {
+      apiKey: config.apiKey, endpoint: config.endpoint, model: config.model, timeoutMs: config.timeoutMs, signal,
+    });
+  } catch (error) {
+    throw new Error(`Rhino Jev batch preflight failed: ${cleanError(error)}`);
+  }
+  const decisions: Record<string, RhinoJevDecision> = {};
+  for (const [index, step] of steps.entries()) {
+    const prefix = `s${index}_`;
+    const answers = Object.fromEntries(Object.entries(response.answers)
+      .filter(([key]) => key.startsWith(prefix)).map(([key, answer]) => [key.slice(prefix.length), answer]));
+    const decision = interpretRhinoJevResponse({ ...response, answers }, step.action, config, step.parameters);
+    decision.source = "batch";
+    decision.summary += `, batch_step=${step.id}`;
+    decisions[step.id] = decision;
+  }
+  return { decisions, durationMs: Date.now() - started };
+}
+
 function choice(response: JevDecisionResponse, key: string): JevChoiceAnswer | undefined {
   const answer = response.answers[key];
   return answer?.type === "choice" ? answer : undefined;
@@ -351,7 +459,7 @@ function isRoute(value: string | undefined): value is RhinoJevRoute {
 }
 
 function isNextAction(value: string | undefined): value is RhinoJevNextAction {
-  return value === "inspect" || (RHINO_ACTIONS as readonly string[]).includes(value ?? "");
+  return value === "inspect" || value === "handoff" || (RHINO_ACTIONS as readonly string[]).includes(value ?? "");
 }
 
 export function interpretRhinoJevResponse(
@@ -365,7 +473,7 @@ export function interpretRhinoJevResponse(
   const rawRoute = routeAnswer?.choice;
   const rawNext = nextAnswer?.choice;
   const route: RhinoJevRoute = isRoute(rawRoute) ? rawRoute : "ask_user";
-  const nextAction = isNextAction(rawNext) ? rawNext : "inspect";
+  const nextAction = isNextAction(rawNext) ? rawNext : "handoff";
   const routeConfidence = confidence(routeAnswer);
   // Ignore an unexpected/legacy target_valid answer for target-less actions.
   // This prevents an old provider response or cached request shape from
@@ -493,6 +601,7 @@ export async function decideRhinoActionWithJev(
       },
     );
     const decision = interpretRhinoJevResponse(response, action, config, parameters);
+    decision.source = "single";
     decision.durationMs = Date.now() - started;
     decision.summary += `, latency_ms=${decision.durationMs}`;
     return decision;

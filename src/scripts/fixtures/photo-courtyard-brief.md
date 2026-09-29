@@ -30,9 +30,9 @@ Rhino 当前是 Meters。已有 23 个对象必须全部保留，禁止改变、
 
 ## 工具组织与材质
 
-尽量用 RhinoSequence 分批 4-8 步执行已确定的 create_geometry、transform、set_layer、set_material 操作。Jev 在序列内决定继续，权限回调仍核对每一步。每批最多8步。不同批次与工具错误后重新观察，复用真正已创建 GUID，禁止重复成功几何。
+尽量用 RhinoSequence 分批执行已确定的 create_geometry、transform、set_layer、set_material 操作，通常每批 4–8 步，最多 15 步。先按 Schema、单位、现有 GUID 和依赖校验计划；Jev 对状态稳定的步骤批量预审，依赖实际生成 GUID 的步骤在绑定后复审，权限回调仍核对每一步。不同批次与工具错误后重新观察，复用真正已创建 GUID，只规划剩余工作，禁止重复成功几何。
 
-平屋面/斜屋面可用闭合3/4点 polyline + surface operation:planar 形成面；surface 不在 Sequence 白名单，必须用普通 RhinoAction 单独执行。矩形截面薄板也可 box 后 rotate 构造；顶部方盒可以先做 box再绕中心 Z轴45度 rotate，注意不要做实心白墙挡住下面玻璃入口。先用 RhinoInspect capabilities 了解不熟悉的操作。
+平屋面/斜屋面可用闭合3/4点 polyline + surface operation:planar 形成面；surface 已可纳入 Sequence，但仍需先用 RhinoInspect capabilities 核对不熟悉操作的 Schema。矩形截面薄板也可 box 后 rotate 构造；顶部方盒可以先做 box再绕中心 Z轴45度 rotate，注意不要做实心白墙挡住下面玻璃入口。
 
 按组赋材质，建议：白墙[226,229,224] opacity:1；灰石与边框[48,56,58] opacity:1；屋顶[78,84,84] opacity:1；玻璃[85,137,151] opacity:0.42；水[48,101,102] opacity:0.7；地面[137,140,135]；树冠[47,85,42]。不要求复杂贴图/照片级渲染。构造辅助曲线放 PhotoCourt_Helper 图层，可仅隐藏新辅助对象；不能隐藏旧对象。新模型最终按白墙/屋顶/边框/玻璃/水/地面/景观分层，避免几百次逐构件改材质。
 
@@ -40,6 +40,6 @@ Rhino 当前是 Meters。已有 23 个对象必须全部保留，禁止改变、
 
 ## 验收及交付
 
-最后 RhinoObserve 确认新对象、单位、包围盒；RhinoInspect measure 检查新增几何合法性。用 set_view 对本任务所有非辅助对象 direction:[0,-1,0.12] projection:parallel display_mode:rendered、isolate:false，capture:true 保存正面预览；再 direction:[0.65,-1,0.30] 保存斜视预览。如果 rendered 不能显示材质，用 shaded 并如实报告。
+每个建模阶段后用 RhinoObserve 确认新对象、单位、包围盒；RhinoInspect measure 检查新增几何合法性。用 set_view 对本任务所有非辅助对象 direction:[0,-1,0.12] projection:parallel display_mode:rendered、isolate:false，随后 RhinoObserve(capture:true,vision_analysis:true) 保存并分析正面预览；再用 direction:[0.65,-1,0.30] 保存并分析斜视预览。对照前述四视角约束，只修复可观察到的偏差。如果 rendered 不能显示材质，用 shaded 并如实报告。几何与视觉验收后再单独导出 .3dm，核验文件和对象集合。
 
 导出父级指定的唯一 photo-courtyard.3dm，operation:export，target_guids 必须只包含本次新建筑/水院/景观实际对象，不包括旧模型和辅助曲线；overwrite:false。父级已有用户生成模型的授权，会核对路径和对象。别无目标地导出整个旧文档。最终报告真实新对象数、图层、预览路径、导出路径以及哪些细节仅近似。两张最终预览路径都写在报告中，以防自动清理掉。
