@@ -20,6 +20,7 @@
  */
 
 import { findSkill } from "../services/skills/registry.js";
+import { isSkillEnabled } from "../services/skills/preferences.js";
 import { isAgentSkillsEnabled } from "../utils/agentSkillsEnabled.js";
 import type { Skill } from "../types/types.js";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
@@ -105,6 +106,7 @@ export const skillTool: Tool = {
     }
 
     const skill = findSkill(name);
+    if (skill && !isSkillEnabled(name)) return { content: `Skill '${name}' is closed. Enable it in Skills before invoking it.`, isError: true };
     if (!skill) {
       return {
         content: `Error: skill "${name}" not found. Run with --dump-system-prompt to see the available list.`,

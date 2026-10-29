@@ -39,6 +39,8 @@ export interface BuildSystemPromptOptions {
   cwd: string;
   additionalInstructions?: string;
   userQuery?: string;
+  temporaryChat?: boolean;
+  agentTeamsAllowed?: boolean;
 }
 
 // Identity framing — always present, regardless of output style.
@@ -127,8 +129,8 @@ function formatEnvironmentContext(context: RuntimeEnvironmentContext): string {
 }
 
 export async function buildSystemPrompt(options: BuildSystemPromptOptions): Promise<string[]> {
-  const ignoreMemory = options.userQuery ? shouldIgnoreMemory(options.userQuery) : false;
-  const memoryDir = await ensureMemoryDirExists(options.cwd);
+  const ignoreMemory = options.temporaryChat || (options.userQuery ? shouldIgnoreMemory(options.userQuery) : false);
+  const memoryDir = options.temporaryChat ? null : await ensureMemoryDirExists(options.cwd);
   const [environmentContext, agentMdContext, memoryEntrypoint, language] = await Promise.all([
     getRuntimeEnvironmentContext(options.cwd),
     loadAgentMdContext(options.cwd),
@@ -148,8 +150,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions): Prom
     SYSTEM_PROMPT_STATIC_END,
   ];
 
-  const memorySections = [
-    ...formatMemorySystemLocation(memoryDir),
+  const memorySections = options.temporaryChat ? ["This is a temporary chat. Do not read or write project memory or retain this conversation for future chats."] : [
+    ...formatMemorySystemLocation(memoryDir!),
     ...buildMemoryPromptInstructions(),
     ...buildMemoryTypeGuidance(),
     ...buildMemoryExclusionGuidance(),
@@ -182,7 +184,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions): Prom
   // `teammatePromptAddendum.ts`. We intentionally show it ONLY while a
   // team is active so the model doesn't drown in team-coordination
   // instructions during a single-agent conversation.
-  const teamReminder = formatTeamSystemReminder();
+  const teamReminder = options.agentTeamsAllowed === false ? "" : formatTeamSystemReminder();
 
   // Stage 23: the active output-style prompt, injected as a labelled
   // section. Placed in the dynamic block (not static) because the user can

@@ -241,6 +241,11 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     cwd: params.cwdOverride ?? params.parentToolContext.cwd,
     abortSignal: params.abortSignal,
     sessionId: subSessionId,
+    temporaryChat: params.parentToolContext.temporaryChat,
+    agentTeamsAllowed: params.parentToolContext.agentTeamsAllowed,
+    ...(params.parentToolContext.openUrlInWebPanel
+      ? { openUrlInWebPanel: params.parentToolContext.openUrlInWebPanel }
+      : {}),
     // Sub-agent reads its own mode — isolating plan-mode transitions
     // (Enter/ExitPlanMode) from the parent's mode state.
     getPermissionMode: () => subPermissionMode,

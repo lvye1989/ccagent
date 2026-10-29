@@ -19,6 +19,7 @@
 
 import type { Skill } from "../../types/types.js";
 import { isAgentSkillsEnabled } from "../../utils/agentSkillsEnabled.js";
+import { isSkillEnabled } from "./preferences.js";
 
 const dynamic = new Map<string, Skill>();
 const conditional = new Map<string, Skill>();
@@ -53,7 +54,7 @@ export function isSkillsInitialized(): boolean {
  */
 export function getModelVisibleSkills(): Skill[] {
   if (!isAgentSkillsEnabled()) return [];
-  return [...dynamic.values()].filter((s) => !s.frontmatter.disableModelInvocation);
+  return [...dynamic.values()].filter((s) => isSkillEnabled(s.name) && !s.frontmatter.disableModelInvocation);
 }
 
 /**
@@ -64,8 +65,11 @@ export function getModelVisibleSkills(): Skill[] {
  */
 export function getAllUserInvocableSkills(): Skill[] {
   if (!isAgentSkillsEnabled()) return [];
-  return [...dynamic.values(), ...conditional.values()];
+  return getAllSkills().filter((s) => isSkillEnabled(s.name));
 }
+
+/** Inventory must retain disabled entries so the user can reopen them. */
+export function getAllSkills(): Skill[] { return [...dynamic.values(), ...conditional.values()]; }
 
 /** Raw lookup for diagnostics/closed-command detection; execution must check the switch. */
 export function findSkill(name: string): Skill | undefined {
@@ -78,7 +82,7 @@ export function findSkill(name: string): Skill | undefined {
  * UI ("activated skill X").
  */
 export function activateConditional(name: string): boolean {
-  if (!isAgentSkillsEnabled()) return false;
+  if (!isAgentSkillsEnabled() || !isSkillEnabled(name)) return false;
   const skill = conditional.get(name);
   if (!skill) return false;
   conditional.delete(name);
@@ -89,7 +93,7 @@ export function activateConditional(name: string): boolean {
 /** Iterate over the conditional skills (read-only view). */
 export function listConditionalSkills(): Skill[] {
   if (!isAgentSkillsEnabled()) return [];
-  return [...conditional.values()];
+  return [...conditional.values()].filter((s) => isSkillEnabled(s.name));
 }
 
 /** Drop everything — only used by tests / hot reload. */

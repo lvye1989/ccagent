@@ -67,6 +67,7 @@ export const SettingsSchema = z.looseObject({
   agentSkills: z.boolean().optional(),
   // Per-definition user preference; absent names remain Open.
   agentStates: z.record(z.string(), z.enum(["open", "close"])).optional(),
+  skillStates: z.record(z.string(), z.enum(["open", "close"])).optional(),
   allow: z.array(PermissionRule).optional(),
   deny: z.array(PermissionRule).optional(),
   ask: z.array(PermissionRule).optional(),

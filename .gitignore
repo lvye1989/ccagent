@@ -14,3 +14,5 @@ src/scripts/__dbg*.ts
 .ccagent
 rhino/output/
 rhino/_diag/
+output/playwright/
+deliverables/

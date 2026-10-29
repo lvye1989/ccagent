@@ -66,6 +66,13 @@ export interface ToolContext {
    * `agentId ?? getSessionId()` lookup pattern in `appState.todos[todoKey]`.
    */
   sessionId?: string;
+  /** Web frontend's visible side panel. Omitted by the CLI. */
+  openUrlInWebPanel?: (url: string, signal?: AbortSignal) => Promise<boolean>;
+  /** Temporary Web chat: suppress durable conversation memory. */
+  temporaryChat?: boolean;
+  /** Web conversation preference; undefined retains the CLI's global default. */
+  agentTeamsAllowed?: boolean;
+  sessionInstructions?: string;
 
   /**
    * Stage 26 — id of the active user turn. File-history snapshots bind to

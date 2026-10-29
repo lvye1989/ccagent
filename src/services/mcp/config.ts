@@ -45,7 +45,7 @@ export interface McpConfigLoadResult {
  * loop (config.ts:1327-1373); we accept three transport types: stdio (default
  * if `type` omitted), `http`, and `sse`.
  */
-function validateServerConfig(
+export function validateServerConfig(
   name: string,
   raw: unknown,
   scope: string,

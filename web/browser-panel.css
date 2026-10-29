@@ -1,0 +1,33 @@
+.thread-view { position: relative; }
+.thread-head { position: relative; }
+.thread-head h1 { padding-right: 80px; }
+.thread-browser-button {
+  position: absolute; right: max(28px, calc((100% - 770px) / 2)); top: 37px;
+  height: 31px; padding: 0 10px; border: 1px solid #e7e7e9; border-radius: 9px;
+  background: #fff; color: #55565d; font-size: 12px; cursor: pointer;
+}
+.thread-browser-button:hover, .thread-browser-button[aria-expanded="true"] { background: #f3f3f4; color: #222; }
+.browser-panel {
+  display: flex; flex-direction: column; width: clamp(365px, 43vw, 680px); flex: 0 0 clamp(365px, 43vw, 680px);
+  min-width: 0; min-height: 0; background: #fff; border-left: 1px solid #e9e9ec; color: #292a30;
+}
+.browser-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px 9px; }
+.browser-panel-head strong { display: block; font-size: 14px; font-weight: 600; }
+.browser-panel-head small { display: block; max-width: 400px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b8b92; font-size: 11px; }
+.browser-icon-button { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: #66676e; font-size: 20px; cursor: pointer; }
+.browser-icon-button:hover { background: #f0f0f2; color: #222; }
+.browser-address { display: flex; gap: 7px; padding: 0 13px 9px; }
+.browser-address input { width: 100%; min-width: 0; height: 33px; padding: 0 10px; border: 1px solid #e2e2e6; border-radius: 8px; outline: 0; color: #333; background: #f8f8f9; font: 12px Arial, "Segoe UI", sans-serif; }
+.browser-address input:focus { border-color: #aaaab3; background: #fff; }
+.browser-address button { flex: 0 0 auto; padding: 0 12px; border: 0; border-radius: 8px; background: #222329; color: #fff; font-size: 12px; cursor: pointer; }
+.browser-controls { display: flex; align-items: center; gap: 2px; padding: 2px 10px 5px; border-bottom: 1px solid #eeeef0; }
+.browser-controls .browser-icon-button { font-size: 17px; }
+.browser-controls span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #92929a; font-size: 11px; }
+.browser-frame-wrap { position: relative; flex: 1; min-height: 0; background: #fff; }
+.browser-frame-wrap iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+.browser-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #9999a1; font-size: 13px; text-align: center; }
+.browser-hint { margin: 0; padding: 8px 13px 10px; border-top: 1px solid #eeeef0; color: #9999a1; font-size: 11px; line-height: 1.4; }
+.message-link { display: inline; padding: 0; border: 0; background: none; color: #3157a6; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; overflow-wrap: anywhere; }
+.message-link:hover { color: #1e3b75; }
+@media (max-width: 1120px) { .browser-panel { width: min(48vw, 520px); flex-basis: min(48vw, 520px); } .thread-browser-button { right: 30px; } }
+@media (max-width: 850px) { .browser-panel { position: absolute; inset: 0 0 0 auto; z-index: 8; width: min(570px, calc(100% - 28px)); flex-basis: auto; box-shadow: -16px 0 45px #0002; } }

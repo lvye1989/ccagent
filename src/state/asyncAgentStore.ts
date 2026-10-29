@@ -105,11 +105,12 @@ export interface RegisterAsyncAgentInit {
  * Register a fresh background sub-agent. Returns the entry (caller usually
  * wants the AbortController so it can pass it into `runChildAgent`).
  *
- * Throws if the same agentId is already registered — agentIds are random
- * short strings, a collision means a programming bug we want to surface.
+ * Ordinary random ids must never collide. Named teammates use stable
+ * name@team ids and may be respawned after the previous run has finished.
  */
 export function registerAsyncAgent(init: RegisterAsyncAgentInit): AsyncAgentEntry {
-  if (entries.has(init.agentId)) {
+  const previous = entries.get(init.agentId);
+  if (previous && !(init.teammateName && previous.teammateName === init.teammateName && (previous.status === "completed" || previous.status === "failed"))) {
     throw new Error(`Async agent '${init.agentId}' is already registered.`);
   }
   const entry: AsyncAgentEntry = {

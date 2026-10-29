@@ -19,9 +19,9 @@ function parseStates(raw: unknown): Record<string, McpServerState> {
 }
 
 /** User-wide overrides include plugin MCPs and never copy their credentials. */
-export async function loadMcpPreferences(): Promise<void> {
+export async function loadMcpPreferences(force = false): Promise<void> {
   const file = getUserSettingsPath();
-  if (loadedPath === file && loading) return loading;
+  if (!force && loadedPath === file && loading) return loading;
   loadedPath = file;
   loading = (async () => {
     const { raw } = await readJsonSettingsFile<Record<string, unknown>>(file);

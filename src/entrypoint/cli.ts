@@ -33,6 +33,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (process.argv[2] === "web") {
+    const { runWebServer } = await import("./web.js");
+    await runWebServer(process.argv.slice(3));
+    return;
+  }
+
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     console.log(`
 CCAGENT v${VERSION} — Terminal-native agentic coding system
@@ -40,6 +46,7 @@ CCAGENT v${VERSION} — Terminal-native agentic coding system
 Usage:
   ccagent [options]            (long alias: ccagent)
   ccagent init [--skip-test]   Create user settings, store keys, test models
+  ccagent web [--port 4173]   Start the local web interface
 
 Options:
   -v, --version               Print version and exit

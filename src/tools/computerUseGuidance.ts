@@ -1,5 +1,5 @@
 export const BROWSER_SEARCH_FAST_PATH_GUIDANCE = [
-  "When BrowserSearch is available, for an ordinary public-web search or one explicit direct URL you MUST use BrowserSearch first; it needs no ComputerObserve snapshot and stops after one Jev-reviewed OS browser launch.",
+  "When BrowserSearch is available, for an ordinary public-web search or one explicit direct URL you MUST use BrowserSearch first; it needs no ComputerObserve snapshot and stops after one Jev-reviewed visible browser launch. Web conversations show the destination in their side panel; CLI sessions use the OS browser.",
   "Use WebSearch instead when the user needs facts, sources, or a summary rather than a visible browser page.",
   "After BrowserSearch, switch to ComputerObserve and the existing ComputerActionGroup/ComputerAction path only when the user also requested interaction with the opened page, or when the direct destination is not known safely.",
   "A successful BrowserSearch proves that the OS accepted the normalized URL, not that the page contents loaded; report that distinction and do not add a redundant screenshot/Qwen check for an open/search-only request.",

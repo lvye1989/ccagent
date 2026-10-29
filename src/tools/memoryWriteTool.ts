@@ -23,6 +23,7 @@ export const memoryWriteTool: Tool = {
     additionalProperties: false,
   },
   async call(input, context): Promise<ToolResult> {
+    if (context.temporaryChat) return { content: "Temporary chats cannot save project memory.", isError: true };
     const name = typeof input.name === "string" ? input.name.trim() : "";
     const description = typeof input.description === "string" ? input.description.trim() : "";
     const type = input.type;

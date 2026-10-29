@@ -23,6 +23,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import dotenv from "dotenv";
+import { getCCAgentPath } from "./paths.js";
+import { WEB_SECRET_FILE, WEB_SECRET_PREFIX } from "./webSecrets.js";
 import { isProjectTrusted } from "../config/globalState.js";
 import {
   getUserSettingsPath,
@@ -99,6 +101,14 @@ export async function loadEnv(): Promise<void> {
     userEnv.CCAGENT_ENV_FILE = path.resolve(path.dirname(userSettingsPath), userEnv.CCAGENT_ENV_FILE.trim());
   }
   applyValues(userEnv, false, true);
+  // Web-created credentials are environment-backed in both entrypoints.
+  // Only our generated namespace is accepted; this file cannot set runtime flags.
+  try {
+    const secrets = dotenv.parse(fs.readFileSync(getCCAgentPath(WEB_SECRET_FILE)));
+    applyValues(Object.fromEntries(Object.entries(secrets).filter(([key]) => key.startsWith(WEB_SECRET_PREFIX))), false);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Cannot read the Web credential store.");
+  }
   // Pin the credential location BEFORE any project-owned data is considered.
   const configuredEnvFile = process.env.CCAGENT_ENV_FILE?.trim();
   const trusted = await isProjectTrusted(cwd);

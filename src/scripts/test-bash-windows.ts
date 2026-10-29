@@ -9,7 +9,7 @@ import { globTool } from "../tools/globTool.js";
 import { grepTool } from "../tools/grepTool.js";
 import { powerShellTool } from "../tools/powerShellTool.js";
 import { toolResultText } from "../tools/Tool.js";
-import { resolveBashExecutable } from "../utils/bashExecutable.js";
+import { resolveBashExecutable, resolvePosixBashExecutable } from "../utils/bashExecutable.js";
 import { readTrustedStringArraySetting } from "../utils/settings.js";
 import { setAdditionalAllowedRoots } from "../tools/pathUtils.js";
 import { getToolTempRoot } from "../utils/paths.js";
@@ -43,6 +43,10 @@ async function main(): Promise<void> {
   }
   if (savedShell === undefined) delete process.env.SHELL;
   else process.env.SHELL = savedShell;
+
+  assert(resolvePosixBashExecutable("/bin/zsh") === "bash", "macOS zsh login shell does not replace Bash");
+  assert(resolvePosixBashExecutable("/opt/homebrew/bin/bash") === "/opt/homebrew/bin/bash", "an explicit Bash login shell is preserved");
+  assert(resolvePosixBashExecutable(undefined) === "bash", "missing POSIX login shell falls back to Bash");
 
   const executable = resolveBashExecutable();
   if (process.platform === "win32") {

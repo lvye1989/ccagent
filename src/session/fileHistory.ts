@@ -107,6 +107,7 @@ function isEnvTruthy(value: string | undefined): boolean {
 export async function configureFileHistory(
   projectCwd: string,
   currentSessionId: string,
+  temporary = false,
 ): Promise<void> {
   cwd = projectCwd;
   sessionId = currentSessionId;
@@ -118,6 +119,7 @@ export async function configureFileHistory(
     setting = undefined;
   }
   enabled =
+    !temporary &&
     setting !== false &&
     !isEnvTruthy(process.env.CCAGENT_DISABLE_CHECKPOINTING);
 }

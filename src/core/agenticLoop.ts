@@ -363,7 +363,7 @@ async function runOneToolBlock(
   let toolDispatched = false;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
   const tool = findEnabledToolByName(block.name);
-  if (!tool) {
+  if (!tool || (context.agentTeamsAllowed === false && (["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(block.name) || (block.name === "Agent" && Boolean(toolInput.team_name || toolInput.name))))) {
     const result: ToolResult = {
       content: `Error: Tool "${block.name}" is unknown or was disabled after the model selected it. Refresh the enabled tools list before retrying.`,
       isError: true,
@@ -1004,7 +1004,7 @@ async function runOneToolBlock(
     // that was resolved before those awaits; require the same tool instance to
     // still be enabled at the final execution boundary.
     const dispatchTool = findEnabledToolByName(block.name);
-    if (!dispatchTool || dispatchTool !== tool) {
+    if (!dispatchTool || dispatchTool !== tool || (context.agentTeamsAllowed === false && (["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(block.name) || (block.name === "Agent" && Boolean(toolInput.team_name || toolInput.name))))) {
       if (block.name === "BrowserSearch") revokeBrowserSearchExecution(block.id, context.sessionId);
       const result: ToolResult = {
         content: `Tool "${block.name}" changed or was disabled while its execution was being reviewed. Nothing was dispatched; refresh the enabled tools list and retry.`,

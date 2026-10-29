@@ -12,6 +12,7 @@
 
 import { loadAllSkills } from "./loadSkillsDir.js";
 import { setSkills } from "./registry.js";
+import { bootstrapSkillStates } from "./preferences.js";
 
 export interface SkillsBootstrapResult {
   skillCount: number;
@@ -20,6 +21,7 @@ export interface SkillsBootstrapResult {
 }
 
 export async function bootstrapSkills(cwd: string): Promise<SkillsBootstrapResult> {
+  await bootstrapSkillStates();
   const { skills, warnings } = await loadAllSkills(cwd);
   setSkills(skills);
 

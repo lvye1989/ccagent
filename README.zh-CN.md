@@ -96,6 +96,10 @@ ccagent init
 ccagent
 ```
 
+在本地源码目录运行 `npm run build`、`npm run web`，即可打开终端打印的本机 Web 地址。
+安装后的命令可在任意目录运行 `ccagent web --workspace <项目目录>`。
+Web 与终端共用任务引擎和会话存储，详见 [web/README.md](./web/README.md)。
+
 `ccagent init` 会根据当前账户自动创建 `~/.ccagent/.env` 和
 `~/.ccagent/settings.json`，交互式配置 DeepSeek、可选的 Qwen 视觉模型与
 Jev，并询问是否安装完整的 Google Workspace 官方 MCP 套件。向导会对已配置

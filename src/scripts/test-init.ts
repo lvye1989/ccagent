@@ -89,6 +89,10 @@ assert(
   "DeepSeek init profile records the provider context window",
 );
 assert(
+  ((mergedSettings.models as Record<string, { model?: string }>)["qwen-plus"]?.model === "${QWEN_PLUS_MODEL:-qwen-plus}"),
+  "Qwen Plus is available as a separate text model profile",
+);
+assert(
   Object.keys(mergedSettings.mcpServers as Record<string, unknown>).filter((name) => name.startsWith("google-")).length === 8,
   "Google Workspace init profile includes all eight official MCP servers",
 );
@@ -138,6 +142,7 @@ try {
   assert(Object.values(googleServers).filter((server) => server.url?.includes("googleapis.com/mcp/v1")).length === 8, "Google Workspace MCP entries use the eight official remote endpoints");
   assert(Object.values(googleServers).every((server) => !server.oauth || (server.oauth.clientIdEnv === "GOOGLE_MCP_CLIENT_ID" && server.oauth.clientSecretEnv === "GOOGLE_MCP_CLIENT_SECRET")), "Google MCP settings reference environment variable names instead of credentials");
   assert(env.QWEN_PROTOCOL === "openai-chat", "Qwen defaults to the verified Chat Completions protocol");
+  assert(env.QWEN_PLUS_MODEL === "qwen-plus", "Qwen Plus text model is configured for CLI and Web");
   assert(env.CCAGENT_COMPUTER_USE_INDICATOR === "1", "init enables the visible Computer Use control indicator by default");
   assert(env.JEV_MODEL === "~typesafe/jev-latest" && env.CCAGENT_JEV_MODE === "enforce", "init enables OpenRouter Jev decisions for Computer Use");
   assert(env.CCAGENT_TOOL_JEV === "1" && env.JEV_TOOL_MODE === "enforce", "init enables Jev as the general Auto Mode tool classifier");

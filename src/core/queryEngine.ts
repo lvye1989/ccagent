@@ -28,6 +28,7 @@ import { getPlanModeAttachment, getPlanModeExitAttachment } from "../context/pla
 import { getTaskMode, setTaskMode } from "../state/taskModeStore.js";
 import { getTaskListId, resetTaskList } from "../state/taskStore.js";
 import { findSkill } from "../services/skills/registry.js";
+import { isSkillEnabled } from "../services/skills/preferences.js";
 import { isAgentSkillsEnabled } from "../utils/agentSkillsEnabled.js";
 import { handleAgentSkillCommand } from "./queryEngine/commands/agentSkill.js";
 import { isAgentEnabled, agentClosedMessage } from "../agents/preferences.js";
@@ -201,6 +202,18 @@ export class QueryEngine {
     return this.currentPermissionMode;
   }
 
+  /** Set the active session mode from an explicit UI selection. */
+  selectSessionPermissionMode(mode: PermissionMode): void {
+    this.setPermissionMode(mode, false);
+  }
+
+  /** Switch the active model for this session after the caller validates a profile. */
+  selectSessionModel(model: string): void {
+    const handle = model.trim();
+    if (!handle) throw new Error("Model handle is required");
+    this.sessionModelOverride = handle;
+  }
+
   /**
    * Re-read permission settings from disk and apply them to this live session.
    * Called by `/config set` so a permission-rule / mode change takes effect on
@@ -298,6 +311,11 @@ export class QueryEngine {
     return true;
   }
 
+  selectSessionTeam(enabled: boolean, instructions: string): void {
+    this.toolContext.agentTeamsAllowed = enabled;
+    this.toolContext.sessionInstructions = instructions;
+  }
+
   async *submitMessage(
     input: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
@@ -386,6 +404,10 @@ export class QueryEngine {
       // and the source's exact XML format for the marker — both matched in
       // ConversationView.
       const skillName = trimmed.slice(1).split(/\s+/, 1)[0];
+      if (!isBuiltinCommandName(skillName) && findSkill(skillName) && !isSkillEnabled(skillName)) {
+        yield { type: "command", kind: "error", message: `Skill '${skillName}' is closed. Enable it in Skills before invoking it.` };
+        return { handled: true };
+      }
       if (!isAgentSkillsEnabled() && !isBuiltinCommandName(skillName) && findSkill(skillName)) {
         yield { type: "command", kind: "error", message: "Agent Skills is closed. Use /agent-skill open to enable skills." };
         return { handled: true };
@@ -427,7 +449,7 @@ export class QueryEngine {
     const [, name, rawArgs] = match;
     if (isBuiltinCommandName(name) || !isAgentSkillsEnabled()) return null;
     const skill = findSkill(name);
-    if (!skill) return null;
+    if (!skill || !isSkillEnabled(name)) return null;
 
     const args = rawArgs?.trim() ?? "";
     const dir = skill.baseDir.split(/[\\/]/).join("/");
@@ -604,6 +626,9 @@ export class QueryEngine {
     const previewSystemParts = await buildSystemPrompt({
       cwd: this.toolContext.cwd,
       userQuery: promptToSubmit,
+      temporaryChat: this.toolContext.temporaryChat,
+      additionalInstructions: this.toolContext.sessionInstructions,
+      agentTeamsAllowed: this.toolContext.agentTeamsAllowed,
     });
     const previewSystemPrompt = renderSystemPrompt(previewSystemParts);
     const activeContextWindow = await this.getActiveContextWindow();
@@ -787,7 +812,7 @@ export class QueryEngine {
         messages: [...this.messages],
         ...(rawDirectUserText ? { directUserTurnText: rawDirectUserText } : {}),
         systemPrompt,
-        getTools: () => getToolsApiParams(this.currentPermissionMode),
+        getTools: () => getToolsApiParams(this.currentPermissionMode).filter((tool) => this.toolContext.agentTeamsAllowed !== false || !["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(tool.name)),
         model: this.getActiveModel(),
         contextWindow: activeContextWindow,
         abortSignal: abortController.signal,
@@ -1111,7 +1136,7 @@ export class QueryEngine {
         // declared profile (helps the user confirm they hit the right one).
         const { profiles } = await loadProfiles(this.toolContext.cwd).catch(() => ({ profiles: emptyProfiles }));
         const matched = profiles[nextModel];
-        this.sessionModelOverride = nextModel;
+        this.selectSessionModel(nextModel);
         yield { type: "model_changed", model: nextModel, source: "session" };
         yield {
           type: "command",
@@ -1135,7 +1160,7 @@ export class QueryEngine {
         return { handled: true };
       case "compact": {
         const focus = args.join(" ").trim();
-        const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd });
+        const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd, temporaryChat: this.toolContext.temporaryChat });
         const manualSystemPrompt = renderSystemPrompt(manualSystemParts);
         const result = await compactMessages(this.messages, focus || undefined, { usage: this.lastCallUsage, usageAnchorIndex: this.usageAnchorIndex, systemPrompt: manualSystemPrompt, model: this.getActiveModel(), contextWindow: await this.getActiveContextWindow(), force: true });
         this.messages = [...result.messages];

@@ -162,6 +162,21 @@ async function main(): Promise<void> {
   assert.match(String(executed.content), /page_load=not independently verified/);
   pass("A granted call performs one opener call and one local window-metadata check only");
 
+  let panelUrl = "";
+  grantBrowserSearchExecution("call-web-panel", input, ordinaryDecision(), {
+    finalPermission: "auto_allowed", sessionId: context.sessionId,
+  });
+  const webPanelResult = await tool.call(input, {
+    ...context, toolUseId: "call-web-panel",
+    openUrlInWebPanel: async (url) => { panelUrl = url; return true; },
+  });
+  assert.equal(webPanelResult.isError, undefined);
+  assert.equal(panelUrl, prepareBrowserSearchInput(input).canonicalUrl);
+  assert.match(String(webPanelResult.content), /browser_surface=web_side_panel/);
+  assert.equal(opened.length, 1, "Web sessions must not launch an OS browser");
+  assert.equal(indicators, 1, "Web panel is already the visible indicator");
+  pass("A granted Web call opens the side panel without launching the OS browser");
+
   const replay = await tool.call(input, context);
   assert.equal(replay.isError, true);
   assert.equal(opened.length, 1);

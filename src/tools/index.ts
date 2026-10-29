@@ -58,6 +58,7 @@ import { agentTeamModeTool } from "./agentTeamModeTool.js";
 import { rhinoActionTool, rhinoObserveTool, rhinoInspectTool } from "./rhinoTools.js";
 import { rhinoSequenceTool } from "./rhinoSequence.js";
 import { mailTool } from "./mailTool.js";
+import { knowledgeSearchTool } from "./knowledgeSearchTool.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 
 const BUILTIN_TOOLS: Tool[] = [
@@ -79,6 +80,7 @@ const BUILTIN_TOOLS: Tool[] = [
   rhinoActionTool,
   rhinoSequenceTool,
   mailTool,
+  knowledgeSearchTool,
   markdownToPdfTool,
   wordToPdfTool,
   pdfToWordTool,

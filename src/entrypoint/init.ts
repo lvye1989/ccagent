@@ -212,6 +212,13 @@ export function buildUserSettings(
   const mcpServers: Record<string, unknown> = { ...objectValue(existing.mcpServers) };
 
   if (input.configureQwen) {
+    nextModels["qwen-plus"] = {
+      ...objectValue(models["qwen-plus"]),
+      protocol: "openai-chat",
+      model: "${QWEN_PLUS_MODEL:-qwen-plus}",
+      baseURL: "${DASHSCOPE_BASE_URL}",
+      apiKey: "${DASHSCOPE_API_KEY}",
+    };
     nextModels["qwen-omni"] = {
       ...objectValue(models["qwen-omni"]),
       protocol: "${QWEN_PROTOCOL:-openai-chat}",
@@ -550,6 +557,7 @@ export async function runInitCommand(
         DASHSCOPE_BASE_URL: qwenBaseURL,
         QWEN_PROTOCOL: "openai-chat",
         QWEN_MODEL: qwenModel,
+        QWEN_PLUS_MODEL: existing.env.QWEN_PLUS_MODEL || "qwen-plus",
         QWEN_TTS_MODEL: existing.env.QWEN_TTS_MODEL || DEFAULT_QWEN_TTS_MODEL,
         QWEN_TTS_VOICE: existing.env.QWEN_TTS_VOICE || DEFAULT_QWEN_TTS_VOICE,
       });

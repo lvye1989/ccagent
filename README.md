@@ -98,6 +98,12 @@ ccagent init
 ccagent
 ```
 
+To use the local web interface from this checkout, run `npm run build` and then
+`npm run web`. Open the printed loopback URL. An installed package can start it
+from any project directory with `ccagent web --workspace <project-directory>`.
+The web UI and terminal CLI share the same agent engine and session storage;
+see [web/README.md](./web/README.md) for details.
+
 `ccagent init` creates `~/.ccagent/.env` and
 `~/.ccagent/settings.json` for the current account, prompts for DeepSeek,
 optional Qwen vision/Jev access, and whether to install the complete official
