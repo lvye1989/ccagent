@@ -1,6 +1,16 @@
 # Web 自定义功能验证
 
-验证日期：2026-10-29（北京时间）。
+验证日期：2026-10-30（北京时间）。
+
+数据可视化：真实 Excel 二进制经 HTTP 上传、解析中文工作表、选择表头并得到精确合计；同时验证 XLS、CSV 引号/换行、JSON、日期、负数/零、空值/非法数值、重复行、合计行、超过预览页的全量 CSV、公式注入防护、ZIP 扩展限制和路径/目录链接隔离。图表取实际统计结果，包含参考图中的指标卡、分布、状态、趋势、交叉图、质量指标和排行。含经纬度时使用打包在本地的 Natural Earth 陆地轮廓，并实际验证 geoRoam 缩放。
+
+`scripts/test-visualization-ui.mjs` 在隔离 DOM 中验证上传字节、空态无虚构数据、字段和筛选、图表点击联动、保存、分析草稿交接、零结果/失败状态、字面渲染和旧目录延迟响应拦截。测试还实际运行 ECharts SVG 引擎、执行导出 HTML 内嵌的引擎和报告脚本，验证四张真实 SVG 图、指标与图例交互，导出文件不依赖 CDN。运行：`node --import tsx scripts/test-visualization-ui.mjs <happy-dom/lib/index.js 的本机路径>`。浏览器视觉检查仍受已有授权限制，离线 DOM 与 SVG 不作为浏览器像素比对。
+
+CLI/Web 与其他文件夹：集成测试切换至含中文及空格的目录，经真实工具调度完成 Write、Edit、PowerShell/Bash 和 Read，再从该目录启动真实 CLI 完成相同操作；旧目录未收到写入。Web 保存的数据集经 CLI AnalyzeData 读取，计算结果与 Web 相同。数据、映射和筛选在服务重启后恢复，并验证另一目录无法访问旧数据集、过期上传被拒绝。
+
+CLI 修复：headless 模式原先跳过 MCP 初始化，现等待共享配置和插件 MCP 工具发现，并在退出时关闭连接。测试由 Web 与 CLI 实际调用同一个 stdio MCP；CLI 子进程结束后 MCP PID 已退出。原先 `process.exit` 在 Windows 数据读取后可触发 libuv 句柄断言；改为设置退出码并自然完成 I/O。回归验证 text/json/stream-json 及完整 600 KB 中文 stdout，不截断输出。
+
+目录设置隔离：Web 切换工作文件夹时重置上一项目的 `/think`、`/effort` 和默认思考状态，再加载新项目设置；否则当新项目未声明这些字段时会保留旧值，与新开 CLI 不一致。集成测试先设置旧项目的高强度和固定预算，切换后实际查询命令，确认恢复新项目默认。
 
 图片/OCR 修复：`test:images` 验证中文及带空格图片路径、越界拒绝、Web/CLI 共用引用语法、三种非 Anthropic 协议的工具结果保留真实图片字节、并行调用 ID、ReadImage 共享模型配置、计划模式权限、取消与确定性失败不重复请求。`test:web-customization` 的模型替身验证 Web 与 CLI 图片输入均进入实际请求、ReadImage 返回文字证据，以及 image_reader 实际调用该工具；`test:agents` 验证第五个内置 Agent 的只读工具范围。旧 providerStream 的 15 项快照及 Responses 完成状态检查仍通过。离线页面测试验证失败轮次不遗留“执行中”工具卡。
 

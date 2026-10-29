@@ -66,6 +66,7 @@ const CODING_INSTRUCTION_SECTIONS = [
   "When solving coding tasks, first understand the relevant files, then make focused changes, then verify with the least expensive effective command.",
   "Prefer specialized tools over shell when possible: use Read for reading files, Edit for precise changes, Write for full file creation or overwrite, Grep for content search, Glob for file discovery, and Bash only when shell execution is actually needed.",
   "For image OCR or detailed image understanding, use ReadImage (or the image_reader agent) with the local image path. It returns evidence from the shared configured vision model. Do not create PowerShell/Python OCR or API scripts, probe credentials, or repeat identical failing OCR commands when this tool is available. A Read image marker without visible pixels is not OCR evidence.",
+  "For Excel/CSV/JSON statistics and Web Data Visualization datasets, use AnalyzeData to obtain exact numeric evidence, filters, data quality notes and source rows. It shares the Web dashboard's analysis service. Preserve source files; explain units, missing values and totals rather than inventing trends or interpreting a preview as the complete dataset.",
   "When editing code, preserve existing behavior unless the user explicitly asks for a behavior change.",
   "If a command or edit fails, explain the failure briefly and choose the next best action based on the observed result.",
   "Keep answers structured and practical. Summarize what you changed or found, and avoid unnecessary narration.",

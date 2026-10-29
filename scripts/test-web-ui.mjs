@@ -54,6 +54,7 @@ globalThis.fetch = async (route, options = {}) => {
     else data = { path: dir, entries: dir ? [{ path: "资料/中文.md", name: "中文.md", size: 12, format: "text" }] : files, nextOffset: null, total: dir ? 1 : files.length };
   }
   else if (route === "/api/workspaces") data = { current: "C:\\offline-project", recent: [], locations: [], nativePickerAvailable: false };
+  else if (route.startsWith("/api/visualization?")) data = { workspace: "C:\\offline-project", datasets: [] };
   else if (route.startsWith("/api/workspaces/browse")) data = { path: "C:\\offline-project", parent: null, breadcrumbs: [], folders: [], total: 0 };
   else if (route === "/api/changes") data = { files: [] };
   else if (route === "/api/models") data = { defaultModel: "fixture", models };
@@ -188,6 +189,10 @@ try {
   await click('[data-view="library"]'); await click("#library-rag");
   await click(action("＋ 添加知识库")); $("edit-rag-id").value = "offline"; $("edit-rag-name").value = "Offline KB"; $("edit-rag-url").value = "https://example.test/retrieve";
   await click(action("保存知识库")); assert(calls.some((c) => c.route === "/api/customize/rag" && c.payload?.id === "offline"));
+  await click('[data-view="visualization"]'); assert(!$("visualization-view").classList.contains("hidden")); assert($("viz-dropzone")); assert($("sidebar").classList.contains("hidden")); assert.equal(location.search, "?view=visualization");
+  assert(calls.some((c) => c.route.startsWith("/api/visualization?workspace=")), "Sidebar entry loads the actual workspace-scoped visualization API");
+  const chartStyles = document.createElement("style"); chartStyles.textContent = await fs.readFile(path.join(root, "web/styles.css"), "utf8") + await fs.readFile(path.join(root, "web/visualization.css"), "utf8"); document.head.append(chartStyles);
+  assert(["#f6f8fe", "rgb(246, 248, 254)"].includes(window.getComputedStyle(document.querySelector(".content")).backgroundColor), "Visualization background overrides the normal content surface");
   console.log("Offline Web DOM: all six feature entries, generation/edit/save dialogs, literal rendering, skill toggles, model selector linkage, team controls, settings and RAG forms passed.");
   console.log("Workspace/composer DOM: search removed with history retained, right-side directory browse, all preview renderers, safe text, reference chips, 7 executable menu actions, keyboard/outside dismissal, uploads, commands/search submission, plan mode and retry preservation passed.");
 } finally { await window.happyDOM.close(); }

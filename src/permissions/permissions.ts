@@ -113,6 +113,7 @@ const DEFAULT_PERMISSION_SETTINGS: PermissionSettings = {
 const PLAN_ALLOWED_TOOLS = new Set([
   "Read",
   "ReadImage",
+  "AnalyzeData",
   "Grep",
   "Glob",
   "WebSearch",

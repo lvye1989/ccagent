@@ -8,6 +8,7 @@ import { createCustomizationUI } from "./customization.js";
 import { createWorkspacePicker } from "./workspace-picker.js";
 import { createWorkspaceFiles } from "./workspace-files.js";
 import { createComposerTools } from "./composer-tools.js";
+import { createVisualizationUI } from "./visualization.js";
 
 const $ = (id) => document.getElementById(id);
 const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), storageWarningShown: false };
@@ -161,7 +162,8 @@ function setView(view) {
   const customizing = ["plugins", "skills", "agents", "mcp", "teams"].includes(view);
   const feature = ["schedules", "library", "memory"].includes(view);
   document.querySelector(".main-area").classList.toggle("home-active", view === "tasks");
-  $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings");
+  $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings" || view === "visualization");
+  document.querySelector(".main-area").classList.toggle("visualization-active", view === "visualization");
   $("customize-sidebar").classList.toggle("hidden", !customizing);
   $("feature-sidebar").classList.toggle("hidden", !feature);
   document.querySelector(".main-area").classList.toggle("customizing", customizing);
@@ -183,6 +185,7 @@ function setView(view) {
   $("mcp-view").classList.toggle("hidden", view !== "mcp");
   $("settings-view").classList.toggle("hidden", view !== "settings");
   $("teams-view").classList.toggle("hidden", view !== "teams");
+  $("visualization-view").classList.toggle("hidden", view !== "visualization");
   $("header-title").textContent = view === "thread" ? $("thread-title").textContent : ({ tasks: "任务", changes: "代码更改", about: "关于工作区", library: "资料空间", memory: "记忆管理", schedules: "定时任务", plugins: "Plugins", skills: "Skills", agents: "Agents", mcp: "MCP 服务", teams: "Agent Teams", settings: "设置" })[view];
   document.querySelectorAll(".rail-button[data-view]").forEach((item) => item.classList.toggle("selected", item.dataset.view === (view === "thread" ? "tasks" : ["skills", "agents", "mcp", "teams"].includes(view) ? "plugins" : view)));
   $("customize-search").classList.toggle("hidden", view === "teams");
@@ -197,6 +200,7 @@ function setView(view) {
   if (view === "library") void libraryUI.open();
   if (view === "memory") void memoryUI.open();
   if (view === "schedules") void schedulesUI.open();
+  if (view === "visualization") { $("header-title").textContent = "数据可视化"; void visualizationUI.open(); }
 }
 
 function setComposeMode(mode) {
@@ -785,6 +789,8 @@ async function refreshSessions() {
     state.sessions = data.sessions;
     if (state.workspace && state.workspace !== data.workspace) composerTools.workspaceChanged();
     state.workspace = data.workspace;
+    const visualizationWorkspaceChanged = visualizationUI.workspaceChanged(state.workspace);
+    if (visualizationWorkspaceChanged && state.view === "visualization") void visualizationUI.open();
     await workspaceFiles.workspaceChanged(state.workspace);
     if (!state.sessionId) state.model = data.model;
     state.version = data.version;
@@ -938,11 +944,14 @@ const customizationUI = createCustomizationUI({ api, toast, navigate: setView, g
 const workspacePicker = createWorkspacePicker({ api, onSelect: selectWorkspace, getWorkspace: () => state.workspace });
 const workspaceFiles = createWorkspaceFiles({ api, toast, getWorkspace: () => state.workspace, reference: (file) => composerTools.reference(file) });
 const composerTools = createComposerTools({ api, toast, getWorkspace: () => state.workspace, getInput: () => $(state.view === "thread" ? "thread-input" : "home-input"), files: workspaceFiles, chooseWorkspace: () => workspacePicker.open(), navigate: setView });
+const visualizationUI = createVisualizationUI({ api, toast, getWorkspace: () => state.workspace, onAnalyze: ({ dataset, analysis }) => {
+  newTask(); $("home-input").value = `请使用 AnalyzeData 分析当前工作文件夹的数据集 ${dataset.id}（${dataset.name} / ${dataset.sheet}）。字段映射：${JSON.stringify(analysis.config)}。筛选条件：${JSON.stringify(analysis.filters)}。请核对数据质量、解释图表趋势与异常，并给出有数据依据的建议。保留原文件，标注数据口径和源行。`; $("home-input").dispatchEvent(new Event("input", { bubbles: true })); toast("已填写分析请求，发送即可继续");
+} });
 installHandlers();
 setComposeMode("work");
 await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
 const params = new URLSearchParams(location.search);
 const savedSession = params.get("session");
 if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
-else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about"].includes(params.get("view"))) setView(params.get("view"));
+else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization"].includes(params.get("view"))) setView(params.get("view"));
 else setView("tasks");

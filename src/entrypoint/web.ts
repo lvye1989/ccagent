@@ -33,7 +33,7 @@ import { resolveApiKeyFromHelper } from "../services/api/apiKeyHelper.js";
 import { cleanupOldFileHistoryBackups } from "../session/fileHistory.js";
 import { refreshHookDisableFromSettings } from "../hooks/settings.js";
 import { loadSettingSources, getScalarSetting } from "../config/sources.js";
-import { configureThinkingDefaults } from "../utils/thinking.js";
+import { configureThinkingDefaults, resetSessionThinkingState } from "../utils/thinking.js";
 import { setAdditionalAllowedRoots } from "../tools/pathUtils.js";
 import { bootstrapAgentTeams } from "../utils/agentTeamsEnabled.js";
 import { bootstrapAgentSkills } from "../utils/agentSkillsEnabled.js";
@@ -73,6 +73,7 @@ import { pendingNotificationCount } from "../state/notificationStore.js";
 import { getRunningAsyncAgents } from "../state/asyncAgentStore.js";
 import { browseWorkingFolders, listFolderLocations, pickNativeWorkingFolder, resolveWorkingFolder } from "./webWorkspaces.js";
 import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWorkspaceAttachment, MAX_UPLOAD } from "./webFiles.js";
+import { handleVisualization } from "./webVisualization.js";
 import { getAllUserCommands } from "../commands/userCommands/registry.js";
 import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
 
@@ -94,6 +95,10 @@ const MIME: Record<string, string> = {
   "/workspace-picker.css": "text/css; charset=utf-8",
   "/workspace-files.js": "text/javascript; charset=utf-8",
   "/composer-tools.js": "text/javascript; charset=utf-8",
+  "/visualization.js": "text/javascript; charset=utf-8",
+  "/visualization-model.js": "text/javascript; charset=utf-8",
+  "/visualization.css": "text/css; charset=utf-8",
+  "/charts.js": "text/javascript; charset=utf-8",
   "/workbench.css": "text/css; charset=utf-8",
   "/styles.css": "text/css; charset=utf-8",
   "/codex-layout.css": "text/css; charset=utf-8",
@@ -280,6 +285,7 @@ async function bootstrap(workspace: string): Promise<string> {
   await applySessionRetentionPolicy(workspace);
   await cleanupOldFileHistoryBackups(workspace).catch(() => {});
   await refreshHookDisableFromSettings(workspace).catch(() => {});
+  resetSessionThinkingState();
   try {
     const sources = await loadSettingSources(workspace);
     const alwaysThinkingEnabled = getScalarSetting<boolean>(sources, "alwaysThinkingEnabled", {
@@ -345,6 +351,8 @@ export async function runWebServer(args: string[]): Promise<void> {
     }
   }
   if (!webRoot) throw new Error("Web assets are missing. Run npm run build or reinstall CCAGENT.");
+  // Source-mode entrypoints and the packaged binary have different parents.
+  const chartsPath = path.join(webRoot, "../dist/charts.js");
 
   async function openSession(id: string): Promise<WebSession> {
     const existing = sessions.get(id);
@@ -604,6 +612,18 @@ export async function runWebServer(args: string[]): Promise<void> {
             return json(res, 200, result);
           } finally { pluginMutationBusy = false; }
         }
+      }
+      if (route === "/api/visualization" || route.startsWith("/api/visualization/")) {
+        const body = req.method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req, Math.ceil(MAX_UPLOAD / 3) * 4 + 4096);
+        if (body.workspace !== workspace || pluginMutationBusy) return json(res, 409, { error: "工作文件夹已切换或正在配置，请重新打开数据可视化。" });
+        const selected = workspace;
+        if (req.method === "GET" && route === "/api/visualization") return json(res, 200, await handleVisualization("list", body, selected));
+        const action = route.slice("/api/visualization/".length);
+        if (req.method !== "POST" || !["import", "open", "query", "save", "export"].includes(action)) return json(res, 404, { error: "Unknown visualization action" });
+        const mutating = action === "import" || action === "save";
+        if (mutating) pluginMutationBusy = true;
+        try { return json(res, action === "import" ? 201 : 200, await handleVisualization(action, body, selected)); }
+        finally { if (mutating) pluginMutationBusy = false; }
       }
       if (req.method === "GET" && route === "/api/models") return json(res, 200, { defaultModel: model, models: await webModels() });
       if (req.method === "GET" && route === "/api/composer-tools") {
@@ -1129,7 +1149,7 @@ export async function runWebServer(args: string[]): Promise<void> {
 
       if (req.method === "GET" && route in MIME) {
         const file = route === "/" ? "index.html" : route.slice(1);
-        const bytes = await readFile(path.join(webRoot, file));
+        const bytes = await readFile(route === "/charts.js" ? chartsPath : path.join(webRoot, file));
         res.writeHead(200, {
           "content-type": MIME[route], "cache-control": "no-store",
           "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src https: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'",

@@ -416,17 +416,28 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
   // never reach the interactive REPL below.
   if (isPrintMode) {
     const { runHeadless } = await import("./headless.js");
-    await runHeadless({
-      promptArg: printPrompt,
-      permissionMode,
-      bypassPermissions,
-      outputFormat:
-        outputFormat === "json"
-          ? "json"
-          : outputFormat === "stream-json"
-            ? "stream-json"
-            : "text",
-    });
+    const { bootstrapMcp } = await import("../services/mcp/bootstrap.js");
+    const { getMcpRegistry } = await import("../services/mcp/registry.js");
+    const { clearServerCache } = await import("../services/mcp/client.js");
+    // A one-turn consumer must await discovery, unlike the interactive UI.
+    // Otherwise configured MCP tools never reach the headless model request.
+    try {
+      await bootstrapMcp(process.cwd()).catch((error) => console.error(`[ccagent] MCP bootstrap failed: ${String(error)}`));
+      await refreshActivePlugins(process.cwd(), { pluginDirs }).catch((error) => console.error(`[ccagent] plugin MCP bootstrap failed: ${String(error)}`));
+      await runHeadless({
+        promptArg: printPrompt,
+        permissionMode,
+        bypassPermissions,
+        outputFormat:
+          outputFormat === "json"
+            ? "json"
+            : outputFormat === "stream-json"
+              ? "stream-json"
+              : "text",
+      });
+    } finally {
+      await Promise.allSettled(getMcpRegistry().map(({ connection }) => clearServerCache(connection.name, connection.config)));
+    }
     return;
   }
 

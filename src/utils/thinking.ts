@@ -212,6 +212,13 @@ let sessionAlwaysThinkingEnabled: boolean | undefined;
 let sessionThinkingConfig: ThinkingConfig | undefined;
 let sessionEffortLevel: EffortLevel | undefined;
 
+/** A different workspace has a fresh CLI-equivalent settings/session scope. */
+export function resetSessionThinkingState(): void {
+  sessionAlwaysThinkingEnabled = undefined;
+  sessionThinkingConfig = undefined;
+  sessionEffortLevel = undefined;
+}
+
 /**
  * Seed the session thinking + effort state from settings.json at CLI
  * startup. Env vars always take precedence over settings (handled inside

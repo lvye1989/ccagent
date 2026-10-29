@@ -165,8 +165,8 @@ function exitCodeForReason(reason: LoopTerminationReason | undefined): number {
 }
 
 /**
- * Run one headless turn and exit the process. Never returns normally — always
- * calls `process.exit` with the resolved status code.
+ * Run one headless turn and set the exit status. Let stdout and outstanding
+ * filesystem/handle cleanup finish naturally (important for Windows libuv).
  */
 export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
   const stdin = await readStdin();
@@ -176,7 +176,8 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
     process.stderr.write(
       "Error: no input. Provide a prompt via `-p \"...\"` or pipe text on stdin.\n",
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const cwd = process.cwd();
@@ -294,7 +295,8 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
     } else {
       process.stderr.write(`Fatal: ${message}\n`);
     }
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Structured formats: emit the final `result` as the last message. For
@@ -314,11 +316,12 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
       usage: totalUsage,
     };
     writeJsonLine(result);
-    process.exit(exitCodeForReason(reason));
+    process.exitCode = exitCodeForReason(reason);
+    return;
   }
 
   // text (default): only the final assistant text, with a trailing newline.
   const out = finalText.endsWith("\n") ? finalText : `${finalText}\n`;
   process.stdout.write(out);
-  process.exit(exitCodeForReason(reason));
+  process.exitCode = exitCodeForReason(reason);
 }
