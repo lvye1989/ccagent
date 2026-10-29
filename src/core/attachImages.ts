@@ -25,7 +25,9 @@ export interface BuiltUserContent {
   errors: string[];
 }
 
-const IMAGE_TOKEN_RE = /@(\S+)/g;
+// Quoting is shared by CLI input and Web attachment references. Do not use
+// shell parsing: paths are data, and quoted Windows paths may contain spaces.
+const IMAGE_TOKEN_RE = /@(?:"((?:\\.|[^"\\])*)"|'([^']*)'|([^\s]+))/g;
 
 /** Strip trailing punctuation that commonly follows an inline @reference. */
 function cleanToken(raw: string): string {
@@ -38,7 +40,8 @@ export async function buildUserMessageContent(
 ): Promise<BuiltUserContent> {
   const candidates = new Set<string>();
   for (const match of prompt.matchAll(IMAGE_TOKEN_RE)) {
-    const ref = cleanToken(match[1] ?? "");
+    const ref = match[1] !== undefined ? match[1].replace(/\\(["\\])/g, "$1")
+      : match[2] !== undefined ? match[2] : cleanToken(match[3] ?? "");
     if (ref && isImagePath(ref)) candidates.add(ref);
   }
 

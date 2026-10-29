@@ -12,7 +12,7 @@ for (const name of ["window", "document", "location", "history", "localStorage",
 Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 globalThis.setInterval = () => 0;
-globalThis.EventSource = class { close() {} };
+globalThis.EventSource = class { constructor() { globalThis.lastEventSource = this; } close() {} };
 const calls = [], models = [{ id: "fixture", label: "Fixture", model: "fixture", available: true }];
 const agent = { name: "qa", description: "QA Agent", source: "project", editable: true, enabled: true, prompt: "Check evidence" };
 const skill = { name: "test-skill", description: "Skill", source: "project", enabled: true };
@@ -114,6 +114,7 @@ try {
   }
   await click(fileRow("code.ts")); await click($("files-preview").querySelector("button"));
   await click(fileRow("book.xlsx")); await click($("files-preview").querySelector("button"));
+  await click(fileRow("image.png")); await click($("files-preview").querySelector("button"));
   assert.match($("home-input-attachments").textContent, /code.ts/);
   const tool = (label) => [...$("composer-tools").querySelectorAll("button")].find((node) => node.querySelector("strong")?.textContent === label);
   await click("#insert-command"); assert(!$("composer-tools").classList.contains("hidden")); assert.equal($("composer-tools").querySelectorAll("button").length, 7);
@@ -126,7 +127,12 @@ try {
   $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
   const submitted = calls.find((call) => call.route === `/api/sessions/${sessionId}/messages`);
   assert.match(submitted.payload.text, /^\/test-skill\s/); assert.match(submitted.payload.text, /code.ts/); assert.match(submitted.payload.text, /WebSearch/); assert.match(submitted.payload.text, /Office 正文摘录/); assert.match(submitted.payload.text, /<img src=x>/);
+  assert.match(submitted.payload.text, /@"image\.png"/, "Images use the shared CLI attachment grammar");
   assert($("home-input-attachments").classList.contains("hidden"), "Successful submission clears consumed references");
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "tool_start", id: "failed-image", name: "ReadImage" }) });
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "model_error" }) }); await settle();
+  assert.match($("thread-status-label").textContent, /失败/); assert(![...document.querySelectorAll(".tool-state")].some((node) => node.textContent === "执行中"), "Failed turns leave no tool card looking active");
   await click("#thread-insert-tool"); await click(tool("计划模式")); assert.equal(sessionMode, "plan");
   await click("#new-task");
   await click("#insert-command"); await click(tool("添加照片和文件"));

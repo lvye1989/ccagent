@@ -543,15 +543,17 @@ function errorStreamResult(): StreamResult {
  * we don't need incremental output.
  */
 export async function createMessage(
-  params: Omit<StreamRequestParams, "signal">,
+  params: StreamRequestParams,
 ): Promise<{ content: ContentBlock[]; usage: Usage; stopReason: string }> {
   const profile = await resolveProfile(params.model ?? DEFAULT_MODEL);
+  params.signal?.throwIfAborted();
 
   // Non-Anthropic profiles have no native non-streaming primitive here; drain
   // the translated provider stream into a single result, with the same
   // transient-failure resilience as the Anthropic branch below.
   if (profile.protocol !== "anthropic") {
     return await callWithRetry(() => collectViaProvider(profile, params), {
+      signal: params.signal,
       querySource: params.querySource ?? "background",
       onRetry: ({ attempt, delayMs, category }) =>
         writeStreamDebug("createMessage_retry", { attempt, delayMs, category }),
@@ -579,9 +581,10 @@ export async function createMessage(
         ...(params.system && { system: params.system }),
         ...(params.tools && params.tools.length > 0 && { tools: params.tools }),
         ...(params.toolChoice && { tool_choice: params.toolChoice }),
-      }),
+      }, { signal: params.signal }),
     {
       querySource: params.querySource ?? "background",
+      signal: params.signal,
       onRetry: ({ attempt, delayMs, category }) =>
         writeStreamDebug("createMessage_retry", { attempt, delayMs, category }),
     },

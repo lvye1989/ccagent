@@ -23,7 +23,7 @@ import type {
   Usage,
 } from "../../../types/message.js";
 import { writeStreamDebug } from "../../../utils/streamDebug.js";
-import { resultToString, normalizeStopReason } from "./translateShared.js";
+import { resultToString, toolResultImages, normalizeStopReason } from "./translateShared.js";
 
 interface GeminiFunctionCall {
   name: string;
@@ -93,6 +93,9 @@ export function buildGeminiContents(messages: StreamRequestParams["messages"]): 
               response: { output: resultToString(block.content) },
             },
           });
+          for (const image of toolResultImages(block.content)) {
+            if (image.data) parts.push({ inlineData: { mimeType: image.mimeType || "image/png", data: image.data } });
+          }
         }
         // thinking / redacted_thinking blocks are intentionally NOT replayed.
       }

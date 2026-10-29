@@ -150,6 +150,7 @@ type WebSession = {
   nextEventId: number;
   persistenceUnavailable: boolean;
   browserUrl?: string;
+  lastTurnReason?: string;
   pending?: PendingInteraction;
 };
 
@@ -189,6 +190,8 @@ async function readJson(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promis
 }
 
 function publish(session: WebSession, data: Record<string, unknown>): void {
+  if (data.type === "turn_started") session.lastTurnReason = undefined;
+  if (data.type === "turn_complete") session.lastTurnReason = String(data.reason || "completed");
   const event = { id: session.nextEventId++, data };
   session.events.push(event);
   if (session.events.length > 500) session.events.shift();
@@ -994,7 +997,7 @@ export async function runWebServer(args: string[]): Promise<void> {
           return json(res, 200, {
             sessionId: session.id, model: state.model, mode: session.engine.getPermissionMode(), temporary: session.temporary, browserUrl: session.browserUrl ?? null,
             messages: state.messages, usage: state.totalUsage, busy: session.busy, team: session.team,
-            lastEventId: session.nextEventId - 1,
+            lastEventId: session.nextEventId - 1, lastTurnReason: session.lastTurnReason ?? null,
             recentNotices: session.events.map((item) => item.data).filter((item) => item.type === "notice").slice(-5),
             pending: session.pending ? { id: session.pending.id, kind: session.pending.kind, request: session.pending.payload } : null,
           });

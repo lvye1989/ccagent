@@ -48,6 +48,7 @@ export async function analyzeImageFile(
   prompt: string,
   cwd: string,
   signal?: AbortSignal,
+  maxTokens = 2_000,
 ): Promise<{ model: string; text: string }> {
   const profile = await resolveVisionProfile(cwd);
   if (!profile) {
@@ -62,8 +63,8 @@ export async function analyzeImageFile(
   const params = {
     messages,
     model: profile.id,
-    maxTokens: 2_000,
-    signal,
+    maxTokens,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
     querySource: "background" as const,
     thinking: { type: "disabled" as const },
   };
@@ -76,5 +77,6 @@ export async function analyzeImageFile(
     .join("\n")
     .trim();
   if (!text) throw new Error("The configured vision model returned no text evidence.");
+  if (result.stopReason === "max_tokens") throw new Error("The vision response was truncated before the image analysis finished; use a smaller image region or a narrower extraction request.");
   return { model: profile.id, text };
 }

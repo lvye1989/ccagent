@@ -70,7 +70,8 @@ async function withTempProject(
 async function main(): Promise<void> {
   console.log("\n[1] Built-in agent definitions");
   const builtIns = getBuiltInAgents();
-  assert(builtIns.length === 4, "exactly 4 built-in agents (general-purpose, Explore, workfriend, rhino_agent)");
+  assert(builtIns.length === 5, "exactly 5 built-in agents, including image_reader");
+  assert(builtIns.find((agent) => agent.agentType === "image_reader")?.tools?.join(",") === "ReadImage,Glob", "image_reader uses vision tools without shells or credential access");
   assert(
     builtIns.some((a) => a.agentType === "general-purpose"),
     "general-purpose agent is built-in",
@@ -271,7 +272,7 @@ async function main(): Promise<void> {
     );
 
     const result = await bootstrapAgents(cwd);
-    assert(result.builtInCount === 4, "bootstrap reports 4 built-ins");
+    assert(result.builtInCount === 5, "bootstrap reports 5 built-ins");
     assert(
       result.customCount === 2,
       "bootstrap reports 2 valid custom agents (reviewer + Explore override)",

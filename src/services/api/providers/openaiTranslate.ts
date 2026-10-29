@@ -15,7 +15,7 @@
  */
 
 import type { UniversalBody } from "llm-bridge";
-import { resultToString } from "./translateShared.js";
+import { resultToString, toolResultImages } from "./translateShared.js";
 
 /** Build a data: URL (or pass an http URL through) from universal media. */
 function mediaToImageUrl(media: { url?: string; data?: string; mimeType?: string } | undefined): string | null {
@@ -74,6 +74,10 @@ export function universalToOpenAIChatMessages(universal: UniversalBody): OpenAIC
           },
         });
       } else if (part.type === "tool_result" && part.tool_result) {
+        for (const media of toolResultImages(part.tool_result.result)) {
+          const url = mediaToImageUrl(media);
+          if (url) imageUrls.push(url);
+        }
         toolResults.push({
           id: part.tool_result.tool_call_id,
           content: resultToString(part.tool_result.result),
@@ -145,6 +149,10 @@ export function universalToOpenAIResponsesInput(universal: UniversalBody): Respo
           arguments: JSON.stringify(part.tool_call.arguments ?? {}),
         });
       } else if (part.type === "tool_result" && part.tool_result) {
+        for (const media of toolResultImages(part.tool_result.result)) {
+          const url = mediaToImageUrl(media);
+          if (url) imageUrls.push(url);
+        }
         fnOutputs.push({
           type: "function_call_output",
           call_id: part.tool_result.tool_call_id,

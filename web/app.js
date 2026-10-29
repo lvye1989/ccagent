@@ -550,7 +550,9 @@ function setBusy(busy) {
   if (busy) voiceUI.stopDictation();
   state.busy = busy;
   customizationUI.syncBusy(busy);
-  $("thread-status-label").textContent = busy ? "正在执行" : "就绪";
+  if (busy) state.lastTurnReason = null;
+  const terminal = { model_error: "本轮失败，可重试", aborted: "已停止", max_turns: "已达执行轮数上限", incomplete: "上次执行未完成，可重试" };
+  $("thread-status-label").textContent = busy ? "正在执行" : terminal[state.lastTurnReason] || "就绪";
   $("thread-status-dot").classList.toggle("busy", busy);
   $("stop-button").classList.toggle("hidden", !busy);
   $("thread-send").disabled = busy;
@@ -693,6 +695,11 @@ function handleEvent(event) {
     case "interaction": showInteraction(event); break;
     case "interaction_resolved": state.pending = null; $("interaction-overlay").classList.add("hidden"); break;
     case "turn_complete":
+      state.lastTurnReason = event.reason;
+      for (const row of state.toolNodes.values()) {
+        const label = row.querySelector(".tool-state");
+        if (label?.textContent === "执行中") { label.textContent = event.reason === "aborted" ? "已停止" : "未完成"; row.classList.add("error"); }
+      }
       clearStream(); setBusy(false); refreshSessions(); refreshChanges();
       if (event.reason && event.reason !== "completed") toast(`任务结束：${event.reason}`);
       break;
@@ -723,6 +730,8 @@ async function openSession(id) {
     browserUI.restore(data.browserUrl);
     renderStoredMessages(data.messages);
     for (const notice of data.recentNotices || []) addNotice(notice.message, notice.tone === "error");
+    const lastContent = data.messages.at(-1)?.content;
+    state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || (block.type === "tool_result" && block.is_error)) ? "incomplete" : null);
     setBusy(data.busy);
     if (data.pending) showInteraction(data.pending);
     setView("thread");

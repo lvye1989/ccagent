@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   console.log("[1] Built-in agent and tools");
   const agents = getBuiltInAgents();
   const rhino = agents.find((agent) => agent.agentType === "rhino_agent");
-  assert(agents.length === 4, "four built-in agents are registered");
+  assert(agents.length === 5, "five built-in agents are registered, including image_reader");
   assert(Boolean(rhino), "rhino_agent is built in");
   assert(rhino?.permissionMode === "auto", "rhino_agent uses Auto Mode for fast Jev-gated operations");
   assert(

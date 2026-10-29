@@ -147,6 +147,26 @@ try {
   assert.ok(events.includes("text"), "generation continues after compaction");
   assert.deepEqual(errors, [], "the recovered turn does not surface a blocking error");
   assert.equal(next.value.reason, "completed");
+
+  console.log("=== cancellation interrupts an in-flight summary ===");
+  const abort = new AbortController();
+  let summaryStarted!: () => void;
+  const started = new Promise<void>((resolve) => { summaryStarted = resolve; });
+  let summaryAborted = false;
+  globalThis.fetch = (async (_input, options) => {
+    summaryStarted();
+    return await new Promise<Response>((_resolve, reject) => {
+      const signal = options?.signal;
+      const rejectAbort = () => { summaryAborted = true; reject(new DOMException("Summary cancelled", "AbortError")); };
+      if (signal?.aborted) rejectAbort(); else signal?.addEventListener("abort", rejectAbort, { once: true });
+    });
+  }) as typeof fetch;
+  const cancelledLoop = query({ messages: oversizedHistory, model: "looptest", contextWindow: 20_000, toolContext: { cwd: projectDir }, maxTurns: 2, abortSignal: abort.signal });
+  const completed = (async () => { let event = await cancelledLoop.next(); while (!event.done) event = await cancelledLoop.next(); return event.value; })();
+  await started; abort.abort();
+  const stopped = await Promise.race([completed, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Compaction ignored cancellation")), 1500))]);
+  assert(summaryAborted, "The summary HTTP request receives the parent abort");
+  assert.equal(stopped.reason, "aborted");
 } finally {
   process.chdir(originalCwd);
   globalThis.fetch = originalFetch;

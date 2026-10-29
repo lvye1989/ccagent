@@ -1309,6 +1309,7 @@ export async function* query(
     ) {
       try {
         const compactResult = await compactMessages(state.messages, undefined, {
+          signal: params.abortSignal,
           systemPrompt: params.systemPrompt,
           model: params.model,
           contextWindow: activeContextWindow,
@@ -1339,6 +1340,7 @@ export async function* query(
       }
     }
 
+    if (params.abortSignal?.aborted) continue;
     if (warningState.state !== "normal") {
       yield { type: "token_warning", warning: warningState };
     }
@@ -1437,6 +1439,7 @@ export async function* query(
     }
 
     // ─── Stage 27: stream error handling (reactive compact) ──────────
+    if (params.abortSignal?.aborted) continue;
     if (streamError) {
       // Prompt-too-long → summarize the history once and retry the turn.
       // Guarded by hasAttemptedReactiveCompact so we never loop on it.
@@ -1448,6 +1451,7 @@ export async function* query(
         hasAttemptedReactiveCompact = true;
         try {
           const compactResult = await compactMessages(state.messages, undefined, {
+            signal: params.abortSignal,
             systemPrompt: params.systemPrompt,
             model: params.model,
             contextWindow: activeContextWindow,
@@ -1475,6 +1479,7 @@ export async function* query(
         }
       }
 
+      if (params.abortSignal?.aborted) continue;
       yield { type: "error", error: streamError.error };
       yield { type: "turn_complete", reason: "model_error", turnCount: nextTurnCount };
       return {

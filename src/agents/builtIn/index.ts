@@ -11,9 +11,10 @@ import { GENERAL_PURPOSE_AGENT } from "./generalPurpose.js";
 import { EXPLORE_AGENT } from "./explore.js";
 import { WORKFRIEND_AGENT } from "./workfriend.js";
 import { RHINO_AGENT } from "./rhinoAgent.js";
+import { IMAGE_READER_AGENT } from "./imageReader.js";
 
 export function getBuiltInAgents(): AgentDefinition[] {
-  return [GENERAL_PURPOSE_AGENT, EXPLORE_AGENT, WORKFRIEND_AGENT, RHINO_AGENT];
+  return [GENERAL_PURPOSE_AGENT, EXPLORE_AGENT, WORKFRIEND_AGENT, RHINO_AGENT, IMAGE_READER_AGENT];
 }
 
-export { GENERAL_PURPOSE_AGENT, EXPLORE_AGENT, WORKFRIEND_AGENT, RHINO_AGENT };
+export { GENERAL_PURPOSE_AGENT, EXPLORE_AGENT, WORKFRIEND_AGENT, RHINO_AGENT, IMAGE_READER_AGENT };

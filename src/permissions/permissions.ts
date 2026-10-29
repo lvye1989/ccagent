@@ -112,6 +112,7 @@ const DEFAULT_PERMISSION_SETTINGS: PermissionSettings = {
 // per-domain by resolveWebFetchDecision, which runs before this branch.
 const PLAN_ALLOWED_TOOLS = new Set([
   "Read",
+  "ReadImage",
   "Grep",
   "Glob",
   "WebSearch",

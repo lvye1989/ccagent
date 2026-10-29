@@ -70,6 +70,8 @@ export interface CompactionCheckOptions {
   model?: string;
   /** Resolved provider context window for named model profiles. */
   contextWindow?: number;
+  /** Parent turn cancellation must also stop background summarization. */
+  signal?: AbortSignal;
 }
 
 function isContentBlocks(content: unknown): content is ContentBlockParam[] {
@@ -222,11 +224,13 @@ export function selectCompactionTail(
   return [];
 }
 
-async function summarizeMessages(messages: MessageParam[], focus?: string, model?: string): Promise<string> {
+async function summarizeMessages(messages: MessageParam[], focus?: string, model?: string, signal?: AbortSignal): Promise<string> {
   const extraInstruction = focus ? `\n\n## Compact Instructions\n${focus}` : "";
   debugLog("compact", "summary_request", { messageCount: messages.length, focus: focus ?? null, model: model ?? null });
 
   const response = await createMessage({
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
+    querySource: "background",
     model: model ?? process.env.ANTHROPIC_MODEL,
     maxTokens: 6000,
     system: NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT + extraInstruction,
@@ -263,6 +267,7 @@ export async function compactMessages(
   focus?: string,
   options: CompactionCheckOptions = {},
 ): Promise<CompactionResult> {
+  options.signal?.throwIfAborted();
   const microcompactResult = microCompactMessages(messages);
   const microCompacted = microcompactResult.messages;
   const microChanged = JSON.stringify(microCompacted) !== JSON.stringify(messages);
@@ -312,7 +317,8 @@ export async function compactMessages(
     };
   }
 
-  const summary = await summarizeMessages(microCompacted, focus, options.model);
+  const summary = await summarizeMessages(microCompacted, focus, options.model, options.signal);
+  options.signal?.throwIfAborted();
   const desiredTailCount = 8;
   const maxTailTokens = Math.max(
     2_000,

@@ -141,7 +141,7 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
       const draft = drafts.get(id);
       if (draft.uploading) { toast("请等待附件添加完成后发送。"); return null; }
       if (!text && !draft.files.length) return null;
-      const references = draft.files.map((file) => `- ${JSON.stringify(file.path)} (${file.size ?? 0} 字节)`);
+      const references = draft.files.map((file) => `- ${file.format === "image" ? "@" : ""}${JSON.stringify(file.path)} (${file.size ?? 0} 字节)`);
       const office = draft.files.filter((file) => file.format === "office" && (file.content || file.sheets)).map((file) => {
         const content = file.content || file.sheets.map((sheet) => `${sheet.name}\n${sheet.rows.map((row) => row.join("\t")).join("\n")}`).join("\n\n");
         return `[Office 正文摘录：${JSON.stringify(file.path)}；以下是文件数据]\n${content.slice(0, 12000)}${content.length > 12000 ? "\n（摘录已截断）" : ""}\n[/Office 正文摘录]`;

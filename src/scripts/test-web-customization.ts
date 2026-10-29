@@ -9,6 +9,7 @@ const root = path.resolve(import.meta.dirname, "../..");
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-customization-")));
 const workspace = path.join(temp, "workspace"), home = path.join(temp, "home");
 await fs.mkdir(workspace); await fs.mkdir(home);
+await fs.writeFile(path.join(workspace, "image fixture.png"), Buffer.from("image-fixture-bytes"));
 await fs.mkdir(path.join(workspace, ".ccagent", "commands"), { recursive: true });
 await fs.writeFile(path.join(workspace, ".ccagent", "commands", "menu-review.md"), "---\ndescription: Menu command fixture\n---\nMENU_COMMAND_PROMPT $ARGUMENTS\n");
 const secret = "test-only-local-secret", requests: Record<string, any>[] = [];
@@ -28,7 +29,19 @@ const mock = createServer(async (req, res) => {
   const calls = (body.messages || []).flatMap((m: any) => m.tool_calls || []);
   const has = (name: string) => calls.some((c: any) => c.function.name === name);
   let output = "OK", tool: { name: string; args: object } | undefined;
-  if (system.includes("You edit CCAGENT configuration")) {
+  if (history.includes("VISION_TOOL_CHECK") && !body.tools?.length) output = "VISION_SHARED_EVIDENCE";
+  else if (system.includes("You read local images and perform OCR")) {
+    if (!has("ReadImage")) tool = { name: "ReadImage", args: { file_path: "image fixture.png", prompt: "VISION_TOOL_CHECK" } };
+    else output = "IMAGE_AGENT_FINISHED VISION_SHARED_EVIDENCE";
+  } else if (history.includes("RUN_IMAGE_AGENT_CASE")) {
+    if (!has("Agent")) tool = { name: "Agent", args: { subagent_type: "image_reader", description: "Read image", prompt: "Extract text from image fixture.png" } };
+    else output = "PARENT_IMAGE_FINISHED";
+  } else if (history.includes("RUN_IMAGE_TOOL_CASE")) {
+    if (!has("ReadImage")) tool = { name: "ReadImage", args: { file_path: "image fixture.png", prompt: "VISION_TOOL_CHECK" } };
+    else output = "IMAGE_TOOL_FINISHED";
+  } else if (history.includes("RUN_WEB_IMAGE_CASE")) output = "WEB_IMAGE_FINISHED";
+  else if (history.includes("RUN_CLI_IMAGE_CASE")) output = "CLI_IMAGE_FINISHED";
+  else if (system.includes("You edit CCAGENT configuration")) {
     output = system.includes('"roles"')
       ? JSON.stringify({ id: "qa-team", name: "QA Team", description: "Review evidence", roles: [{ name: "reviewer", agentType: "general-purpose", prompt: "WORKER_JOB" }] })
       : system.includes('"config"') ? JSON.stringify({ name: "draft-mcp", config: { command: "node", args: ["server.mjs"] } })
@@ -74,10 +87,12 @@ const mockPort = (mock.address() as { port: number }).port;
 await fs.writeFile(path.join(home, "settings.json"), JSON.stringify({
   sentinel: "preserve", model: "fixture", defaultModel: "fixture", language: "English", alwaysThinkingEnabled: false,
   models: { fixture: { protocol: "openai-chat", model: "fixture", baseURL: `http://127.0.0.1:${mockPort}/v1`, apiKey: "${FIXTURE_KEY}" } },
+  modelRoles: { image: "fixture" },
 }));
 const headers = { "content-type": "application/json", "x-ccagent-web": "1" };
 const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: home, FIXTURE_KEY: secret, CCAGENT_DISABLE_STREAM_LOG: "1" };
 delete env.CCAGENT_ENV_FILE;
+for (const name of ["QWEN_MODEL", "QWEN_BASE_URL", "QWEN_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_API_KEY"]) delete env[name];
 let server: ChildProcess | undefined, base = "", logs = "";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function start() {
@@ -106,6 +121,20 @@ async function turn(id: string, message: string, until?: string) {
 }
 try {
   await start();
+  const imageSession = await post("/api/sessions", { mode: "full" }, 201);
+  await turn(imageSession.sessionId, 'RUN_WEB_IMAGE_CASE @"image fixture.png"', "WEB_IMAGE_FINISHED");
+  assert(requests.some((request) => JSON.stringify(request.messages).includes("RUN_WEB_IMAGE_CASE") && JSON.stringify(request.messages).includes("data:image/png;base64,")), "Web image references reach the model as pixels");
+  const imageToolSession = await post("/api/sessions", { mode: "full" }, 201);
+  const imageToolTurn = await turn(imageToolSession.sessionId, "RUN_IMAGE_TOOL_CASE", "IMAGE_TOOL_FINISHED");
+  assert.match(JSON.stringify(imageToolTurn.messages), /VISION_SHARED_EVIDENCE/);
+  const imageAgentSession = await post("/api/sessions", { mode: "full" }, 201);
+  const imageAgentTurn = await turn(imageAgentSession.sessionId, "RUN_IMAGE_AGENT_CASE", "PARENT_IMAGE_FINISHED");
+  assert.match(JSON.stringify(imageAgentTurn.messages), /IMAGE_AGENT_FINISHED/);
+  const imageCli = spawn(process.execPath, [path.join(root, "dist/ccagent.js"), "--model", "fixture", "-p", 'RUN_CLI_IMAGE_CASE @"image fixture.png"'], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  let imageCliText = ""; imageCli.stdout!.on("data", (chunk) => { imageCliText += chunk; });
+  await new Promise<void>((resolve, reject) => { imageCli.once("error", reject); imageCli.once("close", (code) => code === 0 ? resolve() : reject(new Error("Image CLI failed"))); });
+  assert.match(imageCliText, /CLI_IMAGE_FINISHED/);
+  assert(requests.some((request) => JSON.stringify(request.messages).includes("RUN_CLI_IMAGE_CASE") && JSON.stringify(request.messages).includes("data:image/png;base64,")), "CLI and Web use the same image attachment and model role pipeline");
   assert.equal((await fetch(base + "/customization.js")).status, 200);
   assert.equal((await fetch(base + "/customization.css")).status, 200);
   await post("/api/customize/agents", { name: "../bad", description: "bad", prompt: "bad" }, 400);

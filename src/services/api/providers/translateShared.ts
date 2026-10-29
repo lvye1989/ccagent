@@ -8,10 +8,9 @@
 
 /**
  * Flatten a tool result (string | content-block array | object) to text.
- * Image blocks collapse to a `[image]` marker: neither the OpenAI `tool`
- * role nor the Gemini `functionResponse` part can carry image bytes, so a
- * tool that returns an image degrades gracefully on those providers (the
- * Anthropic path keeps the real image — see the native pass-through).
+ * The textual result retains an image marker. Provider translators also
+ * forward toolResultImages() as user image parts beside the tool response;
+ * an OpenAI tool message itself only accepts text.
  */
 export function resultToString(result: unknown): string {
   if (result == null) return "";
@@ -30,6 +29,18 @@ export function resultToString(result: unknown): string {
       .join("\n");
   }
   return JSON.stringify(result);
+}
+
+export function toolResultImages(result: unknown): Array<{ data?: string; mimeType?: string; url?: string }> {
+  if (!Array.isArray(result)) return [];
+  return result.flatMap((part) => {
+    if (!part || typeof part !== "object" || part.type !== "image") return [];
+    const source = part.source;
+    if (source?.type === "base64" && typeof source.data === "string" && source.data) return [{ data: source.data, mimeType: source.media_type || "image/png" }];
+    if (source?.type === "url" && typeof source.url === "string") return [{ url: source.url }];
+    if (part.media && typeof part.media === "object") return [part.media];
+    return [];
+  });
 }
 
 /** Normalize a provider/universal stop reason to the Anthropic vocabulary. */

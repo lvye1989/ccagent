@@ -2,6 +2,16 @@
 
 验证日期：2026-10-29（北京时间）。
 
+图片/OCR 修复：`test:images` 验证中文及带空格图片路径、越界拒绝、Web/CLI 共用引用语法、三种非 Anthropic 协议的工具结果保留真实图片字节、并行调用 ID、ReadImage 共享模型配置、计划模式权限、取消与确定性失败不重复请求。`test:web-customization` 的模型替身验证 Web 与 CLI 图片输入均进入实际请求、ReadImage 返回文字证据，以及 image_reader 实际调用该工具；`test:agents` 验证第五个内置 Agent 的只读工具范围。旧 providerStream 的 15 项快照及 Responses 完成状态检查仍通过。离线页面测试验证失败轮次不遗留“执行中”工具卡。
+
+长会话取消：后台摘要原先没有接入父任务的取消信号，导致停止操作后仍可能等待摘要请求。`createMessage`、自动/错误恢复压缩现已贯通 AbortSignal，摘要请求增加 90 秒上限；取消不再被误报成上下文超限或模型失败。`test:context` 使用挂起的摘要 HTTP 替身验证取消立即传到请求，循环以 aborted 结束。
+
+旧 `test:queryengine` 字符快照未通过：基准仍包含较早的 21 个工具、macOS 的 sandbox/clipboard 和路径输出，与当前既有工具、Windows 环境及记忆索引存在差异；本次未更新该跨平台基准，不能计为全套通过。
+
+本机实际调用验证：原始图片通过现有 Qwen 视觉配置返回 OCR 文字；`deepseek-flash` 的 Responses 接口也从同图识别出顶部公司名称。更新后的全局 CLI 与 Web 使用同一构建产物（SHA256 一致），全局 CLI 的实际图片提问返回同一公司名称；没有修改已有密钥或模型路由。模型返回文字证明输入链路可用，不保证手写 OCR 的逐字准确率。
+
+原失败对话保留了全部记录，恢复为 DeepSeek 后直接接收原图并完成文字识别，返回非空最终答复、busy=false、lastTurnReason=completed；这次恢复没有继续执行 OCR 脚本。
+
 工作区文件及「+」工具：`src/scripts/webFilesChecks.ts` 由 `test:web` 调用，使用真实 HTTP 服务验证代码、无扩展名文本、HTML 字面内容、图片、PDF、音频、未知二进制、DOCX 正文、XLSX 稀疏单元格、PPTX 正文、超长文本截断、250 项分页、筛选、附件上传下载、媒体 Range、越界/目录链接拒绝与过期工作区拦截。`test:web-customization` 使用本地模型协议替身和真实 QueryEngine，验证菜单的技能/自定义命令展开、关闭技能过滤、上传附件经 Read 工具实际读取，以及切换目录后命令隔离。它不证明外部搜索供应商的可用性。
 
 2026-10-29 另经本机服务实测网络搜索：以当前 DeepSeek 配置创建计划模式的临时对话，提交与菜单相同的 WebSearch 要求。实际对话记录包含一次 WebSearch 调用，Bocha 返回检索结果，模型完成带来源链接的回答；没有其他工具调用或工具错误，临时对话不出现在已保存会话列表中。该结果证明当时本机配置的检索链路可执行，不代表其他供应商或后续时点的可用性。
