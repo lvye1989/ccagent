@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 const root = path.resolve(import.meta.dirname, "..");
 const { Window } = await import(process.argv[2] ? pathToFileURL(path.resolve(process.argv[2])).href : "happy-dom");
 const window = new Window({ url: "http://offline-ui.test/", settings: { disableJavaScriptFileLoading: true, enableJavaScriptEvaluation: false, enableCSSFileLoading: false, enableImageFileLoading: false } });
+Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
 window.document.write(await fs.readFile(path.join(root, "web/index.html"), "utf8"));
 for (const name of ["window", "document", "location", "history", "localStorage", "HTMLElement", "HTMLSelectElement", "Event", "KeyboardEvent", "File", "FormData", "MutationObserver", "Node"]) globalThis[name] = name === "window" ? window : window[name];
 Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
@@ -17,11 +18,36 @@ const agent = { name: "qa", description: "QA Agent", source: "project", editable
 const skill = { name: "test-skill", description: "Skill", source: "project", enabled: true };
 const teams = [{ id: "qa-team", name: "QA Team", description: "Evidence", enabled: true, roles: [{ name: "reviewer", agentType: "qa", prompt: "Check facts" }] }];
 let teamEnabled = true;
+const sessionId = "11111111-1111-4111-8111-111111111111";
+let sessionMode = "default", failUpload = false, failSubmit = false;
+const files = [
+  { path: "资料", name: "资料", directory: true },
+  { path: "code.ts", name: "code.ts", size: 20, format: "text", content: '<script>alert("literal")</script>' },
+  { path: "image.png", name: "image.png", size: 20, format: "image" },
+  { path: "report.pdf", name: "report.pdf", size: 20, format: "pdf" },
+  { path: "song.mp3", name: "song.mp3", size: 20, format: "audio" },
+  { path: "video.mp4", name: "video.mp4", size: 20, format: "video" },
+  { path: "book.xlsx", name: "book.xlsx", size: 20, format: "office", sheets: [{ name: "工作表1", rows: [["<img src=x>", "42"]] }] },
+  { path: "other.bin", name: "other.bin", size: 20, format: "binary" },
+];
 globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
   calls.push({ route, payload });
   let data;
-  if (route === "/api/bootstrap") data = { sessions: [], workspace: "C:\\offline-project", version: "test", model: "fixture", defaultMode: "plan" };
+  if (route === "/api/bootstrap") data = { sessions: [{ sessionId, firstPrompt: "保留的历史任务" }], workspace: "C:\\offline-project", version: "test", model: "fixture", defaultMode: "plan" };
+  else if (route === "/api/sessions") data = { sessionId };
+  else if (route === `/api/sessions/${sessionId}`) data = { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false };
+  else if (route === `/api/sessions/${sessionId}/mode`) { sessionMode = payload.mode; data = {}; }
+  else if (route === `/api/sessions/${sessionId}/messages`) { if (failSubmit) throw new Error("Fixture submit failure"); data = { accepted: true }; }
+  else if (route === "/api/composer-tools") data = { commands: [{ name: "test-skill", description: "Fixture skill", kind: "技能" }, { name: "help", description: "Help", kind: "命令" }] };
+  else if (route === "/api/files/upload") { if (failUpload) throw new Error("Fixture upload failure"); data = { path: `.ccagent/attachments/id/${payload.name}`, name: payload.name, size: 4 }; }
+  else if (route.startsWith("/api/files")) {
+    const url = new URL(route, "http://offline-ui.test"), dir = url.searchParams.get("path");
+    if (url.pathname === "/api/files/preview") data = files.find((file) => file.path === dir);
+    else data = { path: dir, entries: dir ? [{ path: "资料/中文.md", name: "中文.md", size: 12, format: "text" }] : files, nextOffset: null, total: dir ? 1 : files.length };
+  }
+  else if (route === "/api/workspaces") data = { current: "C:\\offline-project", recent: [], locations: [], nativePickerAvailable: false };
+  else if (route.startsWith("/api/workspaces/browse")) data = { path: "C:\\offline-project", parent: null, breadcrumbs: [], folders: [], total: 0 };
   else if (route === "/api/changes") data = { files: [] };
   else if (route === "/api/models") data = { defaultModel: "fixture", models };
   else if (route === "/api/customize/settings") data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60 }, settingsPath: "offline-settings.json", defaultModel: "fixture" };
@@ -47,6 +73,46 @@ const click = async (selector) => { const n = typeof selector === "string" ? doc
 const close = () => click("#editor-close");
 function action(label) { return [...$("editor-actions").querySelectorAll("button")].find((b) => b.textContent === label); }
 try {
+  assert.equal($("search-tasks"), null); assert.equal($("rail-history"), null); assert.equal($("task-search-box"), null);
+  assert.match($("recent-list").textContent, /保留的历史任务/, "Removing task search preserves history");
+  assert(!$("workspace-files").classList.contains("hidden"), "Desktop home exposes the selected workspace on the right");
+  const fileRow = (name) => [...$("files-list").querySelectorAll("button")].find((node) => node.dataset.path === name);
+  await click(fileRow("资料")); assert.match($("files-list").textContent, /中文.md/); await click("#files-up");
+  await click(fileRow("code.ts")); assert.match($("files-preview").textContent, /<script>/); assert.equal($("files-preview").querySelector("script"), null);
+  for (const [name, selector] of [["image.png", "img"], ["report.pdf", "iframe"], ["song.mp3", "audio"], ["video.mp4", "video"], ["book.xlsx", "table"], ["other.bin", "a[download]"]]) {
+    await click(fileRow(name)); assert($("files-preview").querySelector(selector), `${name} has a working renderer`);
+    assert.equal($("files-preview").querySelector("script"), null);
+  }
+  await click(fileRow("code.ts")); await click($("files-preview").querySelector("button"));
+  await click(fileRow("book.xlsx")); await click($("files-preview").querySelector("button"));
+  assert.match($("home-input-attachments").textContent, /code.ts/);
+  const tool = (label) => [...$("composer-tools").querySelectorAll("button")].find((node) => node.querySelector("strong")?.textContent === label);
+  await click("#insert-command"); assert(!$("composer-tools").classList.contains("hidden")); assert.equal($("composer-tools").querySelectorAll("button").length, 7);
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  assert.equal(document.activeElement, $("composer-tools").querySelectorAll("button")[1]);
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); assert($("composer-tools").classList.contains("hidden")); assert.equal(document.activeElement.id, "insert-command");
+  await click("#insert-command"); await click(tool("选择工作文件夹")); assert(!$("workspace-overlay").classList.contains("hidden")); await click("#workspace-cancel");
+  await click("#insert-command"); await click(tool("网络搜索")); assert.match($("home-input-attachments").textContent, /网络搜索/);
+  await click("#insert-command"); await click(tool("技能和命令")); assert(!$("composer-tools").classList.contains("hidden")); await click(tool("/test-skill")); assert.match($("home-input").value, /^\/test-skill /);
+  $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
+  const submitted = calls.find((call) => call.route === `/api/sessions/${sessionId}/messages`);
+  assert.match(submitted.payload.text, /^\/test-skill\s/); assert.match(submitted.payload.text, /code.ts/); assert.match(submitted.payload.text, /WebSearch/); assert.match(submitted.payload.text, /Office 正文摘录/); assert.match(submitted.payload.text, /<img src=x>/);
+  assert($("home-input-attachments").classList.contains("hidden"), "Successful submission clears consumed references");
+  await click("#thread-insert-tool"); await click(tool("计划模式")); assert.equal(sessionMode, "plan");
+  await click("#new-task");
+  await click("#insert-command"); await click(tool("添加照片和文件"));
+  Object.defineProperty($("composer-upload"), "files", { value: [new window.File([new Uint8Array([0, 1, 255, 48])], "upload.bin")], configurable: true });
+  $("composer-upload").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  assert(calls.some((call) => call.route === "/api/files/upload" && call.payload.base64 === "AAH/MA==")); assert.match($("home-input-attachments").textContent, /upload.bin/);
+  failSubmit = true; $("home-input").value = "Read attachment";
+  $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); assert.match($("thread-input-attachments").textContent, /upload.bin/, "Failed send keeps the reference in the visible composer"); assert.equal($("thread-input").value, "Read attachment");
+  failSubmit = false;
+  $("thread-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); assert($("thread-input-attachments").classList.contains("hidden"), "Retry consumes the preserved reference");
+  await click("#new-task");
+  await click("#insert-command"); await click(tool("插件与 MCP")); assert(!$("plugins-view").classList.contains("hidden"));
+  await click("#brand-home"); await click("#surface-chat"); await click("#chat-insert-command"); assert(!$("composer-tools").classList.contains("hidden"));
+  document.body.click(); await settle(); assert($("composer-tools").classList.contains("hidden"));
+  await click("#surface-work"); await click("#insert-command"); await click(tool("计划模式"));
   assert.equal($("home-mode").value, "plan");
   assert([...$("home-team").options].some((o) => o.value === "auto"));
   await click('[data-customize-view="agents"]'); await click("#agent-create");
@@ -88,4 +154,5 @@ try {
   await click(action("＋ 添加知识库")); $("edit-rag-id").value = "offline"; $("edit-rag-name").value = "Offline KB"; $("edit-rag-url").value = "https://example.test/retrieve";
   await click(action("保存知识库")); assert(calls.some((c) => c.route === "/api/customize/rag" && c.payload?.id === "offline"));
   console.log("Offline Web DOM: all six feature entries, generation/edit/save dialogs, literal rendering, skill toggles, model selector linkage, team controls, settings and RAG forms passed.");
+  console.log("Workspace/composer DOM: search removed with history retained, right-side directory browse, all preview renderers, safe text, reference chips, 7 executable menu actions, keyboard/outside dismissal, uploads, commands/search submission, plan mode and retry preservation passed.");
 } finally { await window.happyDOM.close(); }

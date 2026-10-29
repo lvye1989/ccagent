@@ -41,8 +41,6 @@
 .recent-item:hover, .recent-item.active { background: #eee; color: #202020; }
 .sidebar-empty { padding-left: 12px; }
 .sidebar-bottom { display: none; }
-.task-search { padding: 6px; }
-.task-search input { height: 35px; border-radius: 8px; }
 .app-shell.sidebar-collapsed .sidebar { display: none; }
 .app-shell.sidebar-collapsed .menu-button { display: grid; }
 

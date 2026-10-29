@@ -72,6 +72,9 @@ import { getActiveTeam } from "../state/teamContext.js";
 import { pendingNotificationCount } from "../state/notificationStore.js";
 import { getRunningAsyncAgents } from "../state/asyncAgentStore.js";
 import { browseWorkingFolders, listFolderLocations, pickNativeWorkingFolder, resolveWorkingFolder } from "./webWorkspaces.js";
+import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWorkspaceAttachment, MAX_UPLOAD } from "./webFiles.js";
+import { getAllUserCommands } from "../commands/userCommands/registry.js";
+import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -89,6 +92,9 @@ const MIME: Record<string, string> = {
   "/customization.css": "text/css; charset=utf-8",
   "/workspace-picker.js": "text/javascript; charset=utf-8",
   "/workspace-picker.css": "text/css; charset=utf-8",
+  "/workspace-files.js": "text/javascript; charset=utf-8",
+  "/composer-tools.js": "text/javascript; charset=utf-8",
+  "/workbench.css": "text/css; charset=utf-8",
   "/styles.css": "text/css; charset=utf-8",
   "/codex-layout.css": "text/css; charset=utf-8",
   "/plugins.css": "text/css; charset=utf-8",
@@ -167,14 +173,14 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   if (!req.headers["content-type"]?.startsWith("application/json")) throw new Error("Expected application/json");
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += bytes.length;
-    if (size > MAX_BODY_BYTES) throw new Error("Request body is too large");
+    if (size > maxBytes) throw new Error("Request body is too large");
     chunks.push(bytes);
   }
   const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
@@ -597,6 +603,34 @@ export async function runWebServer(args: string[]): Promise<void> {
         }
       }
       if (req.method === "GET" && route === "/api/models") return json(res, 200, { defaultModel: model, models: await webModels() });
+      if (req.method === "GET" && route === "/api/composer-tools") {
+        const commands = [
+          { name: "init", description: "分析项目并生成项目说明", kind: "命令" },
+          { name: "help", description: "查看可用命令", kind: "命令" },
+          { name: "cost", description: "查看本次对话用量", kind: "命令" },
+          ...getAllUserCommands().filter((item) => !isBuiltinCommandName(item.name)).map((item) => ({ name: item.name, description: item.description, kind: "自定义命令" })),
+          ...(isAgentSkillsEnabled() ? getAllSkills().filter((item) => isSkillEnabled(item.name) && !isBuiltinCommandName(item.name)).map((item) => ({ name: item.name, description: item.description, kind: "技能" })) : []),
+        ];
+        return json(res, 200, { workspace, commands: [...new Map(commands.map((item) => [item.name, item])).values()] });
+      }
+      if (route.startsWith("/api/files")) {
+        const expected = url.searchParams.get("workspace");
+        if (pluginMutationBusy || (expected !== null && expected !== workspace)) return json(res, 409, { error: "工作文件夹已切换，请刷新文件面板。" });
+        const relative = url.searchParams.get("path") ?? "";
+        if (req.method === "GET" && route === "/api/files") return json(res, 200, await browseWorkspaceFiles(workspace, relative, url.searchParams.get("query") ?? "", url.searchParams.get("hidden") === "1", Number(url.searchParams.get("offset") ?? 0)));
+        if (req.method === "GET" && route === "/api/files/preview") return json(res, 200, { workspace, ...await previewWorkspaceFile(workspace, relative) });
+        if (req.method === "GET" && (route === "/api/files/content" || route === "/api/files/download")) return await serveWorkspaceFile(req, res, workspace, relative, route.endsWith("download"));
+        if (req.method === "POST" && route === "/api/files/upload") {
+          const body = await readJson(req, Math.ceil(MAX_UPLOAD / 3) * 4 + 4096);
+          if (body.workspace !== workspace || pluginMutationBusy) return json(res, 409, { error: "工作文件夹已切换，请重新添加附件。" });
+          const attachment = await saveWorkspaceAttachment(workspace, body.name, body.base64);
+          if (attachment.format === "office") {
+            try { return json(res, 201, { ...attachment, ...await previewWorkspaceFile(attachment.workspace, attachment.path) }); }
+            catch { /* The original attachment remains usable even without a preview. */ }
+          }
+          return json(res, 201, attachment);
+        }
+      }
       if (req.method === "GET" && route === "/api/workspaces") return json(res, 200, { current: workspace, recent: await listWebWorkspaces(), locations: await listFolderLocations(), nativePickerAvailable: process.platform === "win32" });
       if (req.method === "GET" && route === "/api/workspaces/browse") return json(res, 200, await browseWorkingFolders(url.searchParams.get("path") || workspace, url.searchParams.get("query") ?? "", url.searchParams.get("hidden") === "1"));
       if (req.method === "POST" && route === "/api/workspaces/pick") {

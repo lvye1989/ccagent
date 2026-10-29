@@ -8,6 +8,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { setPluginEnabled } from "../plugins/enable.js";
+import { checkWebFiles } from "./webFilesChecks.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const entry = path.join(root, "dist", "ccagent.js");
@@ -152,6 +153,10 @@ try {
   assert.equal(foreignOrigin.status, 403);
 
   const headers = { "content-type": "application/json", "x-ccagent-web": "1" };
+  await checkWebFiles(base, workspace, headers);
+  assert.equal((await fetch(`${base}/workspace-files.js`)).status, 200);
+  assert.equal((await fetch(`${base}/composer-tools.js`)).status, 200);
+  assert.equal((await fetch(`${base}/workbench.css`)).status, 200);
   const agentsBefore = await (await fetch(`${base}/api/agents`)).json() as { agents: { name: string; enabled: boolean; source: string }[] };
   assert(agentsBefore.agents.some((agent) => agent.source === "built-in"), "Web lists built-in agents");
   const agentName = agentsBefore.agents[0]!.name;

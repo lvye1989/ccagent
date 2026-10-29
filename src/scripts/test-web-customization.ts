@@ -9,7 +9,10 @@ const root = path.resolve(import.meta.dirname, "../..");
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-customization-")));
 const workspace = path.join(temp, "workspace"), home = path.join(temp, "home");
 await fs.mkdir(workspace); await fs.mkdir(home);
+await fs.mkdir(path.join(workspace, ".ccagent", "commands"), { recursive: true });
+await fs.writeFile(path.join(workspace, ".ccagent", "commands", "menu-review.md"), "---\ndescription: Menu command fixture\n---\nMENU_COMMAND_PROMPT $ARGUMENTS\n");
 const secret = "test-only-local-secret", requests: Record<string, any>[] = [];
+let menuAttachment = "";
 const mock = createServer(async (req, res) => {
   let input = ""; for await (const chunk of req) input += chunk;
   const body = JSON.parse(input || "{}");
@@ -54,7 +57,11 @@ const mock = createServer(async (req, res) => {
   } else if (history.includes("RUN_WORKSPACE_CASE")) {
     if (!has("Read")) tool = { name: "Read", args: { file_path: "workspace-marker.txt" } };
     else output = "WORKSPACE_VERIFIED";
-  }
+  } else if (history.includes("RUN_ATTACHMENT_CASE")) {
+    if (!has("Read")) tool = { name: "Read", args: { file_path: menuAttachment } };
+    else output = "ATTACHMENT_VERIFIED";
+  } else if (history.includes("RUN_TOOL_MENU_SKILL")) output = "MENU_SKILL_FINISHED";
+  else if (history.includes("RUN_TOOL_MENU_COMMAND")) output = "MENU_COMMAND_FINISHED";
   res.writeHead(200, { "content-type": "text/event-stream" });
   const chunk = tool
     ? { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] }, finish_reason: null }] }
@@ -119,7 +126,23 @@ try {
   await fs.writeFile(path.join(skillDir, "scripts/helper.py"), "print('fixture')\n");
   await post("/api/customize/local-skill", { path: skillDir, scope: "project" });
   assert.equal(await fs.readFile(path.join(workspace, ".ccagent/skills/package-skill/scripts/helper.py"), "utf8"), "print('fixture')\n");
+  let menuCommands = (await get("/api/composer-tools")).commands;
+  assert(menuCommands.some((item: any) => item.name === "package-skill"));
+  assert(menuCommands.some((item: any) => item.name === "menu-review"));
+  const menuSession = await post("/api/sessions", { mode: "full" }, 201);
+  await turn(menuSession.sessionId, "/package-skill RUN_TOOL_MENU_SKILL", "MENU_SKILL_FINISHED");
+  assert(requests.some((request) => JSON.stringify(request.messages).includes("PACKAGED_SKILL") && JSON.stringify(request.messages).includes("RUN_TOOL_MENU_SKILL")), "Menu skill runs the real prompt expansion");
+  const commandSession = await post("/api/sessions", { mode: "full" }, 201);
+  await turn(commandSession.sessionId, "/menu-review RUN_TOOL_MENU_COMMAND", "MENU_COMMAND_FINISHED");
+  assert(requests.some((request) => JSON.stringify(request.messages).includes("MENU_COMMAND_PROMPT RUN_TOOL_MENU_COMMAND")), "Menu custom command reaches the real engine");
+  const attachment = await post("/api/files/upload", { workspace, name: "菜单 附件.txt", base64: Buffer.from("ATTACHMENT_READ_EVIDENCE").toString("base64") }, 201);
+  menuAttachment = attachment.path;
+  const attachmentSession = await post("/api/sessions", { mode: "full" }, 201);
+  const attachmentTurn = await turn(attachmentSession.sessionId, `RUN_ATTACHMENT_CASE\n[用户引用的工作区文件，请使用文件工具读取]\n- ${JSON.stringify(menuAttachment)}\n[/用户引用的工作区文件]`, "ATTACHMENT_VERIFIED");
+  assert.match(JSON.stringify(attachmentTurn.messages), /ATTACHMENT_READ_EVIDENCE/, "Uploaded attachment is readable through the actual tool dispatcher");
   await post("/api/skills/state", { name: "package-skill", state: "close" });
+  menuCommands = (await get("/api/composer-tools")).commands;
+  assert(!menuCommands.some((item: any) => item.name === "package-skill"), "Closed skills disappear from the tool menu");
   assert((await get("/api/skills")).skills.some((s: any) => s.name === "package-skill" && !s.enabled));
   const countBefore = requests.length; await turn(one.sessionId, "/package-skill"); assert.equal(requests.length, countBefore, "Closed slash command never reaches the model");
   const closedSkill = await post("/api/sessions", { mode: "full" }, 201);
@@ -187,6 +210,8 @@ try {
   await fs.writeFile(path.join(workspace, "workspace-marker.txt"), "PREVIOUS_WORKSPACE_MARKER");
   await fs.writeFile(path.join(selectedFolder, "workspace-marker.txt"), "SELECTED_WORKSPACE_MARKER");
   await post("/api/workspaces/select", { path: selectedFolder });
+  assert.equal((await get("/api/files")).workspace, selectedFolder);
+  assert(!(await get("/api/composer-tools")).commands.some((item: any) => item.name === "menu-review"), "Menu commands follow the selected workspace");
   const selectedSession = await post("/api/sessions", { mode: "full" }, 201);
   const selectedTurn = await turn(selectedSession.sessionId, "RUN_WORKSPACE_CASE", "WORKSPACE_VERIFIED");
   assert.match(JSON.stringify(selectedTurn.messages), /SELECTED_WORKSPACE_MARKER/, "Tools execute relative to the selected folder");

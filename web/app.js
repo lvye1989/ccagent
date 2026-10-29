@@ -6,9 +6,11 @@ import { createMemoryUI } from "./memory.js";
 import { createSchedulesUI } from "./schedules.js";
 import { createCustomizationUI } from "./customization.js";
 import { createWorkspacePicker } from "./workspace-picker.js";
+import { createWorkspaceFiles } from "./workspace-files.js";
+import { createComposerTools } from "./composer-tools.js";
 
 const $ = (id) => document.getElementById(id);
-const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), taskSearch: "", storageWarningShown: false };
+const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), storageWarningShown: false };
 let toastTimer;
 
 function toast(message) {
@@ -51,14 +53,13 @@ function renderSessions() {
   $("task-count").textContent = state.sessions.length ? String(state.sessions.length) : "";
   const list = $("recent-list");
   list.replaceChildren();
-  const filtered = state.sessions.filter((session) => taskTitle(session).toLocaleLowerCase().includes(state.taskSearch));
-  if (!filtered.length) {
+  if (!state.sessions.length) {
     const empty = document.createElement("div");
     empty.className = "sidebar-empty";
-    empty.textContent = state.taskSearch ? "没有匹配的任务" : "还没有任务，点击新聊天开始";
+    empty.textContent = "还没有任务，点击新聊天开始";
     list.append(empty);
   }
-  for (const session of filtered) {
+  for (const session of state.sessions) {
     const button = document.createElement("button");
     button.className = `recent-item${session.sessionId === state.sessionId ? " active" : ""}`;
     button.textContent = taskTitle(session);
@@ -154,6 +155,8 @@ async function showDiff(file) {
 
 function setView(view) {
   state.view = view;
+  workspaceFiles.setView(view);
+  composerTools.close();
   const customizing = ["plugins", "skills", "agents", "mcp", "teams"].includes(view);
   const feature = ["schedules", "library", "memory"].includes(view);
   document.querySelector(".main-area").classList.toggle("home-active", view === "tasks");
@@ -736,8 +739,10 @@ async function openSession(id) {
 }
 
 async function submit(text, mode) {
-  const input = text.trim();
+  const inputId = state.view === "thread" ? "thread-input" : "home-input";
+  const input = composerTools.prepare(text.trim(), inputId);
   if (!input) return false;
+  if (input.length > 50000) { toast("单条消息不能超过 50000 字符。"); return false; }
   try {
     if (!state.sessionId || state.view !== "thread") {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ mode, model: state.selectedModel || undefined, team: $("home-team").value }) });
@@ -745,17 +750,27 @@ async function submit(text, mode) {
       if (!(await openSession(created.sessionId))) return false;
     }
     await api(`/api/sessions/${state.sessionId}/messages`, { method: "POST", body: JSON.stringify({ text: input }) });
+    composerTools.clear(inputId);
     $("home-input").value = "";
     $("thread-input").value = "";
     return true;
-  } catch (error) { toast(error.message); return false; }
+  } catch (error) {
+    if (inputId === "home-input" && state.view === "thread") {
+      composerTools.move("home-input", "thread-input");
+      $("thread-input").value = text;
+      $("home-input").value = "";
+    }
+    toast(error.message); return false;
+  }
 }
 
 async function refreshSessions() {
   try {
     const data = await api("/api/bootstrap");
     state.sessions = data.sessions;
+    if (state.workspace && state.workspace !== data.workspace) composerTools.workspaceChanged();
     state.workspace = data.workspace;
+    await workspaceFiles.workspaceChanged(state.workspace);
     if (!state.sessionId) state.model = data.model;
     state.version = data.version;
     $("home-mode").value = data.defaultMode || "default";
@@ -784,6 +799,7 @@ async function refreshChanges() {
 }
 
 function newTask() {
+  composerTools.clear("thread-input");
   voiceUI.stop();
   browserUI.restore(null);
   state.source?.close();
@@ -805,9 +821,11 @@ async function selectWorkspace(folder) {
     if (result.workspace !== state.workspace) {
       newTask();
       state.workspace = result.workspace;
+      composerTools.workspaceChanged();
       state.selectedModel = "";
       await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
     }
+    await workspaceFiles.workspaceChanged(result.workspace, true);
     toast(result.warning || `已在 ${shortWorkspace()} 中工作`);
     } finally { state.switchingWorkspace = false; }
 }
@@ -822,32 +840,10 @@ function installHandlers() {
   $("new-task").addEventListener("click", newTask);
   $("rail-new-task").addEventListener("click", newTask);
   $("brand-home").addEventListener("click", newTask);
-  const openSearch = () => { $("sidebar").classList.add("open"); $("task-search-box").classList.remove("hidden"); $("task-search-input").focus(); };
-  $("rail-history").addEventListener("click", openSearch);
-  $("search-tasks").addEventListener("click", openSearch);
-  $("task-search-input").addEventListener("input", (event) => { state.taskSearch = event.target.value.trim().toLocaleLowerCase(); renderSessions(); });
-  $("insert-command").addEventListener("click", () => { $("home-input").value += "/"; $("home-input").focus(); });
-  $("chat-insert-command").addEventListener("click", () => { $("home-input").value += "/"; $("home-input").focus(); });
   $("surface-chat").addEventListener("click", () => setComposeMode("chat"));
   $("surface-work").addEventListener("click", () => setComposeMode("work"));
   $("home-plugins").addEventListener("click", () => setView("plugins"));
-  $("home-file").addEventListener("click", () => $("home-file-input").click());
-  $("home-file-input").addEventListener("change", async (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    if (file.size > 128 * 1024) return toast("文件超过 128 KB。请提供工作区内的文件路径。");
-    try {
-      const content = await file.text();
-      if (content.includes("\0")) return toast("该文件不是可读取的文本文件。");
-      const input = $("home-input");
-      const nextValue = `${input.value.trimEnd()}${input.value.trim() ? "\n\n" : ""}[文件：${file.name}]\n${content}\n[/文件]`;
-      if (nextValue.length > 50000) return toast("加入文件后会超过单条消息 50000 字符的限制。");
-      input.value = nextValue;
-      input.focus();
-      toast("文件内容已加入输入框，请检查后发送。");
-    } catch (error) { toast(`读取文件失败：${error.message}`); }
-  });
+  $("home-file").addEventListener("click", () => void workspaceFiles.open());
   $("context-workspace").addEventListener("click", () => void workspacePicker.open());
   $("thread-workspace-select").addEventListener("click", () => void workspacePicker.open());
   $("workspace-project").addEventListener("click", () => void workspacePicker.open());
@@ -899,7 +895,7 @@ function installHandlers() {
     if (event.key === "Escape" && !$("interaction-overlay").classList.contains("hidden")) answerInteraction(false);
     if (event.key === "Escape") workspacePicker.close();
   });
-  $("refresh-all").addEventListener("click", () => { if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); } });
+  $("refresh-all").addEventListener("click", () => { if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
   $("activity-refresh").addEventListener("click", refreshChanges);
   $("close-diff").addEventListener("click", () => $("diff-view").classList.add("hidden"));
   $("stop-button").addEventListener("click", async () => {
@@ -933,6 +929,8 @@ const customizationUI = createCustomizationUI({ api, toast, navigate: setView, g
   else if (resource === "settings") { const data = await api("/api/customize/settings"); $("home-mode").value = data.settings.mode || "default"; document.body.classList.toggle("reduce-motion", data.settings.prefersReducedMotion === true); }
 } });
 const workspacePicker = createWorkspacePicker({ api, onSelect: selectWorkspace, getWorkspace: () => state.workspace });
+const workspaceFiles = createWorkspaceFiles({ api, toast, getWorkspace: () => state.workspace, reference: (file) => composerTools.reference(file) });
+const composerTools = createComposerTools({ api, toast, getWorkspace: () => state.workspace, getInput: () => $(state.view === "thread" ? "thread-input" : "home-input"), files: workspaceFiles, chooseWorkspace: () => workspacePicker.open(), navigate: setView });
 installHandlers();
 setComposeMode("work");
 await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
