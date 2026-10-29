@@ -10,7 +10,7 @@ function speakable(text) {
     .slice(0, 4000);
 }
 
-export function createVoiceUI({ submit, getBusy, getMode }) {
+export function createVoiceUI({ submit, getBusy, getMode, toast = () => {} }) {
   const overlay = $("voice-overlay");
   const dialog = overlay.querySelector(".voice-dialog");
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -20,6 +20,56 @@ export function createVoiceUI({ submit, getBusy, getMode }) {
   let restartTimer = null;
   let awaitingReply = false;
   let reply = "";
+  let dictation = null;
+
+  function stopDictation(abort = true) {
+    const previous = dictation;
+    if (!previous) return;
+    dictation = null;
+    previous.button.setAttribute("aria-pressed", "false");
+    previous.button.setAttribute("aria-label", "语音输入");
+    previous.button.title = "语音输入";
+    previous.recognizer.onresult = null;
+    previous.recognizer.onerror = null;
+    previous.recognizer.onend = null;
+    if (abort) { try { previous.recognizer.abort(); } catch { /* Already stopped. */ } }
+  }
+
+  function dictate(prefix) {
+    if (dictation?.prefix === prefix) { try { dictation.recognizer.stop(); } catch { stopDictation(); } return; }
+    stopDictation();
+    if (!Recognition) { toast("此浏览器不支持语音输入，请使用支持语音识别的浏览器。"); return; }
+    if (getBusy()) { toast("请等待当前任务完成后使用语音输入。"); return; }
+    stop();
+    const input = $(`${prefix}-input`), button = $(`${prefix}-dictate`), recognizer = new Recognition();
+    dictation = { prefix, button, recognizer };
+    button.setAttribute("aria-pressed", "true");
+    button.setAttribute("aria-label", "停止语音输入");
+    button.title = "停止语音输入";
+    recognizer.lang = navigator.language || "zh-CN";
+    recognizer.continuous = false;
+    recognizer.interimResults = false;
+    recognizer.onresult = (event) => {
+      if (dictation?.recognizer !== recognizer || input.disabled) return;
+      let text = "";
+      for (let index = event.resultIndex; index < event.results.length; index++) if (event.results[index].isFinal) text += event.results[index][0]?.transcript || "";
+      if (!text.trim()) return;
+      const value = `${input.value.trimEnd()}${input.value.trim() ? " " : ""}${text.trim()}`;
+      if (value.length > 50000) { toast("语音输入后会超过单条消息 50000 字符的限制。"); stopDictation(); return; }
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    };
+    recognizer.onerror = (event) => {
+      if (dictation?.recognizer !== recognizer) return;
+      stopDictation(false);
+      if (event.error === "aborted") return;
+      toast(["not-allowed", "service-not-allowed"].includes(event.error) ? "请允许浏览器使用麦克风。" : event.error === "no-speech" ? "没有识别到语音，请重试。" : `语音输入失败：${event.error}`);
+    };
+    recognizer.onend = () => { if (dictation?.recognizer === recognizer) stopDictation(false); };
+    try { recognizer.start(); }
+    catch (error) { stopDictation(); toast(`无法启动语音输入：${error.message}`); }
+  }
 
   function show(state, status, caption) {
     dialog.dataset.state = state;
@@ -41,6 +91,7 @@ export function createVoiceUI({ submit, getBusy, getMode }) {
   }
 
   function stop() {
+    stopDictation();
     active = false;
     awaitingReply = false;
     reply = "";
@@ -151,12 +202,13 @@ export function createVoiceUI({ submit, getBusy, getMode }) {
   }
 
   for (const id of ["home-voice", "thread-voice"]) $(id).addEventListener("click", start);
+  for (const prefix of ["home", "thread"]) $(`${prefix}-dictate`).addEventListener("click", () => dictate(prefix));
   for (const id of ["voice-close", "voice-stop"]) $(id).addEventListener("click", stop);
   overlay.addEventListener("click", (event) => { if (event.target === overlay) stop(); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !overlay.classList.contains("hidden")) stop(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") { stopDictation(); if (!overlay.classList.contains("hidden")) stop(); } });
 
   return {
-    stop,
+    stop, stopDictation,
     handleEvent(event) {
       if (!active || !awaitingReply) return;
       if (event.type === "assistant") {

@@ -19,7 +19,14 @@ const skill = { name: "test-skill", description: "Skill", source: "project", ena
 const teams = [{ id: "qa-team", name: "QA Team", description: "Evidence", enabled: true, roles: [{ name: "reviewer", agentType: "qa", prompt: "Check facts" }] }];
 let teamEnabled = true;
 const sessionId = "11111111-1111-4111-8111-111111111111";
-let sessionMode = "default", failUpload = false, failSubmit = false;
+let sessionMode = "default", failUpload = false, failSubmit = false, effortLevel = "";
+const recognizers = [];
+window.SpeechRecognition = class {
+  constructor() { recognizers.push(this); }
+  start() { this.started = true; }
+  abort() { this.aborted = true; }
+  stop() { this.onend?.(); }
+};
 const files = [
   { path: "资料", name: "资料", directory: true },
   { path: "code.ts", name: "code.ts", size: 20, format: "text", content: '<script>alert("literal")</script>' },
@@ -50,7 +57,7 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route.startsWith("/api/workspaces/browse")) data = { path: "C:\\offline-project", parent: null, breadcrumbs: [], folders: [], total: 0 };
   else if (route === "/api/changes") data = { files: [] };
   else if (route === "/api/models") data = { defaultModel: "fixture", models };
-  else if (route === "/api/customize/settings") data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60 }, settingsPath: "offline-settings.json", defaultModel: "fixture" };
+  else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
   else if (route === "/api/customize/models") { if (payload) models.push({ id: payload.id, label: payload.id, model: payload.model, available: true }); data = payload ? { id: payload.id } : { models: models.map((m) => ({ ...m, protocol: "openai-chat", baseURL: "https://example.test/v1" })) }; }
   else if (route === "/api/customize/model-test") data = { ok: true, reply: "OK" };
   else if (route === "/api/customize/teams") { if (payload?.op === "global") teamEnabled = payload.enabled; data = { teams, enabled: teamEnabled, activeTeam: null }; }
@@ -73,6 +80,28 @@ const click = async (selector) => { const n = typeof selector === "string" ? doc
 const close = () => click("#editor-close");
 function action(label) { return [...$("editor-actions").querySelectorAll("button")].find((b) => b.textContent === label); }
 try {
+  for (const prefix of ["home", "thread"]) {
+    const form = $(`${prefix}-form`), options = form.querySelector(".composer-options"), actions = form.querySelector(".composer-actions");
+    assert(options.contains($(prefix === "home" ? "insert-command" : "thread-insert-tool")));
+    assert(options.contains($(prefix === "home" ? "home-mode" : "thread-mode-select")), "Permission control sits beside +");
+    assert(actions.contains($(`${prefix}-dictate`))); assert(actions.contains($(`${prefix}-voice`))); assert(actions.contains($(`${prefix}-effort`)));
+  }
+  assert.equal($("thread-insert-tool").textContent, "＋"); assert.equal($("thread-insert-tool").getAttribute("aria-label"), "添加内容与工具");
+  assert($("home-send").classList.contains("hidden")); assert(!$("home-voice").classList.contains("hidden"));
+  const beforeDictationCalls = calls.length;
+  await click("#home-dictate"); const speech = recognizers.at(-1); assert(speech.started);
+  assert.equal($("home-dictate").getAttribute("aria-pressed"), "true");
+  speech.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "语音测试内容" }], { isFinal: true })] });
+  assert.equal($("home-input").value, "语音测试内容"); assert(!$("home-send").classList.contains("hidden")); assert($("home-voice").classList.contains("hidden"));
+  assert.equal(calls.length, beforeDictationCalls, "Dictation never sends without user action");
+  speech.onend(); assert.equal($("home-dictate").getAttribute("aria-pressed"), "false");
+  $("home-input").value = ""; $("home-input").dispatchEvent(new window.Event("input"));
+  assert($("home-send").classList.contains("hidden")); assert(!$("home-voice").classList.contains("hidden"));
+  await click("#home-dictate"); recognizers.at(-1).onerror({ error: "not-allowed" }); assert.match($("toast").textContent, /麦克风/); assert.equal($("home-dictate").getAttribute("aria-pressed"), "false");
+  $("home-mode").value = "full";
+  $("home-effort").value = "max"; $("home-effort").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  assert(calls.some((call) => call.route === "/api/customize/settings" && call.payload?.effortLevel === "max")); assert.equal($("thread-effort").value, "max");
+  assert.equal($("home-mode").value, "full", "Changing effort preserves the user's selected permission mode"); $("home-mode").value = "plan";
   assert.equal($("search-tasks"), null); assert.equal($("rail-history"), null); assert.equal($("task-search-box"), null);
   assert.match($("recent-list").textContent, /保留的历史任务/, "Removing task search preserves history");
   assert(!$("workspace-files").classList.contains("hidden"), "Desktop home exposes the selected workspace on the right");
@@ -110,7 +139,7 @@ try {
   $("thread-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); assert($("thread-input-attachments").classList.contains("hidden"), "Retry consumes the preserved reference");
   await click("#new-task");
   await click("#insert-command"); await click(tool("插件与 MCP")); assert(!$("plugins-view").classList.contains("hidden"));
-  await click("#brand-home"); await click("#surface-chat"); await click("#chat-insert-command"); assert(!$("composer-tools").classList.contains("hidden"));
+  await click("#brand-home"); await click("#surface-chat"); await click("#insert-command"); assert(!$("composer-tools").classList.contains("hidden"));
   document.body.click(); await settle(); assert($("composer-tools").classList.contains("hidden"));
   await click("#surface-work"); await click("#insert-command"); await click(tool("计划模式"));
   assert.equal($("home-mode").value, "plan");

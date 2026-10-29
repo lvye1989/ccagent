@@ -24,7 +24,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   addButton("skill-import", "skill-local-path", "加载技能目录");
   addButton("library-refresh", "library-rag", "外接 RAG 知识库");
   const homeTeamRow = el("div", "home-team-choice"); document.querySelector(".composer-context").after(homeTeamRow);
-  for (const [id, parent] of [["home-team", homeTeamRow], ["thread-team", document.querySelector(".thread-composer .composer-footer")]]) {
+  for (const [id, parent] of [["home-team", homeTeamRow], ["thread-team", document.querySelector(".thread-context")]]) {
     const wrap = el("label", "context-team", "Agent Team"); const select = el("select"); select.id = id; select.setAttribute("aria-label", id === "home-team" ? "新对话 Agent Team" : "当前对话 Agent Team");
     const off = el("option", "", "不启用团队"); off.value = "off"; select.append(off); wrap.append(select); parent.append(wrap);
   }
@@ -277,7 +277,22 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     try { await api(`/api/sessions/${getSessionId()}/team`, { method: "POST", body: JSON.stringify({ team: event.target.value }) }); toast("当前对话的团队设置已更新"); }
     catch (error) { toast(error.message); await changed("session"); }
   });
-  async function refreshPreferences() { const data = await request("settings"); $("home-mode").value = data.settings.mode || "default"; document.body.classList.toggle("reduce-motion", data.settings.prefersReducedMotion === true); }
+  let currentEffort = "", effortBusy = false;
+  async function refreshPreferences({ preserveMode = false } = {}) {
+    const data = await request("settings");
+    if (!preserveMode) $("home-mode").value = data.settings.mode || "default";
+    currentEffort = data.settings.effortLevel || "";
+    for (const id of ["home-effort", "thread-effort"]) $(id).value = currentEffort;
+    document.body.classList.toggle("reduce-motion", data.settings.prefersReducedMotion === true);
+  }
+  for (const id of ["home-effort", "thread-effort"]) $(id).addEventListener("change", async (event) => {
+    if (effortBusy || getBusy()) { event.target.value = currentEffort; return; }
+    effortBusy = true;
+    for (const selectId of ["home-effort", "thread-effort"]) $(selectId).disabled = true;
+    try { await request("settings", { effortLevel: event.target.value }); await refreshPreferences({ preserveMode: true }); }
+    catch (error) { for (const selectId of ["home-effort", "thread-effort"]) $(selectId).value = currentEffort; toast(error.message); }
+    finally { effortBusy = false; for (const selectId of ["home-effort", "thread-effort"]) $(selectId).disabled = getBusy(); }
+  });
   return { agentEditor, refreshTeams, refreshPreferences, open: async (view) => { if (view === "settings") await renderSettings(); else if (view === "teams") await refreshTeams(); }, setSessionTeam: (team) => {
     const select = $("thread-team");
     if (team && ![...select.options].some((o) => o.value === team)) { const option = el("option", "", "原团队已关闭"); option.value = team; option.disabled = true; select.append(option); }

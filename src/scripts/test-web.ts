@@ -96,7 +96,7 @@ try {
   assert.match(html, /browser-panel\.css/);
   assert.match(html, /id="agents-view"/);
   assert.match(html, /id="skill-import"/);
-  assert.match(html, /value="full">完全访问权益/);
+  assert.match(html, /value="full">完全访问/);
   assert.match(html, /id="temporary-chat"/);
   assert.match(html, /id="library-view"/);
   assert.match(html, /id="memory-view"/);

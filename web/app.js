@@ -154,6 +154,7 @@ async function showDiff(file) {
 }
 
 function setView(view) {
+  if (view !== state.view) voiceUI.stopDictation();
   state.view = view;
   workspaceFiles.setView(view);
   composerTools.close();
@@ -203,7 +204,7 @@ function setComposeMode(mode) {
   if (mode === "chat") $("home-mode").value = "default";
   $("home-view").dataset.composeMode = mode;
   $("home-greeting").textContent = mode === "chat" ? "今天想聊点什么？" : "我们要做什么？";
-  $("home-input").placeholder = mode === "chat" ? "询问 CCAGENT" : "使用 CCAGENT 工作";
+  $("home-input").placeholder = mode === "chat" ? "询问 CCAGENT" : "和 CCAGENT 一起工作";
   for (const value of ["chat", "work"]) {
     const button = $(value === "chat" ? "surface-chat" : "surface-work");
     button.classList.toggle("selected", value === mode);
@@ -546,6 +547,7 @@ function renderStoredMessages(messages) {
 }
 
 function setBusy(busy) {
+  if (busy) voiceUI.stopDictation();
   state.busy = busy;
   customizationUI.syncBusy(busy);
   $("thread-status-label").textContent = busy ? "正在执行" : "就绪";
@@ -555,6 +557,8 @@ function setBusy(busy) {
   $("thread-input").disabled = busy;
   $("thread-model-select").disabled = busy || !state.availableModels.some((item) => item.available);
   $("thread-mode-select").disabled = busy;
+  for (const id of ["home-effort", "thread-effort", "thread-dictate"]) $(id).disabled = busy;
+  composerTools.sync();
   renderActivity();
 }
 
@@ -753,12 +757,14 @@ async function submit(text, mode) {
     composerTools.clear(inputId);
     $("home-input").value = "";
     $("thread-input").value = "";
+    composerTools.sync();
     return true;
   } catch (error) {
     if (inputId === "home-input" && state.view === "thread") {
       composerTools.move("home-input", "thread-input");
       $("thread-input").value = text;
       $("home-input").value = "";
+      composerTools.sync();
     }
     toast(error.message); return false;
   }
@@ -909,24 +915,16 @@ function installHandlers() {
 
 const pluginUI = createPluginUI({ api, toast, navigate: setView, editAgent: (agent) => customizationUI.agentEditor(agent) });
 $("feature-schedule-list").append($("schedule-list"));
-const threadModeSelect = document.createElement("select");
-threadModeSelect.id = "thread-mode-select";
-threadModeSelect.className = "mode-select";
-threadModeSelect.setAttribute("aria-label", "权限模式");
-for (const [value, label] of [["default", "默认"], ["plan", "计划"], ["auto", "自动"], ["full", "完全访问权益"]]) {
-  const option = document.createElement("option"); option.value = value; option.textContent = label; threadModeSelect.append(option);
-}
-document.querySelector(".thread-composer .composer-actions").prepend(threadModeSelect);
 const libraryUI = createLibraryUI({ api, toast });
 const memoryUI = createMemoryUI({ api, toast, onDelete: (id) => { if (state.sessionId === id) { state.source?.close(); state.sessionId = null; } void refreshSessions(); } });
 const schedulesUI = createSchedulesUI({ api, toast, openSession: (id) => void openSession(id) });
 const browserUI = createBrowserPanel({ api, toast, getSessionId: () => state.sessionId });
-const voiceUI = createVoiceUI({ submit, getBusy: () => state.busy, getMode: () => $("home-mode").value });
+const voiceUI = createVoiceUI({ submit, getBusy: () => state.busy, getMode: () => $(state.view === "thread" ? "thread-mode-select" : "home-mode").value, toast });
 const customizationUI = createCustomizationUI({ api, toast, navigate: setView, getModel: () => state.selectedModel || state.model, getSessionId: () => state.sessionId, getBusy: () => state.busy, changed: async (resource) => {
   if (["agents", "skills", "mcp"].includes(resource)) await pluginUI.open(resource);
   else if (resource === "models") { state.selectedModel = ""; await refreshModels(); }
   else if (resource === "session" && state.sessionId) await openSession(state.sessionId);
-  else if (resource === "settings") { const data = await api("/api/customize/settings"); $("home-mode").value = data.settings.mode || "default"; document.body.classList.toggle("reduce-motion", data.settings.prefersReducedMotion === true); }
+  else if (resource === "settings") await customizationUI.refreshPreferences();
 } });
 const workspacePicker = createWorkspacePicker({ api, onSelect: selectWorkspace, getWorkspace: () => state.workspace });
 const workspaceFiles = createWorkspaceFiles({ api, toast, getWorkspace: () => state.workspace, reference: (file) => composerTools.reference(file) });

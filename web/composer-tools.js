@@ -12,9 +12,19 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
   const drafts = new Map(["home-input", "thread-input"].map((id) => [id, { files: [], search: false, uploading: 0 }]));
   let anchor = null, inputId = "home-input", request = 0, generation = 0;
 
+  function syncInput(id) {
+    const input = $(id), prefix = id === "home-input" ? "home" : "thread";
+    const draft = drafts.get(id), content = Boolean(input.value.trim() || draft.files.length || draft.uploading);
+    $(`${prefix}-send`).classList.toggle("hidden", !content || input.disabled);
+    $(`${prefix}-send`).disabled = input.disabled || draft.uploading > 0;
+    $(`${prefix}-voice`).classList.toggle("hidden", content || input.disabled);
+  }
+
   for (const id of drafts.keys()) {
     const chips = document.createElement("div"); chips.id = `${id}-attachments`; chips.className = "composer-attachments hidden";
     $(id).after(chips);
+    for (const event of ["input", "focus"]) $(id).addEventListener(event, () => syncInput(id));
+    syncInput(id);
   }
   function render(id) {
     const draft = drafts.get(id), chips = $(`${id}-attachments`);
@@ -31,6 +41,7 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
     if (draft.uploading) { const pending = document.createElement("span"); pending.className = "composer-uploading"; pending.textContent = `正在添加 ${draft.uploading} 个文件…`; chips.append(pending); }
     chips.classList.toggle("hidden", !chips.childElementCount);
     $(id).closest("form").classList.toggle("has-attachments", chips.childElementCount > 0);
+    syncInput(id);
   }
   function reference(file, id = getInput().id) {
     const draft = drafts.get(id);
@@ -109,7 +120,7 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
       finally { if (version === generation) { draft.uploading--; render(id); } }
     }
   });
-  for (const id of ["insert-command", "chat-insert-command", "thread-insert-tool"]) {
+  for (const id of ["insert-command", "thread-insert-tool"]) {
     const button = $(id); button.setAttribute("aria-haspopup", "menu"); button.setAttribute("aria-expanded", "false"); button.setAttribute("aria-controls", menu.id);
     button.addEventListener("click", () => show(button));
   }
@@ -125,10 +136,11 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
   });
   window.addEventListener("resize", () => close());
   return {
-    reference, close,
+    reference, close, sync: () => { for (const id of drafts.keys()) syncInput(id); },
     prepare: (text, id) => {
       const draft = drafts.get(id);
       if (draft.uploading) { toast("请等待附件添加完成后发送。"); return null; }
+      if (!text && !draft.files.length) return null;
       const references = draft.files.map((file) => `- ${JSON.stringify(file.path)} (${file.size ?? 0} 字节)`);
       const office = draft.files.filter((file) => file.format === "office" && (file.content || file.sheets)).map((file) => {
         const content = file.content || file.sheets.map((sheet) => `${sheet.name}\n${sheet.rows.map((row) => row.join("\t")).join("\n")}`).join("\n\n");

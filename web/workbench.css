@@ -68,8 +68,6 @@
 .composer-uploading { padding: 6px; color: #9096a3; font-size: 11px; }
 .thread-composer .thread-workspace-button { margin-right: auto; max-width: 28%; overflow: hidden; }
 .thread-composer .thread-workspace-button > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home-view[data-compose-mode="chat"] .hero-composer.has-attachments { height: auto; flex-wrap: wrap; }
-.home-view[data-compose-mode="chat"] .hero-composer.has-attachments .composer-attachments { order: 4; flex-basis: 100%; padding-top: 5px; }
 .workbench-body.files-open .composer-context { gap: 10px; font-size: 11px; }
 .workbench-body.files-open .context-computer { display: none; }
 .workbench-body.files-open .context-workspace { max-width: 120px; }
@@ -93,4 +91,42 @@
   .files-toggle { width: 28px; padding: 5px; font-size: 0; }
   .files-toggle::before { content: '▤'; font-size: 17px; }
   .main-area.home-active .surface-switch { width: 140px; margin-right: 20px; }
+}
+
+/* Reference composer: text above; tools/permission left and model/voice right. */
+.composer.hero-composer, .composer.thread-composer { min-height: 100px; padding: 0; border: 1px solid #ededee; border-radius: 24px; background: #fff; box-shadow: 0 3px 15px #20202506; }
+.composer.hero-composer textarea, .composer.thread-composer textarea { width: 100%; height: 56px; min-height: 56px; padding: 14px 13px 4px; border-radius: 24px 24px 0 0; background: transparent; font-size: 14px; line-height: 1.5; }
+.composer textarea::placeholder { color: #c4c4c8; }
+.composer .composer-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px 10px; min-height: 42px; padding: 3px 9px 9px; }
+.composer .composer-options { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+.composer .composer-plus { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #29292e; font-size: 21px; line-height: 1; font-weight: 300; }
+.composer .composer-plus:hover { background: #f4f4f5; }
+.composer-permission { display: flex; align-items: center; gap: 4px; color: #6d6d76; }
+.composer-permission svg { width: 14px; height: 14px; flex-shrink: 0; }
+.composer-permission .mode-select { appearance: none; width: auto; max-width: 105px; height: 28px; padding: 0 2px; border: 0; background: transparent; color: inherit; font-size: 12px; }
+.composer-permission:hover { border-radius: 6px; background: #f6f6f7; }
+.composer-permission:has(option[value="full"]:checked) { color: #f4662e; }
+.composer-permission:has(option[value="plan"]:checked) { color: #8e67c4; }
+.composer-permission option { color: #3f3f47; background: #fff; }
+.composer .composer-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; min-width: 0; }
+.composer .model-select { max-width: 155px; height: 28px; padding: 0 3px; font-size: 12px; color: #34343b; }
+.effort-select { appearance: auto; width: auto; max-width: 72px; height: 28px; padding: 0 2px; border: 0; border-radius: 6px; background: transparent; color: #a55de2; font-size: 12px; cursor: pointer; }
+.effort-select:hover { background: #f8f4fc; }
+.effort-select option { background: #fff; color: #5b5269; }
+.dictation-button { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #25252a; }
+.dictation-button svg { width: 17px; height: 17px; }
+.dictation-button:hover { background: #f4f4f5; }
+.dictation-button[aria-pressed="true"] { color: #d95e45; background: #fff0ec; }
+.composer .voice-launch, .composer .send-button, .composer .stop-button { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: #070707; color: #fff; }
+.composer .voice-launch:hover, .composer .send-button:hover { background: #343438; }
+.composer .voice-launch svg, .composer .send-button svg { width: 18px; height: 18px; }
+.thread-context { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 7px 10px 0; }
+.thread-context .thread-workspace-button { display: inline-flex; margin: 0; max-width: 50%; border: 0; background: transparent; color: #93939d; font-size: 10px; }
+.thread-context .context-team { font-size: 10px; }
+@media (max-width: 600px) {
+  .composer .composer-options { gap: 4px; }
+  .composer .model-select { max-width: 98px; font-size: 11px; }
+  .composer-permission .mode-select { font-size: 11px; }
+  .effort-select { max-width: 56px; font-size: 10px; }
+  .composer .composer-actions { gap: 2px; }
 }
