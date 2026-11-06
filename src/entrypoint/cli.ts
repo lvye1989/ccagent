@@ -27,6 +27,12 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (process.argv[2] === "account") {
+    const { runAccountCommand } = await import("./account.js");
+    process.exitCode = await runAccountCommand(process.argv.slice(3));
+    return;
+  }
+
   if (process.argv[2] === "init") {
     const { runInitCommand } = await import("./init.js");
     process.exitCode = await runInitCommand(process.argv.slice(3));
@@ -46,6 +52,7 @@ CCAGENT v${VERSION} — Terminal-native agentic coding system
 Usage:
   ccagent [options]            (long alias: ccagent)
   ccagent init [--skip-test]   Create user settings, store keys, test models
+  ccagent account             Email login, registration and account settings
   ccagent web [--port 4173]   Start the local web interface
 
 Options:

@@ -100,6 +100,28 @@ ccagent
 安装后的命令可在任意目录运行 `ccagent web --workspace <项目目录>`。
 Web 与终端共用任务引擎和会话存储，详见 [web/README.md](./web/README.md)。
 
+### Windows 桌面安装版
+
+`CCAGENT-Setup-<版本>-x64.exe` 提供中文安装向导、安装范围与位置选择、桌面和开始菜单快捷方式，以及卸载入口。安装完成后启动应用，按向导检查环境、选择工作文件夹、添加模型并测试连接。Node.js / npm 已包含在安装包中；Git / Bash、Python、Rhino 和部分 MCP 的其他依赖按使用的功能另行配置。模型服务仍需使用自己的接口或本地模型。
+
+桌面版复用现有 Web 与 CLI 引擎、权限和配置。用户配置默认保存到 `~/.ccagent`，桌面窗口状态位于 `%APPDATA%/CCAGENT`，项目文件位于选定工作文件夹；升级或卸载不会主动删除这些数据。桌面退出后定时任务暂停，重新打开应用后恢复到期检查。
+
+从 Windows x64 源码环境构建（Node.js 22+）：
+
+```powershell
+npm.cmd ci
+node node_modules/electron/install.js  # 仅在 npm 配置禁用安装脚本时需要
+npm.cmd run desktop:dist
+```
+
+构建脚本从官方地址取得固定版本的 Node.js，核验 SHA256，按明确的资源清单组装程序，生成安装包并复制到当前用户桌面。不会打包开发机器的 `.env`、`.ccagent`、会话或项目数据。产物同时保留在 `output/desktop/release`。
+
+开发与验证命令：`npm.cmd run desktop:prepare` 组装桌面资源，`npm.cmd run desktop:pack` 生成解包运行目录，`npm.cmd run test:desktop` 验证内置运行环境、本地服务、配置、MCP 和退出重启。可以使用 `CCAGENT_TEST_BACKEND` 指定已安装程序的 `resources/backend` 验证实际安装内容。
+
+功能或界面优化应修改 `src/`、`web/`、`desktop/` 中的源文件，然后运行检查、更新版本并重新执行 `desktop:dist`。安装 EXE 是构建成品，不作为日常修改入口。当前构建未配置受信任的代码签名证书，Windows 可能显示“未知发布者”；自动在线升级也尚未接入，升级通过新版安装包完成。
+
+### CLI 首次配置
+
 `ccagent init` 会根据当前账户自动创建 `~/.ccagent/.env` 和
 `~/.ccagent/settings.json`，交互式配置 DeepSeek、可选的 Qwen 视觉模型与
 Jev，并询问是否安装完整的 Google Workspace 官方 MCP 套件。向导会对已配置

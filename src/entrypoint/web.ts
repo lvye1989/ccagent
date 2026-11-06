@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { lstat, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { QueryEngine } from "../core/queryEngine.js";
@@ -61,7 +61,7 @@ import { bootstrapMcp, startMcpServer, refreshGlobalToolRegistry, requestMcpReco
 import { deleteMcpRegistryEntry, getMcpRegistry, getMcpRegistryEntry } from "../services/mcp/registry.js";
 import { isMcpServerEnabled, loadMcpPreferences } from "../services/mcp/preferences.js";
 import { loadMcpConfigs } from "../services/mcp/config.js";
-import { clearServerCache } from "../services/mcp/client.js";
+import { clearServerCache, getActiveMcpConnections } from "../services/mcp/client.js";
 import { VERSION } from "../version.js";
 import { getCCAgentPath } from "../utils/paths.js";
 import { listWorkspaceDocuments, resolveWorkspaceDocument } from "./webLibrary.js";
@@ -573,6 +573,16 @@ export async function runWebServer(args: string[]): Promise<void> {
 
   const server = createServer(async (req, res) => {
     try {
+      // Desktop owns a private service instance. Its token is added by the
+      // Electron main process, never exposed through a renderer bridge.
+      const desktopToken = process.env.CCAGENT_DESKTOP_TOKEN;
+      if (desktopToken) {
+        const supplied = req.headers["x-ccagent-desktop-token"];
+        if (typeof supplied !== "string" || Buffer.byteLength(supplied) !== Buffer.byteLength(desktopToken) ||
+            !timingSafeEqual(Buffer.from(supplied), Buffer.from(desktopToken))) {
+          return json(res, 403, { error: "Desktop authorization required" });
+        }
+      }
       const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
       if (!allowedHosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Invalid host" });
       if (req.headers.origin && !allowedHosts.has(new URL(req.headers.origin).host)) return json(res, 403, { error: "Invalid origin" });
@@ -581,6 +591,9 @@ export async function runWebServer(args: string[]): Promise<void> {
       if (req.method === "POST" && req.headers["x-ccagent-web"] !== "1") return json(res, 403, { error: "Missing local request header" });
 
       if (req.method === "GET" && route === "/api/health") return json(res, 200, { ok: true, version: VERSION });
+      if (req.method === "GET" && route === "/api/desktop/status" && desktopToken) {
+        return json(res, 200, { busy: Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) });
+      }
       if (route.startsWith("/api/customize/")) {
         const resource = route.slice("/api/customize/".length);
         if (req.method === "GET") return json(res, 200, await handleCustomization(resource, "GET", {}, { workspace, defaultModel: model }));
@@ -1169,6 +1182,28 @@ export async function runWebServer(args: string[]): Promise<void> {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve());
   });
+  if (process.env.CCAGENT_DESKTOP_TOKEN && process.send) {
+    let stopping = false;
+    const shutdownDesktopService = async () => {
+      if (stopping) return;
+      stopping = true;
+      server.close();
+      for (const session of sessions.values()) {
+        session.engine.interrupt();
+        for (const client of session.clients) client.end();
+      }
+      await Promise.allSettled(getActiveMcpConnections().map(connection => connection.cleanup()));
+      // Give interrupted turns a short opportunity to finish transcript writes.
+      const deadline = Date.now() + 3000;
+      while ([...sessions.values()].some(session => session.busy) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      server.closeAllConnections();
+      process.exit(0);
+    };
+    process.on("message", message => { if (message === "ccagent:shutdown") void shutdownDesktopService(); });
+    process.once("disconnect", () => { void shutdownDesktopService(); });
+  }
   if (schedulesReady) {
     setInterval(() => { void dispatchScheduledTask().catch((error) => console.warn(`[ccagent web] Scheduled task: ${String(error)}`)); }, 10_000).unref();
     void dispatchScheduledTask();

@@ -1,4 +1,6 @@
 node_modules/
+.vercel/
+.next/
 dist/
 *.tsbuildinfo
 *.tgz
@@ -16,3 +18,5 @@ rhino/output/
 rhino/_diag/
 output/playwright/
 deliverables/
+output/desktop/
+output/desktop-npm-audit.json

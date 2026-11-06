@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>CCAGENT · 开始使用</title><link rel="stylesheet" href="welcome.css"></head>
+<body>
+  <aside class="brand-panel"><div class="wordmark"><span class="brand-icon">C</span> CCAGENT</div>
+    <div class="brand-copy"><div class="eyebrow">YOUR LOCAL AI WORKSPACE</div><h1>从想法出发，<br>把工作向前推进。</h1><p>对话、文件、工具与智能体，<br>汇聚在你的桌面工作区。</p></div>
+    <ol class="steps" aria-label="使用准备"><li class="active">检查运行环境</li><li>选择工作文件夹</li><li>接入你的模型</li><li>准备开始</li></ol>
+    <footer>WINDOWS DESKTOP <span id="version"></span></footer>
+  </aside>
+  <main><header><span id="step-label">使用准备 · 01 / 04</span><span class="status" id="service-status" role="status">正在启动本地服务…</span></header>
+    <section class="pane" data-step="0"><div class="eyebrow">WELCOME</div><h2>欢迎使用 CCAGENT</h2><p class="intro">完成几步简单设置，就能开始你的第一项任务。</p>
+      <div class="check-list"><div><span class="check" id="node-check">…</span><span><strong>内置运行环境</strong><small id="node-note">随应用提供，无需额外安装 Node.js / npm</small></span><b>已包含</b></div>
+        <div><span class="check" id="backend-check">…</span><span><strong>本地任务服务</strong><small>启动、会话与工具执行由桌面应用管理</small></span><b id="backend-note">启动中</b></div>
+        <div><span class="check optional" id="git-check">○</span><span><strong>Git / Bash</strong><small>代码版本管理与 Bash 工具按需使用</small></span><b id="git-note">检测中</b></div>
+        <div><span class="check optional" id="python-check">○</span><span><strong>Python 与专业软件</strong><small>Python 脚本、Rhino 等功能需要相应本机软件</small></span><b id="python-note">按需配置</b></div></div>
+      <div class="note">核心对话与工作区无需开发环境。部分工具、MCP 和专业软件连接可能需要额外依赖；可在需要时配置。</div>
+    </section>
+    <section class="pane" data-step="1" hidden><div class="eyebrow">WORKSPACE</div><h2>为工作选一个位置</h2><p class="intro">生成的文件、项目内容和工作区资料，都从这里开始。</p>
+      <label class="field-label">当前工作文件夹</label><div class="folder-card"><span class="folder-symbol">▱</span><code id="workspace"></code><button id="choose-folder" class="secondary">选择文件夹…</button></div>
+      <div class="detail-grid"><article><strong>独立的项目空间</strong><p>不同项目可以分别管理会话、资料、技能与工作文件。</p></article><article><strong>随时切换</strong><p>进入应用后，点击项目名称旁的文件夹按钮即可切换。</p></article></div>
+      <div class="note">开始执行任务前，请核对工作文件夹。工具执行继续遵循应用中的权限设置。</div>
+    </section>
+    <section class="pane" data-step="2" hidden><div class="eyebrow">MODEL CONNECTION</div><h2>连接你使用的 AI 模型</h2><p class="intro">使用服务商的 API 信息；也支持本机运行的兼容模型服务。</p>
+      <div id="existing-models" hidden><label class="field-label" for="existing-model">已有模型配置</label><div class="inline"><select id="existing-model"></select><button id="test-existing" class="secondary">测试连接</button></div><p class="help">可直接使用已有配置，也可在下方新增连接。</p></div>
+      <form id="model-form"><div class="form-grid"><label>配置名称<input id="model-id" value="my-model" maxlength="64" autocomplete="off" required></label><label>API 协议<select id="model-protocol"><option value="openai-chat">OpenAI 兼容 Chat Completions</option><option value="openai-responses">OpenAI 兼容 Responses</option><option value="anthropic">Anthropic 兼容 Messages</option><option value="gemini">Gemini</option></select></label></div>
+        <label>API 地址<input id="model-url" type="url" placeholder="服务商提供的完整 API 地址，例如 https://…/v1" required></label>
+        <div class="form-grid"><label>模型名称<input id="model-name" placeholder="服务商提供的模型标识" required autocomplete="off"></label><label>API 密钥<input id="model-key" type="password" placeholder="本地免密模型可留空" autocomplete="off"></label></div>
+        <div class="inline actions"><button class="secondary" type="submit" id="save-model">保存模型</button><button class="secondary" type="button" id="test-model" disabled>测试连接</button><span id="model-result" role="status"></span></div></form>
+      <p class="help">密钥通过本机的现有配置机制保存。测试连接会向你填写的服务发送一条简短消息，可能产生少量 API 费用。也可稍后到“设置 → 模型接入”配置。</p>
+    </section>
+    <section class="pane" data-step="3" hidden><div class="success-mark">✓</div><div class="eyebrow">READY WHEN YOU ARE</div><h2>工作区已准备好</h2><p class="intro" id="ready-note">从一段对话开始，也可以让 CCAGENT 协助处理工作文件。</p>
+      <div class="first-task"><span>试试这样描述任务</span><p>“请先查看这个工作文件夹，梳理已有资料，<br>再给出下一步工作建议。”</p></div>
+      <ul class="usage"><li><strong>添加资料</strong>用输入框旁的「＋」附加文件或引用工作区资料。</li><li><strong>扩展能力</strong>在侧栏管理 Agent、MCP、技能和知识库。</li><li><strong>妥善退出</strong>有任务运行时先完成任务；退出应用后定时任务暂停。</li></ul>
+      <div class="note">功能优化请修改项目源文件，再重新构建安装包升级。模型、接口、技能等配置可直接在应用内调整。</div>
+    </section>
+    <p id="error" role="alert"></p>
+    <nav class="bottom"><button id="logs" class="text-button">启动遇到问题？查看日志</button><div><button id="back" class="secondary" hidden>上一步</button><button id="skip" class="text-button" hidden>稍后配置</button><button id="next" class="primary" disabled>正在准备…</button></div></nav>
+  </main><script src="welcome.js"></script>
+</body></html>
