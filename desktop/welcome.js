@@ -26,6 +26,7 @@ async function refreshStatus() {
   try {
     const status = await bridge.status();
     ready = status.ready;
+    if (ready && !status.authenticated) { await bridge.finish(''); return; }
     $('version').textContent = 'v' + status.version;
     $('workspace').textContent = status.workspace || '';
     $('node-check').textContent = '✓';

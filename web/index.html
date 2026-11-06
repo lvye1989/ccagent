@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/workbench.css">
   <link rel="stylesheet" href="/visualization.css">
   <script src="/app.js" type="module"></script>
+  <script src="/account-menu.js" type="module"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -34,7 +35,7 @@
       <button class="rail-button" data-view="changes" title="代码更改" aria-label="代码更改"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a7 7 0 0 0 6 7M18 8v3a7 7 0 0 1-6 7"/></svg></button>
       <button class="rail-button" data-view="about" title="关于工作区" aria-label="关于工作区"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
       <div class="rail-spacer"></div>
-      <div class="rail-avatar" title="本地 CCAGENT">C</div>
+      <button class="rail-avatar" id="account-menu" type="button" title="账户与退出登录" aria-label="账户与退出登录">C</button>
     </nav>
     <aside class="sidebar" id="sidebar" aria-label="侧边栏">
       <div class="brand-row">

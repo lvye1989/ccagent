@@ -1,0 +1,19 @@
+# Only the independent cloud application and two shared protocol modules deploy.
+**
+!cloud
+!cloud/**
+!src
+!src/platform
+!src/platform/money.ts
+!src/platform/zpay.ts
+
+# Runtime uses migrated databases; operator scripts and credentials stay local.
+cloud/node_modules/**
+cloud/.next/**
+cloud/.vercel/**
+cloud/.env*
+cloud/tests/**
+cloud/scripts/**
+cloud/migrations/**
+cloud/drizzle.config.ts
+cloud/*.tsbuildinfo

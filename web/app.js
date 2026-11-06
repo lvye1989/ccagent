@@ -28,6 +28,7 @@ async function api(route, options = {}) {
     headers: { ...(options.body ? { "content-type": "application/json" } : {}), "x-ccagent-web": "1", ...(options.headers || {}) },
   });
   const body = await response.json();
+  if (response.status === 401) { state.source?.close(); window.location.replace('/login'); }
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
   return body;
 }

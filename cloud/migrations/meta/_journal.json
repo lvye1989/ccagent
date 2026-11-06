@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1793977789275,
+      "tag": "0000_tired_groot",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793977790440,
+      "tag": "0001_security_and_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793979594018,
+      "tag": "0002_atomic_usage",
+      "breakpoints": true
+    }
+  ]
+}

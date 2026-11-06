@@ -3,6 +3,7 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
+import { requirePlatformScope } from "../platform/account.js";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import {
   checkPermission,
@@ -360,6 +361,7 @@ async function runOneToolBlock(
   context: ToolContext,
   options: RunToolsOptions,
 ): Promise<RunOneToolReturn> {
+  await requirePlatformScope();
   let toolDispatched = false;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
   const tool = findEnabledToolByName(block.name);
@@ -1036,6 +1038,9 @@ async function runOneToolBlock(
       return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
     }
 
+    // A confirmation can remain open while logout/reset/disable revokes login.
+    // Recheck immediately before dispatch, including custom and local tools.
+    await requirePlatformScope(0);
     setToolStatus(block.id, "running");
     toolDispatched = true;
     const rawResult = await dispatchTool.call(toolInput, callContext);
@@ -1236,6 +1241,7 @@ async function runBlocksSerially(
 export async function* query(
   params: QueryParams,
 ): AsyncGenerator<AgenticLoopEvent, AgenticLoopResult> {
+  await requirePlatformScope(0);
   const maxTurns = params.maxTurns ?? MAX_TOOL_TURNS;
   let state: LoopState = {
     messages: [...params.messages],
@@ -1360,6 +1366,7 @@ export async function* query(
       return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, lastCallUsage, reason: "blocking_limit" };
     }
 
+    await requirePlatformScope(0);
     const currentTools = params.getTools ? params.getTools() : params.tools;
     const stream = streamMessage({
       messages: [...state.messages],

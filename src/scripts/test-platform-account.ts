@@ -6,6 +6,7 @@ import { AccountError, normalizePlatformOrigin, PlatformAccountClient, type Stor
 import { SecureCredentialStore } from "../platform/secureStore.js";
 import { runAccountCommand } from "../entrypoint/account.js";
 import { Writable } from "node:stream";
+import { accountHome, configurePlatform, enterPlatformAccount, getPlatformAccountClient, getPlatformSessionFile, requirePlatformScope } from "../platform/account.js";
 
 const temporaryParent = path.resolve(".tmp");
 const { mkdir } = await import("node:fs/promises");
@@ -60,6 +61,8 @@ const file = path.join(directory, "credentials.json");
 const store = new SecureCredentialStore<StoredAccountSession>(file);
 const client = new PlatformAccountClient(origin, store);
 const previousHome = process.env.CCAGENT_HOME;
+const previousPlatformHome = process.env.CCAGENT_PLATFORM_HOME, previousAccountId = process.env.CCAGENT_ACCOUNT_ID, previousSessionFile = process.env.CCAGENT_AUTH_SESSION_FILE;
+delete process.env.CCAGENT_PLATFORM_HOME; delete process.env.CCAGENT_ACCOUNT_ID; delete process.env.CCAGENT_AUTH_SESSION_FILE;
 process.env.CCAGENT_HOME = path.join(directory, "user-home");
 let passed = 0;
 async function test(name: string, run: () => Promise<void> | void): Promise<void> { await run(); passed++; console.log(`PASS ${name}`); }
@@ -170,10 +173,35 @@ try {
     assert.equal(text.includes(password), false);
     assert.equal(requests, before);
   });
+  await test("account-scoped engine home preserves legacy data and rejects another account's directory", async () => {
+    const base = process.env.CCAGENT_HOME!;
+    const legacy = path.join(base, "legacy-marker.txt");
+    await writeFile(legacy, "preserve existing local data");
+    await configurePlatform(origin);
+    await (await getPlatformAccountClient()).signIn(identity.email, password);
+    await assert.rejects(() => requirePlatformScope(0), (error: unknown) => error instanceof AccountError && error.code === "account_scope_required");
+    const entered = await enterPlatformAccount();
+    assert.equal(entered.home, accountHome(base, identity.id));
+    assert.equal((await requirePlatformScope(0)).user.id, identity.id);
+    assert.equal(await readFile(legacy, "utf8"), "preserve existing local data");
+    const ownHome = process.env.CCAGENT_HOME;
+    process.env.CCAGENT_HOME = base;
+    await assert.rejects(() => requirePlatformScope(0), (error: unknown) => error instanceof AccountError && error.code === "account_scope_mismatch");
+    process.env.CCAGENT_HOME = ownHome;
+  });
+  await test("worker session files cannot escape the managed credential directories", async () => {
+    const base = process.env.CCAGENT_PLATFORM_HOME!;
+    for (const unsafe of [path.join(base, "settings.json"), path.join(base, "platform", "..", "other", "session.json"), path.join(base, "platform", "worker-sessions", "not-an-account", "session.json")]) {
+      process.env.CCAGENT_AUTH_SESSION_FILE = unsafe;
+      assert.throws(() => getPlatformSessionFile(), (error: unknown) => error instanceof AccountError && error.code === "configuration");
+    }
+    delete process.env.CCAGENT_AUTH_SESSION_FILE;
+  });
   console.log(`\n${passed} account transport and credential checks passed. This fixture does not replace Better Auth or a production database.`);
 } finally {
   if (previousHome === undefined) delete process.env.CCAGENT_HOME;
   else process.env.CCAGENT_HOME = previousHome;
+  for (const [key, value] of [["CCAGENT_PLATFORM_HOME", previousPlatformHome], ["CCAGENT_ACCOUNT_ID", previousAccountId], ["CCAGENT_AUTH_SESSION_FILE", previousSessionFile]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   // Recursive cleanup is restricted to the newly created child of the known workspace temp directory.
   const target = path.resolve(directory);

@@ -60,12 +60,15 @@ const operationPower: Record<string, keyof typeof allMailPowers.qq> = {
 };
 const powerRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-mail-powers-policy-"));
 const originalHome = process.env.CCAGENT_HOME;
+const { loginForTest } = await import("./helpers/accountFixture.js");
+const powerAccountFixture = await loginForTest(powerRoot);
+const powerHome = powerAccountFixture.home;
 try {
-process.env.CCAGENT_HOME = powerRoot;
+process.env.CCAGENT_HOME = powerHome;
 resetSettingsCache();
 assert.equal((await permission("full", direct)).behavior, "deny", "mail powers default closed even in Full Mode");
 for (const power of ["read", "write", "delete", "search", "send"] as const) {
-  await fs.writeFile(path.join(powerRoot, "settings.json"), JSON.stringify({
+  await fs.writeFile(path.join(powerHome, "settings.json"), JSON.stringify({
     mailPowers: { ...noMailPowers, qq: { ...noMailPowers.qq, [power]: true } },
   }));
   for (const [operation, input] of Object.entries(operationInputs)) {
@@ -76,7 +79,7 @@ for (const power of ["read", "write", "delete", "search", "send"] as const) {
       `QQ ${power} does not open 163 ${operation}`);
   }
 }
-await fs.writeFile(path.join(powerRoot, "settings.json"), JSON.stringify({ mailPowers: allMailPowers }));
+await fs.writeFile(path.join(powerHome, "settings.json"), JSON.stringify({ mailPowers: allMailPowers }));
 resetSettingsCache();
 
 assert.equal(validateMailInput(send), null);
@@ -197,7 +200,7 @@ try {
     sessionPermissionRules: { allow: [], deny: [] },
     directUserTurnText: "请帮我总结邮件",
     onPermissionRequest: async () => {
-      await fs.writeFile(path.join(powerRoot, "settings.json"), JSON.stringify({
+      await fs.writeFile(path.join(powerHome, "settings.json"), JSON.stringify({
         mailPowers: { ...allMailPowers, qq: { ...allMailPowers.qq, send: false } },
       }));
       resetSettingsCache();
@@ -208,15 +211,16 @@ try {
   assert.equal(dispatchedAfterClose, 0, "SMTP tool call was never reached after power closed");
 } finally {
   (mailTool as { call: typeof originalMailCall }).call = originalMailCall;
-  await fs.writeFile(path.join(powerRoot, "settings.json"), JSON.stringify({ mailPowers: allMailPowers }));
+  await fs.writeFile(path.join(powerHome, "settings.json"), JSON.stringify({ mailPowers: allMailPowers }));
   resetSettingsCache();
 }
 
 const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-mail-policy-"));
 const previousHome = process.env.CCAGENT_HOME;
 const previousPath = process.env.PATH;
+const hookAccountFixture = await loginForTest(path.join(testRoot, "home"));
 try {
-  const home = path.join(testRoot, "home");
+  const home = hookAccountFixture.home;
   const cwd = path.join(testRoot, "project");
   await fs.mkdir(home, { recursive: true });
   await fs.mkdir(cwd, { recursive: true });
@@ -290,6 +294,7 @@ try {
   assert.equal(denied.executions[0]?.result.isError, true, "allow hook cannot override explicit Mail deny");
   assert.match(String(denied.executions[0]?.result.content), /Permission denied/);
 } finally {
+  await hookAccountFixture.close();
   if (previousHome === undefined) delete process.env.CCAGENT_HOME;
   else process.env.CCAGENT_HOME = previousHome;
   if (previousPath === undefined) delete process.env.PATH;
@@ -307,6 +312,7 @@ try {
 
 console.log("Mail policy offline checks passed; no mailbox connection or email send occurred.");
 } finally {
+  await powerAccountFixture.close();
   if (originalHome === undefined) delete process.env.CCAGENT_HOME;
   else process.env.CCAGENT_HOME = originalHome;
   resetSettingsCache();

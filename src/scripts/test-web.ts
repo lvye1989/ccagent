@@ -9,14 +9,18 @@ import os from "node:os";
 import path from "node:path";
 import { setPluginEnabled } from "../plugins/enable.js";
 import { checkWebFiles } from "./webFilesChecks.js";
+import { startAccountFixture } from "./helpers/accountFixture.js";
+import { accountHome } from "../platform/account.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const entry = path.join(root, "dist", "ccagent.js");
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-web-test-")));
 const workspace = path.join(temp, "project");
-const home = path.join(temp, "home");
+const platformBase = path.join(temp, "home");
+const accountFixture = await startAccountFixture(platformBase);
+const home = accountHome(platformBase, accountFixture.users[0]!.id);
 await fs.mkdir(workspace);
-await fs.mkdir(home);
+await fs.mkdir(home, { recursive: true });
 await fs.writeFile(path.join(home, ".env"), "DEEPSEEK_API_KEY=web-test-key\nDASHSCOPE_API_KEY=web-test-key\n");
 execFileSync("git", ["init", "-q"], { cwd: workspace, windowsHide: true });
 await fs.writeFile(path.join(workspace, "staged file.txt"), "staged content\n");
@@ -62,30 +66,43 @@ const port = await new Promise<number>((resolve, reject) => {
   });
 });
 
-const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: home, DEEPSEEK_API_KEY: "web-test-key", DASHSCOPE_API_KEY: "web-test-key" };
+const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: platformBase, CCAGENT_PLATFORM_HOME: platformBase, DEEPSEEK_API_KEY: "web-test-key", DASHSCOPE_API_KEY: "web-test-key" };
 delete env.CCAGENT_ENV_FILE;
+delete env.CCAGENT_ACCOUNT_ID; delete env.CCAGENT_AUTH_SESSION_FILE;
 const child = spawn(process.execPath, [entry, "web", "--workspace", workspace, "--port", String(port)], {
-  cwd: temp, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  cwd: temp, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
 });
 let logs = "";
-child.stdout.on("data", (chunk: Buffer) => { logs = (logs + chunk.toString()).slice(-5000); });
-child.stderr.on("data", (chunk: Buffer) => { logs = (logs + chunk.toString()).slice(-5000); });
+child.stdout!.on("data", (chunk: Buffer) => { logs = (logs + chunk.toString()).slice(-5000); });
+child.stderr!.on("data", (chunk: Buffer) => { logs = (logs + chunk.toString()).slice(-5000); });
 const base = `http://127.0.0.1:${port}`;
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+let loginCookie = "";
+const webFetch: typeof fetch = (input, options) => {
+  const headers = new Headers(options?.headers);
+  if (loginCookie) headers.set("cookie", loginCookie);
+  if (options?.method === "DELETE") headers.set("x-ccagent-web", "1");
+  if (options?.method && options.method !== "GET" && !headers.has("origin")) headers.set("origin", base);
+  return fetch(input, { ...options, headers });
+};
 
 try {
   let ready = false;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (child.exitCode !== null) throw new Error(`Web process exited early: ${logs}`);
     try {
-      const response = await fetch(`${base}/api/health`);
+      const response = await webFetch(`${base}/api/health`);
       if (response.ok) { ready = true; break; }
     } catch { /* Still starting. */ }
     await delay(100);
   }
   assert(ready, `Web process did not become ready: ${logs}`);
 
-  const page = await fetch(base);
+  const loginResponse = await webFetch(`${base}/api/account/login`, { method: "POST", headers: { "content-type": "application/json", "x-ccagent-web": "1" }, body: JSON.stringify({ email: accountFixture.users[0]!.email, password: accountFixture.password }) });
+  assert.equal(loginResponse.status, 200);
+  loginCookie = loginResponse.headers.get("set-cookie")!.split(";")[0]!;
+
+  const page = await webFetch(base);
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /<script src="\/app\.js" type="module"><\/script>/);
@@ -101,170 +118,170 @@ try {
   assert.match(html, /id="library-view"/);
   assert.match(html, /id="memory-view"/);
   assert.match(html, /id="schedules-view"/);
-  assert.equal((await fetch(`${base}/app.js`)).status, 200);
-  assert.equal((await fetch(`${base}/styles.css`)).status, 200);
-  assert.equal((await fetch(`${base}/codex-layout.css`)).status, 200);
-  assert.equal((await fetch(`${base}/plugins.css`)).status, 200);
-  assert.equal((await fetch(`${base}/chatgpt-web.css`)).status, 200);
-  assert.equal((await fetch(`${base}/plugins.js`)).status, 200);
-  assert.equal((await fetch(`${base}/voice.js`)).status, 200);
-  assert.equal((await fetch(`${base}/voice.css`)).status, 200);
-  assert.equal((await fetch(`${base}/browser-panel.js`)).status, 200);
-  assert.equal((await fetch(`${base}/browser-panel.css`)).status, 200);
-  assert.equal((await fetch(`${base}/library.js`)).status, 200);
-  assert.equal((await fetch(`${base}/memory.js`)).status, 200);
-  assert.equal((await fetch(`${base}/schedules.js`)).status, 200);
-  assert.equal((await fetch(`${base}/workspace-features.css`)).status, 200);
-  assert.equal((await fetch(`${base}/workspace-picker.js`)).status, 200);
-  assert.equal((await fetch(`${base}/workspace-picker.css`)).status, 200);
-  assert.equal((await fetch(`${base}/favicon.svg`)).status, 200);
+  assert.equal((await webFetch(`${base}/app.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/styles.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/codex-layout.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/plugins.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/chatgpt-web.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/plugins.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/voice.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/voice.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/browser-panel.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/browser-panel.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/library.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/memory.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/schedules.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/workspace-features.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/workspace-picker.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/workspace-picker.css`)).status, 200);
+  assert.equal((await webFetch(`${base}/favicon.svg`)).status, 200);
 
-  const bootstrap = await (await fetch(`${base}/api/bootstrap`)).json() as { workspace: string };
+  const bootstrap = await (await webFetch(`${base}/api/bootstrap`)).json() as { workspace: string };
   assert.equal(bootstrap.workspace, workspace);
-  const models = await (await fetch(`${base}/api/models`)).json() as { defaultModel: string; models: { id: string; available: boolean }[] };
+  const models = await (await webFetch(`${base}/api/models`)).json() as { defaultModel: string; models: { id: string; available: boolean }[] };
   assert.equal(models.defaultModel, "deepseek");
   assert(models.models.some((item) => item.id === "deepseek" && item.available));
   assert(models.models.some((item) => item.id === "qwen-plus" && item.available));
-  const changes = await (await fetch(`${base}/api/changes`)).json() as { files: { path: string; status: string }[] };
+  const changes = await (await webFetch(`${base}/api/changes`)).json() as { files: { path: string; status: string }[] };
   assert(changes.files.some((file) => file.path === "staged file.txt" && file.status.startsWith("A")));
   assert(changes.files.some((file) => file.path === "draft file.txt" && file.status === "??"));
-  const stagedDiff = await (await fetch(`${base}/api/diff?file=staged%20file.txt`)).json() as { diff: string };
+  const stagedDiff = await (await webFetch(`${base}/api/diff?file=staged%20file.txt`)).json() as { diff: string };
   assert.match(stagedDiff.diff, /staged content/);
-  const untrackedDiff = await (await fetch(`${base}/api/diff?file=draft%20file.txt`)).json() as { diff: string };
+  const untrackedDiff = await (await webFetch(`${base}/api/diff?file=draft%20file.txt`)).json() as { diff: string };
   assert.match(untrackedDiff.diff, /untracked content/);
   await fs.mkdir(path.join(workspace, "deliverables"));
   await fs.writeFile(path.join(workspace, "deliverables", "meeting.md"), "# Meeting\nUnique library phrase\n");
   await fs.writeFile(path.join(workspace, "deliverables", "secret-token.md"), "hidden text\n");
-  const documents = await (await fetch(`${base}/api/library?query=Unique%20library%20phrase`)).json() as { files: { path: string; previewable: boolean }[] };
+  const documents = await (await webFetch(`${base}/api/library?query=Unique%20library%20phrase`)).json() as { files: { path: string; previewable: boolean }[] };
   assert(documents.files.some((file) => file.path === "deliverables/meeting.md" && file.previewable));
-  assert(!((await (await fetch(`${base}/api/library`)).json()) as typeof documents).files.some((file) => file.path.includes("secret-token")));
-  const documentPreview = await (await fetch(`${base}/api/library/file?path=deliverables%2Fmeeting.md`)).json() as { content: string };
+  assert(!((await (await webFetch(`${base}/api/library`)).json()) as typeof documents).files.some((file) => file.path.includes("secret-token")));
+  const documentPreview = await (await webFetch(`${base}/api/library/file?path=deliverables%2Fmeeting.md`)).json() as { content: string };
   assert.match(documentPreview.content, /Unique library phrase/);
-  assert.equal((await fetch(`${base}/api/library/download?path=deliverables%2Fmeeting.md`)).headers.get("content-disposition")?.startsWith("attachment;"), true);
-  assert.equal((await fetch(`${base}/api/library/file?path=..%2Foutside.md`)).status, 400);
+  assert.equal((await webFetch(`${base}/api/library/download?path=deliverables%2Fmeeting.md`)).headers.get("content-disposition")?.startsWith("attachment;"), true);
+  assert.equal((await webFetch(`${base}/api/library/file?path=..%2Foutside.md`)).status, 400);
 
-  const missingHeader = await fetch(`${base}/api/sessions`, {
+  const missingHeader = await webFetch(`${base}/api/sessions`, {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
   });
   assert.equal(missingHeader.status, 403);
-  const foreignOrigin = await fetch(`${base}/api/sessions`, {
+  const foreignOrigin = await webFetch(`${base}/api/sessions`, {
     method: "POST", headers: { "content-type": "application/json", "x-ccagent-web": "1", origin: "http://evil.example" }, body: "{}",
   });
   assert.equal(foreignOrigin.status, 403);
 
-  const headers = { "content-type": "application/json", "x-ccagent-web": "1" };
-  await checkWebFiles(base, workspace, headers);
-  assert.equal((await fetch(`${base}/workspace-files.js`)).status, 200);
-  assert.equal((await fetch(`${base}/composer-tools.js`)).status, 200);
-  assert.equal((await fetch(`${base}/workbench.css`)).status, 200);
-  const agentsBefore = await (await fetch(`${base}/api/agents`)).json() as { agents: { name: string; enabled: boolean; source: string }[] };
+  const headers = { "content-type": "application/json", "x-ccagent-web": "1", cookie: loginCookie, origin: base };
+  await checkWebFiles(base, workspace, headers, webFetch);
+  assert.equal((await webFetch(`${base}/workspace-files.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/composer-tools.js`)).status, 200);
+  assert.equal((await webFetch(`${base}/workbench.css`)).status, 200);
+  const agentsBefore = await (await webFetch(`${base}/api/agents`)).json() as { agents: { name: string; enabled: boolean; source: string }[] };
   assert(agentsBefore.agents.some((agent) => agent.source === "built-in"), "Web lists built-in agents");
   const agentName = agentsBefore.agents[0]!.name;
-  assert.equal((await fetch(`${base}/api/agents/state`, { method: "POST", headers, body: JSON.stringify({ name: agentName, state: "close" }) })).status, 200);
-  assert.equal(((await (await fetch(`${base}/api/agents`)).json()) as typeof agentsBefore).agents.find((agent) => agent.name === agentName)?.enabled, false);
-  assert.equal((await fetch(`${base}/api/agents/state`, { method: "POST", headers, body: JSON.stringify({ name: agentName, state: "open" }) })).status, 200);
+  assert.equal((await webFetch(`${base}/api/agents/state`, { method: "POST", headers, body: JSON.stringify({ name: agentName, state: "close" }) })).status, 200);
+  assert.equal(((await (await webFetch(`${base}/api/agents`)).json()) as typeof agentsBefore).agents.find((agent) => agent.name === agentName)?.enabled, false);
+  assert.equal((await webFetch(`${base}/api/agents/state`, { method: "POST", headers, body: JSON.stringify({ name: agentName, state: "open" }) })).status, 200);
   const skillContent = "---\nname: local-web-test\ndescription: Imported through the Web UI.\n---\nSay hello.\n";
-  const invalidSkill = await fetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "../bad", scope: "project", content: skillContent }) });
+  const invalidSkill = await webFetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "../bad", scope: "project", content: skillContent }) });
   assert.equal(invalidSkill.status, 400);
-  const importedSkill = await fetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "local-web-test", scope: "project", content: skillContent }) });
+  const importedSkill = await webFetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "local-web-test", scope: "project", content: skillContent }) });
   assert.equal(importedSkill.status, 201);
   assert.equal(await fs.readFile(path.join(workspace, ".ccagent", "skills", "local-web-test", "SKILL.md"), "utf8"), skillContent);
-  assert(((await (await fetch(`${base}/api/skills`)).json()) as { skills: { name: string; source: string }[] }).skills.some((skill) => skill.name === "local-web-test" && skill.source === "project"));
-  assert.equal((await fetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "local-web-test", scope: "project", content: skillContent }) })).status, 400, "Import does not overwrite existing skills");
-  assert.equal((await fetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "dotted.skill", scope: "user", content: "---\nname: dotted.skill\ndescription: Dot name.\n---\nUse dots.\n" }) })).status, 201);
-  assert(((await (await fetch(`${base}/api/skills`)).json()) as { skills: { name: string }[] }).skills.some((skill) => skill.name === "dotted.skill"));
-  const fullResponse = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ mode: "full" }) });
+  assert(((await (await webFetch(`${base}/api/skills`)).json()) as { skills: { name: string; source: string }[] }).skills.some((skill) => skill.name === "local-web-test" && skill.source === "project"));
+  assert.equal((await webFetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "local-web-test", scope: "project", content: skillContent }) })).status, 400, "Import does not overwrite existing skills");
+  assert.equal((await webFetch(`${base}/api/skills/import`, { method: "POST", headers, body: JSON.stringify({ name: "dotted.skill", scope: "user", content: "---\nname: dotted.skill\ndescription: Dot name.\n---\nUse dots.\n" }) })).status, 201);
+  assert(((await (await webFetch(`${base}/api/skills`)).json()) as { skills: { name: string }[] }).skills.some((skill) => skill.name === "dotted.skill"));
+  const fullResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ mode: "full" }) });
   assert.equal(fullResponse.status, 201);
   const fullSession = await fullResponse.json() as { sessionId: string };
-  assert.equal(((await (await fetch(`${base}/api/sessions/${fullSession.sessionId}`)).json()) as { mode: string }).mode, "full");
-  const temporaryResponse = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ temporary: true }) });
+  assert.equal(((await (await webFetch(`${base}/api/sessions/${fullSession.sessionId}`)).json()) as { mode: string }).mode, "full");
+  const temporaryResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ temporary: true }) });
   assert.equal(temporaryResponse.status, 201);
   const temporary = await temporaryResponse.json() as { sessionId: string; temporary: boolean };
   assert.equal(temporary.temporary, true);
-  assert.equal(((await (await fetch(`${base}/api/sessions/${temporary.sessionId}`)).json()) as { temporary: boolean }).temporary, true);
-  assert(!((await (await fetch(`${base}/api/bootstrap`)).json()) as { sessions: { sessionId: string }[] }).sessions.some((item) => item.sessionId === temporary.sessionId));
-  const temporaryHelp = await fetch(`${base}/api/sessions/${temporary.sessionId}/messages`, { method: "POST", headers, body: JSON.stringify({ text: "/help" }) });
+  assert.equal(((await (await webFetch(`${base}/api/sessions/${temporary.sessionId}`)).json()) as { temporary: boolean }).temporary, true);
+  assert(!((await (await webFetch(`${base}/api/bootstrap`)).json()) as { sessions: { sessionId: string }[] }).sessions.some((item) => item.sessionId === temporary.sessionId));
+  const temporaryHelp = await webFetch(`${base}/api/sessions/${temporary.sessionId}/messages`, { method: "POST", headers, body: JSON.stringify({ text: "/help" }) });
   assert.equal(temporaryHelp.status, 202);
   for (let attempt = 0; attempt < 100; attempt++) {
-    const current = await (await fetch(`${base}/api/sessions/${temporary.sessionId}`)).json() as { busy: boolean; lastEventId: number };
+    const current = await (await webFetch(`${base}/api/sessions/${temporary.sessionId}`)).json() as { busy: boolean; lastEventId: number };
     if (!current.busy && current.lastEventId >= 3) break;
     await delay(50);
   }
   const projectDirForTemporary = path.dirname((await fs.readdir(path.join(home, "projects"))).map((name) => path.join(home, "projects", name, "latest"))[0]!);
   assert.equal(await fs.stat(path.join(projectDirForTemporary, `${temporary.sessionId}.jsonl`)).then(() => true, () => false), false, "Temporary chat has no transcript");
-  const invalidModel = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ model: "unknown" }) });
+  const invalidModel = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ model: "unknown" }) });
   assert.equal(invalidModel.status, 400);
-  const createdResponse = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ mode: "plan", model: "qwen-plus" }) });
+  const createdResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ mode: "plan", model: "qwen-plus" }) });
   assert.equal(createdResponse.status, 201);
   const created = await createdResponse.json() as { sessionId: string };
   assert.match(created.sessionId, /^[0-9a-f-]{36}$/);
-  const commandResponse = await fetch(`${base}/api/sessions/${created.sessionId}/messages`, {
+  const commandResponse = await webFetch(`${base}/api/sessions/${created.sessionId}/messages`, {
     method: "POST", headers, body: JSON.stringify({ text: "/help" }),
   });
   assert.equal(commandResponse.status, 202);
   let session: { busy: boolean; mode: string; lastEventId: number; recentNotices: { message: string }[] } | undefined;
   for (let attempt = 0; attempt < 100; attempt++) {
-    session = await (await fetch(`${base}/api/sessions/${created.sessionId}`)).json() as typeof session;
+    session = await (await webFetch(`${base}/api/sessions/${created.sessionId}`)).json() as typeof session;
     if (!session?.busy && (session?.lastEventId ?? 0) >= 4) break;
     await delay(50);
   }
   assert.equal(session?.busy, false);
   assert.equal(session?.mode, "plan");
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}/mode`, { method: "POST", headers, body: JSON.stringify({ mode: "full" }) })).status, 200);
-  assert.equal(((await (await fetch(`${base}/api/sessions/${created.sessionId}`)).json()) as { mode: string }).mode, "full");
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}/mode`, { method: "POST", headers, body: JSON.stringify({ mode: "plan" }) })).status, 200);
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}/mode`, { method: "POST", headers, body: JSON.stringify({ mode: "full" }) })).status, 200);
+  assert.equal(((await (await webFetch(`${base}/api/sessions/${created.sessionId}`)).json()) as { mode: string }).mode, "full");
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}/mode`, { method: "POST", headers, body: JSON.stringify({ mode: "plan" }) })).status, 200);
   assert((session?.lastEventId ?? 0) >= 4);
-  const unsafeBrowser = await fetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "POST", headers, body: JSON.stringify({ url: "javascript:alert(1)" }) });
+  const unsafeBrowser = await webFetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "POST", headers, body: JSON.stringify({ url: "javascript:alert(1)" }) });
   assert.equal(unsafeBrowser.status, 400);
-  const browserOpened = await fetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "POST", headers, body: JSON.stringify({ url: "https://example.com/docs" }) });
+  const browserOpened = await webFetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "POST", headers, body: JSON.stringify({ url: "https://example.com/docs" }) });
   assert.equal(browserOpened.status, 200);
-  const withBrowser = await (await fetch(`${base}/api/sessions/${created.sessionId}`)).json() as { browserUrl: string };
+  const withBrowser = await (await webFetch(`${base}/api/sessions/${created.sessionId}`)).json() as { browserUrl: string };
   assert.equal(withBrowser.browserUrl, "https://example.com/docs");
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}`)).status, 200);
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}`).then((response) => response.json()) as { model: string }).model, "qwen-plus");
-  const switched = await fetch(`${base}/api/sessions/${created.sessionId}/model`, { method: "POST", headers, body: JSON.stringify({ model: "deepseek" }) });
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}`)).status, 200);
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}`).then((response) => response.json()) as { model: string }).model, "qwen-plus");
+  const switched = await webFetch(`${base}/api/sessions/${created.sessionId}/model`, { method: "POST", headers, body: JSON.stringify({ model: "deepseek" }) });
   assert.equal(switched.status, 200);
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}`).then((response) => response.json()) as { model: string }).model, "deepseek");
-  const listed = await (await fetch(`${base}/api/bootstrap`)).json() as { sessions: { sessionId: string; model: string }[] };
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}`).then((response) => response.json()) as { model: string }).model, "deepseek");
+  const listed = await (await webFetch(`${base}/api/bootstrap`)).json() as { sessions: { sessionId: string; model: string }[] };
   assert(listed.sessions.some((item) => item.sessionId === created.sessionId && item.model === "deepseek"), "Model choice is persisted in the session list");
-  const memoryBefore = await (await fetch(`${base}/api/memory`)).json() as { sessions: { sessionId: string; pinned: boolean }[] };
+  const memoryBefore = await (await webFetch(`${base}/api/memory`)).json() as { sessions: { sessionId: string; pinned: boolean }[] };
   assert(memoryBefore.sessions.some((item) => item.sessionId === created.sessionId));
   assert(!memoryBefore.sessions.some((item) => item.sessionId === temporary.sessionId), "Temporary chat is absent from memory manager");
-  assert.equal((await fetch(`${base}/api/memory/sessions/${created.sessionId}`)).status, 200);
-  assert.equal((await fetch(`${base}/api/memory/sessions/${created.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "pin" }) })).status, 200);
-  const memoryPinned = await (await fetch(`${base}/api/memory`)).json() as typeof memoryBefore;
+  assert.equal((await webFetch(`${base}/api/memory/sessions/${created.sessionId}`)).status, 200);
+  assert.equal((await webFetch(`${base}/api/memory/sessions/${created.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "pin" }) })).status, 200);
+  const memoryPinned = await (await webFetch(`${base}/api/memory`)).json() as typeof memoryBefore;
   assert.equal(memoryPinned.sessions.find((item) => item.sessionId === created.sessionId)?.pinned, true);
-  assert.equal((await fetch(`${base}/api/memory/sessions/${fullSession.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "delete" }) })).status, 200);
-  assert.equal((await fetch(`${base}/api/memory/sessions/${fullSession.sessionId}`)).status, 400);
+  assert.equal((await webFetch(`${base}/api/memory/sessions/${fullSession.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "delete" }) })).status, 200);
+  assert.equal((await webFetch(`${base}/api/memory/sessions/${fullSession.sessionId}`)).status, 400);
 
   const projectDirs = await fs.readdir(path.join(home, "projects"));
   assert.equal(projectDirs.length, 1);
   const latest = path.join(home, "projects", projectDirs[0]!, "latest");
   await fs.rename(latest, `${latest}.saved`);
   await fs.mkdir(latest);
-  const fallbackResponse = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: "{}" });
+  const fallbackResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: "{}" });
   assert.equal(fallbackResponse.status, 201, "A blocked latest pointer should not prevent a new conversation");
   const fallback = await fallbackResponse.json() as { sessionId: string };
-  const fallbackSession = await (await fetch(`${base}/api/sessions/${fallback.sessionId}`)).json() as { recentNotices: { message: string }[] };
+  const fallbackSession = await (await webFetch(`${base}/api/sessions/${fallback.sessionId}`)).json() as { recentNotices: { message: string }[] };
   assert(fallbackSession.recentNotices.some((notice) => notice.message.includes("会话记录暂时无法写入")));
   await fs.rmdir(latest);
   await fs.rename(`${latest}.saved`, latest);
-  assert.equal((await fetch(`${base}/api/bootstrap`)).status, 200);
+  assert.equal((await webFetch(`${base}/api/bootstrap`)).status, 200);
   const projectDir = path.dirname(latest);
   const projectRelative = path.relative(temp, projectDir);
   assert(projectRelative && !projectRelative.startsWith("..") && !path.isAbsolute(projectRelative), "Unsafe test project move");
   await fs.rename(projectDir, `${projectDir}.saved`);
   await fs.writeFile(projectDir, "blocked directory");
-  const degradedResponse = await fetch(`${base}/api/bootstrap`);
+  const degradedResponse = await webFetch(`${base}/api/bootstrap`);
   assert.equal(degradedResponse.status, 200);
   const degraded = await degradedResponse.json() as { storageUnavailable: boolean };
   assert.equal(degraded.storageUnavailable, true, "An inaccessible session directory should not break the task list");
-  const memoryOnlyResponse = await fetch(`${base}/api/sessions`, { method: "POST", headers, body: "{}" });
+  const memoryOnlyResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: "{}" });
   assert.equal(memoryOnlyResponse.status, 201);
   await fs.unlink(projectDir);
   await fs.rename(`${projectDir}.saved`, projectDir);
 
-  const events = await fetch(`${base}/api/sessions/${created.sessionId}/events?lastEventId=0`);
+  const events = await webFetch(`${base}/api/sessions/${created.sessionId}/events?lastEventId=0`);
   const reader = events.body?.getReader();
   assert(reader);
   let stream = "";
@@ -277,8 +294,8 @@ try {
   assert.match(stream, /"type":"notice"/);
   assert.match(stream, /"type":"browser_open"/);
   assert.match(stream, /"type":"turn_complete"/);
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "DELETE" })).status, 200);
-  assert.equal(((await (await fetch(`${base}/api/sessions/${created.sessionId}`)).json()) as { browserUrl: null }).browserUrl, null);
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "DELETE" })).status, 200);
+  assert.equal(((await (await webFetch(`${base}/api/sessions/${created.sessionId}`)).json()) as { browserUrl: null }).browserUrl, null);
 
   const market = path.join(temp, "market");
   const demo = path.join(market, "plugins", "demo");
@@ -294,18 +311,18 @@ try {
   type McpView = { servers: { name: string; state: string; tools: { name: string }[] }[]; pending: string[] };
   let mcp: McpView | undefined;
   for (let attempt = 0; attempt < 100; attempt++) {
-    mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+    mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
     if (mcp.servers.some((server) => server.name === "web-smoke" && server.state === "connected" && server.tools.some((tool) => tool.name.includes("echo")))) break;
     await delay(50);
   }
   assert(mcp?.servers.some((server) => server.name === "web-smoke" && server.state === "connected" && server.tools.some((tool) => tool.name.includes("echo"))), `MCP tool did not appear: ${logs}`);
   assert(!JSON.stringify(mcp).includes(String(mcpAddress.port)), "MCP API must not expose configured URLs");
   assert.equal((await post("/api/mcp/action", { op: "close", name: "web-smoke" })).status, 200);
-  mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+  mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
   assert(mcp.servers.some((server) => server.name === "web-smoke" && server.state === "disabled" && server.tools.length === 0));
   assert.equal((await post("/api/mcp/action", { op: "open", name: "web-smoke" })).status, 200);
   for (let attempt = 0; attempt < 100; attempt++) {
-    mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+    mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
     if (mcp.servers.some((server) => server.name === "web-smoke" && server.state === "connected")) break;
     await delay(50);
   }
@@ -317,20 +334,20 @@ try {
   savedSettings.mcpServerStates["web-smoke"] = "close";
   await fs.writeFile(path.join(home, "settings.json"), JSON.stringify(savedSettings));
   assert.equal((await post("/api/integrations/sync", {})).status, 200);
-  mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+  mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
   assert(mcp.servers.some((server) => server.name === "web-smoke" && server.state === "disabled"), "External CLI setting should sync into Web");
   await fs.writeFile(path.join(home, "settings.json"), "{invalid json");
   assert.equal((await post("/api/integrations/sync", {})).status, 400, "Invalid settings should not discard live MCP entries");
-  mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+  mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
   assert(mcp.servers.some((server) => server.name === "web-smoke"), "Registry must survive invalid external settings");
   await fs.writeFile(path.join(home, "settings.json"), JSON.stringify(savedSettings));
   delete (savedSettings as { mcpServers?: unknown }).mcpServers;
   await fs.writeFile(path.join(home, "settings.json"), JSON.stringify(savedSettings));
   assert.equal((await post("/api/integrations/sync", {})).status, 200);
-  mcp = await (await fetch(`${base}/api/mcp`)).json() as McpView;
+  mcp = await (await webFetch(`${base}/api/mcp`)).json() as McpView;
   assert(!mcp.servers.some((server) => server.name === "web-smoke"), "Removed MCP config should disappear after sync");
   assert.equal((await post("/api/plugins/action", { op: "marketplace-add", source: market })).status, 200);
-  let plugins = await (await fetch(`${base}/api/plugins`)).json() as { available: { pluginId: string }[]; installed: { pluginId: string; enabled: boolean }[] };
+  let plugins = await (await webFetch(`${base}/api/plugins`)).json() as { available: { pluginId: string }[]; installed: { pluginId: string; enabled: boolean }[] };
   assert(plugins.available.some((item) => item.pluginId === "demo@webtest"));
   assert.equal((await post("/api/plugins/action", { op: "install", pluginId: "demo@webtest", scope: "local" })).status, 409);
   const previewResponse = await post("/api/plugins/preview", { pluginId: "demo@webtest" });
@@ -338,9 +355,9 @@ try {
   const preview = await previewResponse.json() as { token: string; preview: { components: { skills: string[] } } };
   assert(preview.preview.components.skills.includes("demo:greet"));
   assert.equal((await post("/api/plugins/action", { op: "install", pluginId: "demo@webtest", scope: "local", token: preview.token })).status, 200);
-  plugins = await (await fetch(`${base}/api/plugins`)).json() as typeof plugins;
+  plugins = await (await webFetch(`${base}/api/plugins`)).json() as typeof plugins;
   assert(plugins.installed.some((item) => item.pluginId === "demo@webtest" && item.enabled));
-  const skillNames = async () => ((await (await fetch(`${base}/api/skills`)).json()) as { skills: { name: string }[] }).skills.map((skill) => skill.name);
+  const skillNames = async () => ((await (await webFetch(`${base}/api/skills`)).json()) as { skills: { name: string }[] }).skills.map((skill) => skill.name);
   assert((await skillNames()).includes("demo:greet"), "Installed plugin skill should appear in Web and CLI registry");
   const previousHome = process.env.CCAGENT_HOME;
   process.env.CCAGENT_HOME = home;
@@ -356,19 +373,19 @@ try {
     else process.env.CCAGENT_HOME = previousHome;
   }
   assert.equal((await post("/api/plugins/action", { op: "disable", pluginId: "demo@webtest", scope: "local" })).status, 200);
-  plugins = await (await fetch(`${base}/api/plugins`)).json() as typeof plugins;
+  plugins = await (await webFetch(`${base}/api/plugins`)).json() as typeof plugins;
   assert(plugins.installed.some((item) => item.pluginId === "demo@webtest" && !item.enabled));
   assert(!(await skillNames()).includes("demo:greet"), "Disabled plugin skill should disappear");
   assert.equal((await post("/api/plugins/action", { op: "enable", pluginId: "demo@webtest", scope: "local" })).status, 200);
   assert((await skillNames()).includes("demo:greet"), "Re-enabled plugin skill should return");
-  assert.equal((await fetch(`${base}/api/skills`)).status, 200);
+  assert.equal((await webFetch(`${base}/api/skills`)).status, 200);
   assert.equal((await post("/api/plugins/action", { op: "uninstall", pluginId: "demo@webtest", scope: "local" })).status, 200);
   assert(!(await skillNames()).includes("demo:greet"), "Uninstalled plugin skill should disappear");
-  plugins = await (await fetch(`${base}/api/plugins`)).json() as typeof plugins;
+  plugins = await (await webFetch(`${base}/api/plugins`)).json() as typeof plugins;
   assert(!plugins.installed.some((item) => item.pluginId === "demo@webtest"));
   assert.equal((await post("/api/plugins/action", { op: "marketplace-remove", name: "webtest" })).status, 200);
 
-  const traversal = await fetch(`${base}/api/diff?file=../outside.txt`);
+  const traversal = await webFetch(`${base}/api/diff?file=../outside.txt`);
   assert.equal(traversal.status, 400);
   const runAt = new Date(Date.now() + 60_000).toISOString();
   assert.equal((await post("/api/schedules", { title: "unsafe", prompt: "/help", nextRunAt: runAt, repeat: "none", mode: "full" })).status, 400);
@@ -376,18 +393,18 @@ try {
   assert.equal(scheduledResponse.status, 201);
   const scheduled = (await scheduledResponse.json()) as { task: { id: string } };
   assert.equal((await post(`/api/schedules/${scheduled.task.id}`, { action: "pause" })).status, 200);
-  let scheduleList = await (await fetch(`${base}/api/schedules`)).json() as { tasks: { id: string; status: string; lastSessionId?: string }[] };
+  let scheduleList = await (await webFetch(`${base}/api/schedules`)).json() as { tasks: { id: string; status: string; lastSessionId?: string }[] };
   assert.equal(scheduleList.tasks.find((item) => item.id === scheduled.task.id)?.status, "paused");
   assert.equal((await post(`/api/schedules/${scheduled.task.id}`, { action: "run-now" })).status, 200);
   for (let attempt = 0; attempt < 100; attempt++) {
-    scheduleList = await (await fetch(`${base}/api/schedules`)).json() as typeof scheduleList;
+    scheduleList = await (await webFetch(`${base}/api/schedules`)).json() as typeof scheduleList;
     if (scheduleList.tasks.find((item) => item.id === scheduled.task.id)?.status === "completed") break;
     await delay(50);
   }
   const scheduleResult = scheduleList.tasks.find((item) => item.id === scheduled.task.id);
   assert.equal(scheduleResult?.status, "completed");
   assert(scheduleResult.lastSessionId, "Due schedule creates a saved conversation");
-  assert.equal((await fetch(`${base}/api/sessions/${scheduleResult.lastSessionId}`)).status, 200);
+  assert.equal((await webFetch(`${base}/api/sessions/${scheduleResult.lastSessionId}`)).status, 200);
   assert.equal((await post(`/api/schedules/${scheduled.task.id}`, { action: "delete" })).status, 200);
   const dueAt = new Date(Date.now() + 1000).toISOString();
   const dueResponse = await post("/api/schedules", { title: "Due Web schedule", prompt: "/help", nextRunAt: dueAt, repeat: "none", mode: "default", model: "deepseek" });
@@ -395,7 +412,7 @@ try {
   const dueTask = (await dueResponse.json()) as { task: { id: string } };
   let dueResult: { lastSessionId?: string; status: string } | undefined;
   for (let attempt = 0; attempt < 150; attempt++) {
-    scheduleList = await (await fetch(`${base}/api/schedules`)).json() as typeof scheduleList;
+    scheduleList = await (await webFetch(`${base}/api/schedules`)).json() as typeof scheduleList;
     dueResult = scheduleList.tasks.find((item) => item.id === dueTask.task.id);
     if (dueResult?.status === "completed") break;
     await delay(100);
@@ -407,35 +424,38 @@ try {
   await fs.mkdir(path.join(otherWorkspace, "项目 文件夹"));
   await fs.mkdir(path.join(otherWorkspace, ".hidden-folder"));
   await fs.writeFile(path.join(otherWorkspace, "ordinary-file.txt"), "not a folder");
-  const browse = await (await fetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(otherWorkspace)}`)).json() as { path: string; parent: string | null; breadcrumbs: { path: string }[]; folders: { name: string; path: string }[] };
+  const browse = await (await webFetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(otherWorkspace)}`)).json() as { path: string; parent: string | null; breadcrumbs: { path: string }[]; folders: { name: string; path: string }[] };
   assert.equal(browse.path, await fs.realpath(otherWorkspace));
   assert.equal(browse.parent, path.dirname(otherWorkspace));
   assert(browse.folders.some((f) => f.name === "项目 文件夹"), "Folder browser preserves Unicode and spaces");
   assert(!browse.folders.some((f) => f.name === "ordinary-file.txt" || f.name.startsWith(".")), "Browser lists directories and hides dot folders by default");
   assert.equal(browse.breadcrumbs.at(-1)?.path, browse.path);
-  const hidden = await (await fetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(otherWorkspace)}&hidden=1&query=hidden`)).json() as typeof browse;
+  const hidden = await (await webFetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(otherWorkspace)}&hidden=1&query=hidden`)).json() as typeof browse;
   assert.deepEqual(hidden.folders.map((f) => f.name), [".hidden-folder"]);
-  assert.equal((await fetch(`${base}/api/workspaces/browse?path=relative-folder`)).status, 400);
-  assert.equal((await fetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(path.join(otherWorkspace, "ordinary-file.txt"))}`)).status, 400);
+  assert.equal((await webFetch(`${base}/api/workspaces/browse?path=relative-folder`)).status, 400);
+  assert.equal((await webFetch(`${base}/api/workspaces/browse?path=${encodeURIComponent(path.join(otherWorkspace, "ordinary-file.txt"))}`)).status, 400);
   assert.equal((await post("/api/workspaces/pick", { initialPath: "relative-folder" })).status, 400, "Invalid picker request cannot open a system dialog");
   assert.equal((await post("/api/workspaces/select", { path: "relative-folder" })).status, 400);
   assert.equal((await post("/api/workspaces/select", { path: otherWorkspace })).status, 200);
-  assert.equal(((await (await fetch(`${base}/api/bootstrap`)).json()) as { workspace: string }).workspace, otherWorkspace);
+  assert.equal(((await (await webFetch(`${base}/api/bootstrap`)).json()) as { workspace: string }).workspace, otherWorkspace);
   assert(!(await skillNames()).includes("local-web-test"), "Project skills do not leak into another folder");
-  const workspaces = await (await fetch(`${base}/api/workspaces`)).json() as { current: string; recent: string[]; locations: { name: string; path: string }[]; nativePickerAvailable: boolean };
+  const workspaces = await (await webFetch(`${base}/api/workspaces`)).json() as { current: string; recent: string[]; locations: { name: string; path: string }[]; nativePickerAvailable: boolean };
   assert.equal(workspaces.current, otherWorkspace);
   assert(workspaces.recent.includes(workspace) && workspaces.recent.includes(otherWorkspace));
   assert(workspaces.locations.some((item) => path.isAbsolute(item.path)), "Quick locations expose real absolute directories");
   assert.equal(workspaces.nativePickerAvailable, process.platform === "win32");
   assert.equal((await post("/api/workspaces/select", { path: workspace })).status, 200);
   assert((await skillNames()).includes("local-web-test"), "Original workspace skills reload after switching back");
-  assert.equal((await fetch(`${base}/api/sessions/${created.sessionId}`)).status, 200, "Original conversation restores after switching back");
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}`)).status, 200, "Original conversation restores after switching back");
   console.log("Web smoke: assets, sessions, side panel, workspace switching, agents, skills, permissions, temporary chat, library, memory, schedules, MCP, and plugins passed.");
 } finally {
-  child.kill();
-  await Promise.race([new Promise<void>((resolve) => child.once("close", () => resolve())), delay(3000)]);
+  const stopped = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  if (child.connected) child.send("ccagent:shutdown", () => {});
+  const stopTimeout = setTimeout(() => child.kill(), 6000);
+  await stopped; clearTimeout(stopTimeout);
   mcpServer.closeAllConnections();
   await new Promise<void>((resolve) => mcpServer.close(() => resolve()));
+  await accountFixture.close();
   const relative = path.relative(await fs.realpath(os.tmpdir()), temp);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Unsafe test cleanup path");
   await fs.rm(temp, { recursive: true, force: true });

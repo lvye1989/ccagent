@@ -17,6 +17,8 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-rhino-fast-test-")
 const env = { ...process.env };
 Object.assign(process.env, { CCAGENT_HOME: path.join(root, "user"), CCAGENT_RHINO_PROJECT_DIR: path.join(root, "project"), OPENROUTER_API_KEY: "TEST_ONLY", CCAGENT_RHINO_JEV: "1", CCAGENT_RHINO_JEV_MODE: "enforce", CCAGENT_RHINO_FAST: "1" });
 await fs.mkdir(process.env.CCAGENT_HOME!, { recursive: true });
+const { loginForTest } = await import("./helpers/accountFixture.js");
+const accountFixture = await loginForTest(process.env.CCAGENT_HOME!);
 let checks = 0;
 function check(ok: unknown, label: string) { assert.ok(ok, label); console.log(`OK ${++checks}. ${label}`); }
 const guid = "00000000-0000-4000-8000-000000000001";
@@ -285,6 +287,7 @@ try {
   } finally { globalThis.fetch = originalFetch; }
   console.log(`Rhino fast lane: ${checks} checks passed.`);
 } finally {
+  await accountFixture.close();
   for (const key of Object.keys(process.env)) if (!(key in env)) delete process.env[key];
   Object.assign(process.env, env); resetSettingsCache();
   assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^ccagent-rhino-fast-test-/);

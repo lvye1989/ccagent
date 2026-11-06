@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import net from "node:net";
+import { startAccountFixture } from "./helpers/accountFixture.js";
+import { accountHome, enterPlatformAccount } from "../platform/account.js";
+import { QueryEngine } from "../core/queryEngine.js";
+import { query, runTools } from "../core/agenticLoop.js";
+import { AccountError } from "../platform/accountClient.js";
+
+const root = path.resolve(import.meta.dirname, "../.."), entry = path.join(root, "dist/ccagent.js");
+const temporary = await mkdtemp(path.join(os.tmpdir(), "ccagent-auth-enforcement-"));
+const base = path.join(temporary, "home"), workspace = path.join(temporary, "workspace");
+await mkdir(base); await mkdir(workspace);
+const fixture = await startAccountFixture(base);
+const previous = Object.fromEntries(["CCAGENT_HOME", "CCAGENT_PLATFORM_HOME", "CCAGENT_ACCOUNT_ID", "CCAGENT_AUTH_SESSION_FILE"].map(key => [key, process.env[key]]));
+process.env.CCAGENT_HOME = base; process.env.CCAGENT_PLATFORM_HOME = base; delete process.env.CCAGENT_ACCOUNT_ID; delete process.env.CCAGENT_AUTH_SESSION_FILE;
+const env = { ...process.env, CCAGENT_HOME: base, CCAGENT_PLATFORM_HOME: base, ANTHROPIC_API_KEY: "fixture-personal-key", DEEPSEEK_API_KEY: "fixture-custom-key" };
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+let child: ReturnType<typeof spawn> | undefined, passed = 0;
+async function test(label: string, run: () => Promise<void>) { await run(); console.log(`PASS ${++passed} ${label}`); }
+async function consume(generator: AsyncGenerator<unknown, unknown>) { for await (const _ of generator) { /* Exercise real guards, never call a model. */ } }
+try {
+  await test("unauthenticated CLI blocks personal keys, settings, print mode, and prompt dumping", async () => {
+    for (const args of [["-p", "hello"], ["--dump-system-prompt"], ["init"], ["--settings", "does-not-exist.json", "-p", "hello"]]) {
+      await assert.rejects(() => promisify(execFile)(process.execPath, [entry, ...args], { cwd: workspace, env, windowsHide: true, timeout: 15000 }), error => {
+        const result = error as { stderr?: string }; return /先使用邮箱和密码登录/.test(result.stderr ?? "");
+      });
+    }
+    assert.equal(fixture.counters().signIns, 0);
+  });
+  await test("CLI help remains public and private worker cannot be started as a public command", async () => {
+    assert.match((await promisify(execFile)(process.execPath, [entry, "--help"], { cwd: workspace, env, windowsHide: true })).stdout, /ccagent account/);
+    await assert.rejects(() => promisify(execFile)(process.execPath, [entry, "web-worker"], { cwd: workspace, env, windowsHide: true }), error => /private account worker/.test((error as { stderr?: string }).stderr ?? ""));
+  });
+  await test("direct QueryEngine and agent loop cannot bypass login", async () => {
+    const engine = new QueryEngine({ model: "fixture", toolContext: { cwd: workspace } });
+    await assert.rejects(() => consume(engine.submitMessage("/help")), error => error instanceof AccountError && error.status === 401);
+    await assert.rejects(() => consume(query({ messages: [], model: "fixture", toolContext: { cwd: workspace } })), error => error instanceof AccountError && error.status === 401);
+    await assert.rejects(() => runTools([{ type: "tool_use", id: "forbidden-write", name: "Write", input: { file_path: path.join(workspace, "must-not-exist.txt"), content: "forbidden" } }], { cwd: workspace }, { permissionMode: "full" }), error => error instanceof AccountError && error.status === 401);
+    assert.equal(await stat(path.join(workspace, "must-not-exist.txt")).catch(() => null), null);
+  });
+  await test("real HTTP login and account home permit local engine commands", async () => {
+    await fixture.nativeClient.signIn(fixture.users[0]!.email, fixture.password);
+    await enterPlatformAccount();
+    await consume(new QueryEngine({ model: "fixture", toolContext: { cwd: workspace } }).submitMessage("/help"));
+  });
+  await test("account revoked while a tool waits for permission cannot execute the tool", async () => {
+    const file = path.join(workspace, "revoked-write.txt");
+    const result = await runTools([{ type: "tool_use", id: "revoke-at-confirmation", name: "Write", input: { file_path: file, content: "forbidden" } }], { cwd: workspace }, {
+      permissionMode: "default", permissionSettings: { allow: [], deny: [], mode: "default" },
+      onPermissionRequest: async () => { fixture.disable(fixture.users[0]!.id); return "allow_once"; },
+    });
+    assert.equal(result.executions[0]?.result.isError, true);
+    assert.equal(await stat(file).catch(() => null), null);
+    fixture.enable(fixture.users[0]!.id);
+  });
+  await fixture.nativeClient.signIn(fixture.users[0]!.email, fixture.password);
+  await writeFile(path.join(base, "legacy-sentinel.txt"), "legacy data remains untouched");
+  const port = await new Promise<number>((resolve, reject) => { const probe = net.createServer(); probe.once("error", reject); probe.listen(0, "127.0.0.1", () => { const address = probe.address(); probe.close(() => address && typeof address !== "string" ? resolve(address.port) : reject(new Error("port"))); }); });
+  const origin = `http://127.0.0.1:${port}`;
+  child = spawn(process.execPath, [entry, "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  let logs = ""; child.stdout?.on("data", chunk => { logs += String(chunk); }); child.stderr?.on("data", chunk => { logs += String(chunk); });
+  for (let i = 0; i < 100; i++) { if (await fetch(origin + "/api/health").then(response => response.ok, () => false)) break; if (child.exitCode !== null) throw new Error(logs); await delay(100); }
+  const post = (route: string, body: unknown, cookie?: string, extra: Record<string, string> = {}) => fetch(origin + route, { method: "POST", headers: { origin, "x-ccagent-web": "1", "content-type": "application/json", ...(cookie ? { cookie } : {}), ...extra }, body: JSON.stringify(body) });
+  async function login(index: number) { const response = await post("/api/account/login", { email: fixture.users[index]!.email, password: fixture.password }); assert.equal(response.status, 200, await response.text()); const cookie = response.headers.get("set-cookie")?.split(";")[0]; assert.ok(cookie); return cookie; }
+  await test("fresh browsers cannot inherit the desktop/CLI login; login assets are public", async () => {
+    assert.equal((await fetch(origin, { redirect: "manual" })).status, 303);
+    for (const route of ["/api/bootstrap", "/api/sessions", "/app.js"]) assert.equal((await fetch(origin + route)).status, 401, route);
+    assert.equal((await fetch(origin + "/login")).status, 200);
+    assert.equal((await post("/api/account/login", { email: fixture.users[0]!.email, password: fixture.password }, undefined, { origin: "https://evil.example" })).status, 403);
+  });
+  const cookieA = await login(0), cookieB = await login(1);
+  const get = (route: string, cookie: string) => fetch(origin + route, { headers: { cookie } });
+  await test("different browser logins run the real engine with isolated sessions", async () => {
+    assert.equal((await get("/api/bootstrap", cookieA)).status, 200);
+    const createdResponse = await post("/api/sessions", {}, cookieA); assert.equal(createdResponse.status, 201, await createdResponse.clone().text());
+    const created = await createdResponse.json() as { sessionId: string };
+    assert.equal((await get(`/api/sessions/${created.sessionId}`, cookieA)).status, 200);
+    const crossAccount = await get(`/api/sessions/${created.sessionId}`, cookieB);
+    assert.equal(crossAccount.status, 404, await crossAccount.text());
+    assert.notEqual(accountHome(base, fixture.users[0]!.id), accountHome(base, fixture.users[1]!.id));
+    assert.equal(await readFile(path.join(base, "legacy-sentinel.txt"), "utf8"), "legacy data remains untouched");
+  });
+  await test("logout and account disable immediately block business APIs without affecting the other login", async () => {
+    assert.equal((await post("/api/account/logout", {}, cookieA)).status, 200);
+    assert.equal((await get("/api/bootstrap", cookieA)).status, 401);
+    assert.equal((await get("/api/bootstrap", cookieB)).status, 200);
+    fixture.disable(fixture.users[1]!.id);
+    assert.equal((await get("/api/bootstrap", cookieB)).status, 403);
+  });
+  console.log(`${passed} authentication enforcement checks passed (real local HTTP and DPAPI; no production email or provider request).`);
+} finally {
+  if (child && child.exitCode === null && child.signalCode === null) { const closed = new Promise<void>(resolve => child!.once("exit", () => resolve())); child.send?.("ccagent:shutdown", () => {}); const timeout = setTimeout(() => child?.kill(), 6000); await closed; clearTimeout(timeout); }
+  await fixture.close();
+  for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  const target = path.resolve(temporary); assert.equal(path.dirname(target), path.resolve(os.tmpdir())); assert.ok(path.basename(target).startsWith("ccagent-auth-enforcement-"));
+  await rm(target, { recursive: true, force: true });
+}

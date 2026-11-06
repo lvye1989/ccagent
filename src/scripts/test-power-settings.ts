@@ -15,10 +15,11 @@ import { mailTool } from "../tools/mailTool.js";
 import type { ToolContext } from "../tools/Tool.js";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-powersetting-"));
-const home = path.join(root, "user");
+const { loginForTest } = await import("./helpers/accountFixture.js");
 const previousHome = process.env.CCAGENT_HOME;
 const previousFetch = globalThis.fetch;
-process.env.CCAGENT_HOME = home;
+const accountFixture = await loginForTest(path.join(root, "user"));
+const home = accountFixture.home;
 globalThis.fetch = async () => { throw new Error("Local command unexpectedly called a provider"); };
 const settingsPath = path.join(home, "settings.json");
 const context: ToolContext = { cwd: root, sessionId: "powersetting-fixture" };
@@ -122,6 +123,7 @@ try {
 
   console.log(`\nAll ${checks} mail power setting checks passed.`);
 } finally {
+  await accountFixture.close();
   globalThis.fetch = previousFetch;
   if (previousHome === undefined) delete process.env.CCAGENT_HOME;
   else process.env.CCAGENT_HOME = previousHome;

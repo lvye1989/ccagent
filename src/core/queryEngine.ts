@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { requirePlatformScope } from "../platform/account.js";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import {
   query,
@@ -319,6 +320,7 @@ export class QueryEngine {
   async *submitMessage(
     input: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
+    await requirePlatformScope(0);
     const trimmed = input.trim();
     // Stage 20: empty input is a valid call when there are background-
     // agent notifications waiting — the auto-trigger path in
@@ -1302,6 +1304,7 @@ export class QueryEngine {
    * in ./queryEngine/commands/permissions.ts.
    */
   async getPermissionsView(): Promise<PermissionsViewData> {
+    await requirePlatformScope();
     return buildPermissionsView(this.commandContext());
   }
 
@@ -1315,6 +1318,7 @@ export class QueryEngine {
     rule: string,
     scope: SettingSource,
   ): Promise<PermissionsViewData> {
+    await requirePlatformScope(0);
     return mutatePermissionRuleImpl(this.commandContext(), op, rule, scope);
   }
 
@@ -1323,16 +1327,19 @@ export class QueryEngine {
    * registries, and return the refreshed view so the overlay stays in sync.
    */
   async mutatePlugin(action: PluginMutation): Promise<PluginViewData> {
+    await requirePlatformScope(0);
     return mutatePluginImpl(this.commandContext(), action);
   }
 
   /** Validate and describe a plugin package without changing any state. */
   async previewPlugin(pluginId: string): Promise<PluginInstallPreview> {
+    await requirePlatformScope();
     return previewPluginImpl(pluginId);
   }
 
   /** Rebuild the `/plugin` manager snapshot without changing anything. */
   async refreshPluginView(): Promise<PluginViewData> {
+    await requirePlatformScope();
     return buildPluginView(this.commandContext().cwd);
   }
 

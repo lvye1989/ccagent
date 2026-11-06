@@ -14,16 +14,39 @@
 - CLI 已增加 `ccagent account setup/login/register/forgot/status/logout`，密码仅通过交互隐藏输入。共享账户客户端尚未接入所有业务请求的强制认证，不能据此认定统一登录完成。
 - `npm run test:platform-account`：覆盖真实本地 HTTP 协议请求、Windows DPAPI 加解密、账户禁用/替换、来源变更、断网、退出、损坏凭据与 CLI 接入；属于测试服务协议验证，尚非真实 Better Auth 数据库验收。
 - Vercel CLI 65.12.1 已登录；已发现 Supabase Free 和 Resend 邮件集成。后续只按已确认的独立项目配置，不自动升级付费数据库计划。
-- 已创建并关联 `lvye-1989s-projects/ccagent-cloud`，项目编号 `prj_2VwqV4ZbAkSX4WKJKDImBzWsNNYF`；尚未部署应用。Supabase Free 安装返回 `integration_terms_acceptance_required`，正在等待用户在 Vercel 接受首次集成条款，尚未创建数据库。
+- 已创建并关联 `lvye-1989s-projects/ccagent-cloud`，项目编号 `prj_2VwqV4ZbAkSX4WKJKDImBzWsNNYF`；后续已完成下方记录的受保护测试部署。用户接受条款后，已创建独立 Supabase Free 开发资源 `ccagent-development`（`store_xqUVy39a9F5bycg1`，新加坡），仅通过开发/测试环境使用，没有接入参考项目数据库。
 - 已通过 Vercel API 写入并重新读取验证项目设置：`framework=nextjs`、`rootDirectory=cloud`、`nodeVersion=24.x`、`buildCommand=npm run build`、`installCommand=npm ci`。
 - 当前验证：14 项金额/支付协议检查、15 项账户/CLI 检查、TypeScript、CLI 与图表构建均通过；编译后的账户帮助、未配置账户服务拒绝访问、命令行密码参数拒绝访问均通过。
+- `cloud/` 已安装 Next.js、Better Auth、Drizzle、postgres-js 和 Resend；依赖审计修复后为 0 项漏洞。实际创建 `ccagent` Schema，22 张表（含迁移记录），应用了 3 个版本化迁移；运行账户为 `ccagent_runtime`，与迁移账户分离，不能直接更新钱包或删除资金流水。
+- 新增真实邮箱密码认证接口、用户中心（余额、流水、个人 Key、调用记录）、受权限控制的管理数据查询与 CSV 导出、配置保存和服务凭据状态。普通注册由数据库触发器创建零余额钱包及普通用户角色；管理员只能通过 `npm run admin:create -- <已验证邮箱>` 或已有授权管理员的权限管理流程指定。
+- 已创建 Resend Free 资源 `ccagent-email`（`ir_m9qJF3UzTcFBu03W`），已拉取服务端密钥；用户确定发信域名 `notify.cjai.pro`。当前 Resend 状态仍为 pending；已向用户提供 [DNS 记录](email-dns.md)，权威 DNS 查询尚未找到记录，正在等待核对保存。尚未发送真实验证或密码找回邮件。
+- 真实 Supabase 隔离 Schema 测试 `tests/platform.test.ts` 13 项通过：邮箱验证、登录会话存储、账户禁用、密码重置撤销旧会话、退出、普通用户越权拦截、Key 哈希与归属、重复入账、十路并发授权不透支、调用幂等、结算/释放及不可变流水。测试邮件由测试函数捕获，未走生产发信；隔离测试 Schema 在结束时清理。
+- 并发测试发现并修复多次数据库往返导致锁排队超时的问题；授权、冻结、Key 额度变动与结算已由 `0002_atomic_usage.sql` 在数据库内原子完成。此结果不代表模型供应商和真实支付已经联调通过。
+- 七支付订单、快速持久化通知、主动查单幂等入账、原订单全额退款冻结、结果未知保留冻结及人工凭据处理已接入真实数据层；`tests/payments.test.ts` 9 项全部通过，使用隔离 Supabase 数据库和测试网络响应。已验证通知持久化耗时小于 5 秒、重复通知和并发查单只入账一次、通知丢失补偿、退款成功/失败/未知、余额不足及退款禁止盲目重试。生产支付密钥尚未配置，充值默认关闭。
+- `tests/configuration.test.ts` 8 项全部通过：配置类型持久化、环境变量只读覆盖、字段白名单、并发充值区间约束、旧版本冲突、后台查询投影、CSV 公式防护及不可变审计。真实浏览器发现的汇率字符串 JSON 解码类型错误已修复，后续使用对象封装存储，保留早期标量格式的读取兼容。
+- 真实 Next.js 生产构建通过。Playwright 在独立测试 Schema 中验证页面 → API → Supabase → 页面：普通用户访问后台接口 403、页面 404；管理员在页面授予角色后目标用户接口 200，移除后立即恢复 403；管理员无法通过自我移除锁死账户；汇率保存成功并在刷新后保留。未登录业务 API 401、业务页面跳转登录。登录、账户中心、管理用户、管理设置截图位于忽略的 `output/playwright/`，不含真实用户资料或生产密钥。
+- 浏览器验收使用 `scripts/browser-fixture.ts` 创建的临时 Schema 和随机密码，通过真实认证 HTTP 接口取得测试会话；发信和支付密钥在该测试服务内置空。验收结束关闭测试浏览器及服务，清理临时 Schema 和测试会话文件，未清空真实 `ccagent` 数据或原有本地文件。
+- 已核对现有模型实际路由：主模型 `deepseek-flash` / `openai-responses`，视觉 `qwen3.8-omni-flash` / `openai-chat`；另外保留 `qwen-plus`、OpenRouter Jev Decisions、Tavily/博查及 `qwen-audio-3.1-tts-flash` 语音。收费网关需要保留这些协议，不能统一改写成普通聊天；上游凭据尚未迁入云端。
+- `core/catalog.ts` 与管理员路由/价格接口已加入协议分组、凭据环境变量名称白名单、上游主机允许列表、路由和价格指纹绑定、追加价格版本、人民币/美元成本、固定 1.3 倍率、DeepSeek 峰谷与节假日策略。`tests/catalog.test.ts` 8 项真实隔离数据库检查通过；缺少成本、凭据或美元汇率不能启用，换模型或供应商后旧价格不能继续出售。尚未接入实际收费上游请求与网关设置表单。
+- 已创建私有 Vercel Blob 存储 `ccagent-private-development`（`store_2dfOtLoBdeaGxBC2`，sin1），仅关联 Development。`core/files.ts` 和 `/api/files` 已加入真实账户归属、限定路径/大小/类型的 2 分钟上传授权、15 分钟临时文件、私有读取、删除和过期清理；存储凭据不返回客户端。`tests/files.test.ts` 7 项真实 Vercel Blob + Supabase 检查全部通过，包括直接上传、限制篡改路径/大小/类型、匿名访问被拒、跨账户拒绝、短期结果及清理。定时清理任务和本地大文件接入仍未完成。
+- Blob SDK 2.8.2 的间接依赖引入旧 Zod 后，已通过 Vercel 官方已发布的 `@vercel/cli-config` 0.3.7 补丁覆盖修复；当前依赖审计再次为 0 项。未使用强制降级或 `npm audit fix --force`。
+- 2026-11-07：新增独立系统身份的维护接口和每分钟 Cron 配置，处理 24 小时异常授权释放、临时 Blob 删除及支付漏通知补偿。账户禁用或 Key 撤销不会阻止旧冻结释放。维护/支付合计 13 项检查通过，覆盖并发维护与实测结算竞态；定时任务尚未部署启用。
+- 新增 `/v1/models`、原生 Responses、Chat Completions、Jev Decisions、搜索及 Qwen 语音网关。登录会话与本账户 Key 同时校验，冻结发生在请求和文件归属校验之后。使用量、成本、倍率和汇率快照落库；结果保存私有 Blob 并支持同键重放，重复调用不再执行供应商。参考 [接口约定](gateway-api.md)。
+- `tests/gateway.test.ts` 9 项真实隔离 Supabase + 私有 Blob 检查通过：身份、归属、协议、幂等冲突、结果重放、内部重试、推理/工具/UTF-8 流式数据、取消后收集最终统计、未计量冻结及跨账户文件。此组供应商响应使用测试网络数据；真实供应商连通性另外检查，不混同验收范围。
+- 管理后台新增路由编辑和追加成本版本表单。真实浏览器 → 管理 API → 隔离数据库验证新建路由、保存 v1 成本、启用及更换模型后自动暂停；普通用户读取新管理接口 403、访问页面 404。截图为 `output/playwright/cloud-admin-prices.png` 和 `cloud-admin-gateway.png`；测试 Schema、登录文件及服务已清理，没有真实模型推理发生在该浏览器测试中。
+- `scripts/check-upstreams.ts --run` 已发出短小合成内容的真实请求：DeepSeek Responses、Jev、Tavily（返回 1 credit）、博查以及 Qwen 语音成功。语音供应商返回 HTTP OSS 地址，已改为先转 HTTPS 后下载；实际下载 65,660 字节 WAV，返回输入/输出 Token，不能按旧字符价格误计费。
+- Qwen 聊天路由暂未通过：现有工作空间地址返回 `403 AccessDenied.Unpurchased`，标准地址返回 `400 Arrearage`。已提示核对阿里云账户费用、服务开通与模型权限；不修改原有个人配置、不切换个人付费备用 Key，也不以目录能列出模型作为已可调用的证明。待用户处理后继续检查。
+- 新增协议与环境检查，覆盖无状态请求、付费工具拒绝、缓存用量缺失不按零猜测、SSE 分块、OSS HTTPS/主机限制、Vercel 精确认证来源以及 Schema 白名单。最新构建和 TypeScript 通过；尚未完成云端正式部署、真实邮件与真实支付验收。
+- `scripts/check-live-gateway.ts --run` 已通过真实 Better Auth 密码登录 → 平台 Key → 冻结 → 真实 DeepSeek / Qwen 语音 → 私有 Blob 结果 → Supabase 结算，分别记录 23 微元与 275 微元费用，余款冻结为零。使用预先验证的保留域名测试账户和非现金测试余额，没有向真实用户扣款；邮箱收发、充值与退款仍需分别验收。测试私有文件与临时 Schema 已删除。
+- 受 Vercel 访问保护的 Preview 部署已 READY：`dpl_9Rt9sJCAzPjrRd6fA9rAu4WC6A5D`，地址 `https://ccagent-cloud-f7ynohw67-lvye-1989s-projects.vercel.app`，运行 Node 24、新加坡函数区域。上传前审计 80 个实际源码文件（316,519 字节），不含本地凭据、数据、测试、迁移工具和生成文件；首轮排除迁移工具配置引用问题后重建通过。
+- Preview 使用开发数据库的专用运行账户，数据库 URL、独立认证密钥、邮件、Blob 和维护密钥作为服务端 Secret 保存，充值通过环境变量关闭；没有向 Preview 写入数据库管理连接或供应商凭据。`scripts/check-preview.ts` 使用短期 Development OIDC 身份检查，外部仍受保护；健康接口 200，账户/模型/后台/系统维护接口未登录 401，账户页面 307 至登录，错误密码经过真实数据库认证返回 401。CLI 初次检查自动生成的两个长期自动化通行密钥已撤销，后续使用 OIDC。
 
 ## 下一步接续
 
-1. 用户接受 Supabase 首次集成条款后，先检查安装与资源状态，避免重复创建。使用 CLI 65.12.1 的 `--non-interactive`，不要用该子命令不支持的 `--yes`。
-2. 在 `cloud/` 中执行独立免费开发项目安装：`vercel integration add supabase --scope lvye-1989s-projects --name ccagent-development --billing-plan free --meta region=sin1 --environment development --no-claim --no-env-pull --non-interactive`。正式及测试数据环境继续保持隔离。
-3. 按技能流程拉取并验证环境变量名称，完整连接真实数据库后建立 Next.js / Drizzle / Better Auth 后端与迁移，不能用示例数据替代。
-4. 将现有 `src/platform` 金额、支付及账户组件接入真实服务，并继续完成下方所有未勾选项目；目前没有强制业务登录、云端账本或管理员后台完成的证据。
+1. 不要重复创建 Supabase 或 Resend 资源。通过已关联 `cloud/.vercel` 的 CLI 拉取开发环境；不要输出填充后的 `.env.local`、连接串或密钥。
+2. 核验邮件 DNS 和 Qwen 供应商账户状态；完成真实注册验证、密码找回及管理员受控初始化。测试部署已完成基础认证检查，仍需真实业务登录及后续供应商、支付验证。
+3. 接入本地真实引擎、CLI、Web 和桌面的强制账户登录与账户数据隔离；继续完成正式服务目录及成本初始化、Qwen 按模式/输入长度分档、Jev/搜索收费联调、私有文件接入，以及线上定时任务验收。
+4. 继续完成下方全部未勾选项目，最后真实小额充值/退款及大陆网络验收后再重建桌面安装包；不将目前的云端基础层描述为整套应用已经可正式使用。
 
 ## 必须完成的实现与验收
 

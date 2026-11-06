@@ -33,6 +33,8 @@ import {
   getSessionPaths,
 } from "../session/storage.js";
 import { getTaskMode, setTaskMode } from "../state/taskModeStore.js";
+import { startAccountFixture } from "./helpers/accountFixture.js";
+import { enterPlatformAccount } from "../platform/account.js";
 
 const GOLDEN_PATH = path.join(
   import.meta.dirname,
@@ -87,6 +89,8 @@ function normalize(text: string): string {
   out = out.replace(/[✓⚠✗] Endpoint (reachable|not reachable)[^\n]*/g, "<ENDPOINT_PROBE>");
   // /doctor: API-auth-token status depends on the ambient environment — collapse it.
   out = out.replace(/[✓✗] (API auth token present|No API auth token)[^\n]*/g, "<AUTH_TOKEN>");
+  // Project memory directories contain a hash of this run's temporary path.
+  out = out.replace(/projects([\\/])[^\\/\n]+-[a-f0-9]{16}([\\/])memory/g, "projects$1<PROJECT>$2memory");
   // Empty command-output rows are formatted as `"  | "` for readability in
   // memory, but the golden should not carry invisible trailing whitespace.
   return out.split("\n").map((line) => line.trimEnd()).join("\n");
@@ -212,6 +216,15 @@ async function buildRecording(): Promise<string> {
   const isolatedHome = path.join(tmpRoot, "home");
   await mkdir(isolatedHome, { recursive: true });
   process.env.HOME = isolatedHome;
+  const savedIdentity = Object.fromEntries(["CCAGENT_HOME", "CCAGENT_PLATFORM_HOME", "CCAGENT_ACCOUNT_ID", "CCAGENT_AUTH_SESSION_FILE"].map(key => [key, process.env[key]]));
+  const platformBase = path.join(isolatedHome, ".ccagent");
+  process.env.CCAGENT_HOME = platformBase; process.env.CCAGENT_PLATFORM_HOME = platformBase;
+  delete process.env.CCAGENT_ACCOUNT_ID; delete process.env.CCAGENT_AUTH_SESSION_FILE;
+  const accountFixture = await startAccountFixture(platformBase);
+  await accountFixture.nativeClient.signIn(accountFixture.users[0]!.email, accountFixture.password);
+  const entered = await enterPlatformAccount();
+  registerPathReplacement(entered.home, platformBase);
+  try {
   registerPathReplacement(tmpRoot, "<TMP>");
   registerPathReplacement(os.tmpdir(), "<TMPDIR>");
 
@@ -429,11 +442,14 @@ async function buildRecording(): Promise<string> {
   await section("unknown", async () => [await record(makeEngine(isolatedCwd), "/bogus")]);
 
   const recording = normalize(sections.join("\n\n"));
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
-  await rm(tmpRoot, { recursive: true, force: true });
-
   return recording;
+  } finally {
+    await accountFixture.close();
+    if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
+    for (const [key, value] of Object.entries(savedIdentity)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    if (path.dirname(path.resolve(tmpRoot)) !== path.resolve(os.tmpdir()) || !path.basename(tmpRoot).startsWith("ccagent-char-")) throw new Error("Unsafe fixture cleanup");
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
 }
 
 async function main(): Promise<void> {
@@ -450,7 +466,7 @@ async function main(): Promise<void> {
 
   let golden: string;
   try {
-    golden = await readFile(GOLDEN_PATH, "utf8");
+    golden = (await readFile(GOLDEN_PATH, "utf8")).replace(/\r\n/g, "\n");
   } catch {
     process.stderr.write(
       `\u001b[31m[error]\u001b[0m no golden file found at ${GOLDEN_PATH}.\n` +

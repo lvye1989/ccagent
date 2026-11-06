@@ -5,11 +5,16 @@ import path from "node:path";
 import { createServer } from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as XLSX from "xlsx";
+import { startAccountFixture } from "./helpers/accountFixture.js";
+import { accountHome } from "../platform/account.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-customization-")));
-const workspace = path.join(temp, "workspace"), home = path.join(temp, "home");
-await fs.mkdir(workspace); await fs.mkdir(home);
+const workspace = path.join(temp, "workspace"), platformBase = path.join(temp, "home");
+const accountFixture = await startAccountFixture(platformBase);
+await accountFixture.nativeClient.signIn(accountFixture.users[0]!.email, accountFixture.password);
+const home = accountHome(platformBase, accountFixture.users[0]!.id);
+await fs.mkdir(workspace); await fs.mkdir(home, { recursive: true });
 await fs.writeFile(path.join(workspace, "image fixture.png"), Buffer.from("image-fixture-bytes"));
 await fs.mkdir(path.join(workspace, ".ccagent", "commands"), { recursive: true });
 await fs.writeFile(path.join(workspace, ".ccagent", "commands", "menu-review.md"), "---\ndescription: Menu command fixture\n---\nMENU_COMMAND_PROMPT $ARGUMENTS\n");
@@ -107,26 +112,29 @@ await fs.writeFile(path.join(home, "settings.json"), JSON.stringify({
   models: { fixture: { protocol: "openai-chat", model: "fixture", baseURL: `http://127.0.0.1:${mockPort}/v1`, apiKey: "${FIXTURE_KEY}" } },
   modelRoles: { image: "fixture" },
 }));
-const headers = { "content-type": "application/json", "x-ccagent-web": "1" };
-const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: home, FIXTURE_KEY: secret, CCAGENT_DISABLE_STREAM_LOG: "1" };
+const desktopToken = "a".repeat(64);
+const headers = { "content-type": "application/json", "x-ccagent-web": "1", "x-ccagent-desktop-token": desktopToken };
+const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: platformBase, CCAGENT_PLATFORM_HOME: platformBase, CCAGENT_DESKTOP_TOKEN: desktopToken, FIXTURE_KEY: secret, CCAGENT_DISABLE_STREAM_LOG: "1" };
+delete env.CCAGENT_ACCOUNT_ID; delete env.CCAGENT_AUTH_SESSION_FILE;
 delete env.CCAGENT_ENV_FILE;
 for (const name of ["QWEN_MODEL", "QWEN_BASE_URL", "QWEN_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_API_KEY"]) delete env[name];
 let server: ChildProcess | undefined, base = "", logs = "";
 let datasetId = "";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const webFetch: typeof fetch = (input, options) => { const requestHeaders = new Headers(options?.headers); requestHeaders.set("x-ccagent-desktop-token", desktopToken); return globalThis.fetch(input, { ...options, headers: requestHeaders }); };
 async function start() {
   const reserve = createServer(); await new Promise<void>((r) => reserve.listen(0, "127.0.0.1", r));
   const port = (reserve.address() as { port: number }).port; await new Promise<void>((r) => reserve.close(() => r()));
-  server = spawn(process.execPath, [path.join(root, "dist/ccagent.js"), "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  server = spawn(process.execPath, [path.join(root, "dist/ccagent.js"), "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   server.stdout!.on("data", (b) => { logs = (logs + b).slice(-6000); }); server.stderr!.on("data", (b) => { logs = (logs + b).slice(-6000); });
   base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 100; i++) { try { if ((await fetch(base + "/api/health")).ok) return; } catch {} if (server.exitCode !== null) throw new Error(logs); await delay(100); }
+  for (let i = 0; i < 100; i++) { try { if ((await webFetch(base + "/api/health")).ok) return; } catch {} if (server.exitCode !== null) throw new Error(logs); await delay(100); }
   throw new Error("Web startup timeout: " + logs);
 }
-async function stop() { server?.kill(); await Promise.race([new Promise<void>((r) => server?.once("close", () => r())), delay(3000)]); }
-async function get(route: string): Promise<any> { const r = await fetch(base + route); assert.equal(r.status, 200); return r.json(); }
+async function stop() { if (!server || server.exitCode !== null || server.signalCode !== null) return; const closed = new Promise<void>(r => server!.once("close", () => r())); server.send?.("ccagent:shutdown", () => {}); const timeout = setTimeout(() => server?.kill(), 6000); await closed; clearTimeout(timeout); }
+async function get(route: string): Promise<any> { const r = await webFetch(base + route); assert.equal(r.status, 200); return r.json(); }
 async function post(route: string, body: object, expected = 200): Promise<any> {
-  const r = await fetch(base + route, { method: "POST", headers, body: JSON.stringify(body) });
+  const r = await webFetch(base + route, { method: "POST", headers, body: JSON.stringify(body) });
   const result = await r.json(); assert.equal(r.status, expected, `${route}: ${JSON.stringify(result)}`); return result;
 }
 async function turn(id: string, message: string, until?: string) {
@@ -161,8 +169,8 @@ try {
     if (format === "text") assert(stdout === "数据".repeat(100_000) + "PRINT_COMPLETE\n", `Natural exit flushes all 600 KB of UTF-8 stdout (received ${Buffer.byteLength(stdout)} bytes)`);
     else { const lines = stdout.trim().split("\n").map((line) => JSON.parse(line)); const result = lines.at(-1); assert.equal(result.result, "CLI_IMAGE_FINISHED"); assert.equal(result.is_error, false); if (format === "stream-json") assert.equal(lines[0].type, "system"); }
   }
-  assert.equal((await fetch(base + "/customization.js")).status, 200);
-  assert.equal((await fetch(base + "/customization.css")).status, 200);
+  assert.equal((await webFetch(base + "/customization.js")).status, 200);
+  assert.equal((await webFetch(base + "/customization.css")).status, 200);
   await post("/api/customize/agents", { name: "../bad", description: "bad", prompt: "bad" }, 400);
   const agent = await post("/api/customize/draft", { kind: "agent", request: "Create a QA agent" });
   assert.equal(agent.name, "qa-agent");
@@ -296,8 +304,8 @@ try {
   let writtenOutput = ""; writtenCli.stdout!.on("data", (b) => { writtenOutput += b; }); writtenCli.stderr!.on("data", (b) => { writtenOutput += b; });
   await new Promise<void>((resolve, reject) => { writtenCli.once("error", reject); writtenCli.once("close", (code) => code === 0 ? resolve() : reject(new Error("Selected-folder CLI failed: " + writtenOutput))); });
   assert.match(writtenOutput, /WRITE_EXEC_FINISHED/); assert.equal(await fs.readFile(path.join(selectedFolder, "嵌套 输出/写入 验证.txt"), "utf8"), "EDITED_SUCCESS\n");
-  assert.equal((await fetch(base + "/charts.js")).status, 200); assert.equal((await fetch(base + "/visualization.js")).status, 200);
-  assert.match(await (await fetch(base + "/")).text(), /aria-label="数据可视化"/);
+  assert.equal((await webFetch(base + "/charts.js")).status, 200); assert.equal((await webFetch(base + "/visualization.js")).status, 200);
+  assert.match(await (await webFetch(base + "/")).text(), /aria-label="数据可视化"/);
   const excelBook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(excelBook, XLSX.utils.aoa_to_sheet([["测试报表"], ["项目", "区域", "投资"], ["Excel甲", "华东", 11], ["Excel乙", "华南", 22]]), "中文工作表");
   const excelBytes = XLSX.write(excelBook, { type: "buffer", bookType: "xlsx" }) as Buffer;
   const excelUpload = await post("/api/files/upload", { workspace: selectedFolder, name: "真实 上传.xlsx", base64: excelBytes.toString("base64") }, 201);
@@ -334,7 +342,7 @@ try {
   assert.equal((await get(`/api/sessions/${one.sessionId}`)).sessionId, one.sessionId, "Switching back restores the original conversation");
   console.log("Web customization: Agent generation/edit/execution, packaged skills/toggles, real stdio MCP, LLM connection/settings/CLI/restart, team roles/execution/opt-out, and RAG retrieval passed.");
 } finally {
-  await stop(); mock.closeAllConnections(); await new Promise<void>((r) => mock.close(() => r()));
+  await stop(); await accountFixture.close(); mock.closeAllConnections(); await new Promise<void>((r) => mock.close(() => r()));
   const relative = path.relative(await fs.realpath(os.tmpdir()), temp); if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Unsafe test cleanup");
   await fs.rm(temp, { recursive: true, force: true });
 }

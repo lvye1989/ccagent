@@ -20,7 +20,8 @@ function zip(entries: Record<string, string>): Buffer {
   return Buffer.concat([...locals, table, end]);
 }
 
-export async function checkWebFiles(base: string, workspace: string, headers: Record<string, string>) {
+export async function checkWebFiles(base: string, workspace: string, headers: Record<string, string>, transport: typeof globalThis.fetch = globalThis.fetch) {
+  const fetch = transport;
   const directory = path.join(workspace, "中文 文件");
   await fs.mkdir(directory);
   await Promise.all([

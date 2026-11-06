@@ -117,9 +117,10 @@ function checkCommand(command, args) {
   });
 }
 async function status() {
-  const models = ready ? (await api('/api/customize/models')).models : [];
-  const workspace = ready ? (await api('/api/workspaces')).current : state.workspace;
-  return { ready, error: startupError, version: app.getVersion(), workspace, models,
+  const account = ready ? await api('/api/account/status').catch(() => null) : null;
+  const models = account ? (await api('/api/customize/models')).models : [];
+  const workspace = account ? (await api('/api/workspaces')).current : state.workspace;
+  return { ready, authenticated: Boolean(account), error: startupError, version: app.getVersion(), workspace, models,
     nodeVersion: readState(path.join(backendRoot, 'desktop-manifest.json')).nodeVersion,
     git: await checkCommand('git', ['--version']), python: await checkCommand(process.env.CCAGENT_PYTHON || 'python', ['--version']),
   };
@@ -182,7 +183,8 @@ async function launch() {
   });
   await waitForBackend(child, origin, token);
   ready = true; log(`Started version ${app.getVersion()}`);
-  if (state.onboardingComplete) { await showMain(); guideWindow?.close(); }
+  const account = await api('/api/account/status').catch(() => null);
+  if (!account || state.onboardingComplete) { await showMain(); guideWindow?.close(); }
 }
 app.on('second-instance', () => reveal(mainWindow || guideWindow));
 app.on('window-all-closed', () => { if (!quitting) { quitting = true; app.quit(); } });

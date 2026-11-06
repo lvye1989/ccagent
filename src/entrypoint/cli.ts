@@ -3,8 +3,6 @@
 // other module body runs. See preflight.ts for why the ordering matters.
 import "./preflight.js";
 import { loadEnv } from "../utils/loadEnv.js";
-await loadEnv();
-import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
 import type { PermissionMode } from "../permissions/permissions.js";
 import { VERSION } from "../version.js";
 
@@ -33,15 +31,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (process.argv[2] === "init") {
-    const { runInitCommand } = await import("./init.js");
-    process.exitCode = await runInitCommand(process.argv.slice(3));
-    return;
-  }
-
   if (process.argv[2] === "web") {
     const { runWebServer } = await import("./web.js");
     await runWebServer(process.argv.slice(3));
+    return;
+  }
+
+  if (process.argv[2] === "web-worker") {
+    if (!process.send || !/^[a-f0-9]{64}$/.test(process.env.CCAGENT_WEB_WORKER_TOKEN ?? "")) throw new Error("This is a private account worker.");
+    const { requirePlatformScope } = await import("../platform/account.js");
+    await requirePlatformScope(0);
+    const { runWebWorker } = await import("./webWorker.js");
+    await runWebWorker(process.argv.slice(3));
     return;
   }
 
@@ -171,6 +172,19 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
     process.exit(0);
   }
 
+  // Bind the process before importing engine modules or reading personal settings.
+  // API keys, custom providers and noninteractive flags cannot replace login.
+  const { enterPlatformAccount } = await import("../platform/account.js");
+  await enterPlatformAccount();
+  await loadEnv();
+
+  if (process.argv[2] === "init") {
+    const { runInitCommand } = await import("./init.js");
+    process.exitCode = await runInitCommand(process.argv.slice(3));
+    return;
+  }
+
+  const { buildSystemPrompt, renderSystemPrompt } = await import("../context/systemPrompt.js");
   const modelIndex = process.argv.indexOf("--model");
   const model = modelIndex !== -1 ? process.argv[modelIndex + 1] : undefined;
   const dumpSystemPrompt = process.argv.includes("--dump-system-prompt");

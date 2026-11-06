@@ -24,9 +24,11 @@ function check(value: unknown, label: string): void {
 }
 
 const taskRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-skill-switch-"));
+const { loginForTest } = await import("./helpers/accountFixture.js");
 const previousHome = process.env.CCAGENT_HOME;
 const previousFetch = globalThis.fetch;
 process.env.CCAGENT_HOME = path.join(taskRoot, "user");
+const accountFixture = await loginForTest(process.env.CCAGENT_HOME);
 globalThis.fetch = async () => { throw new Error("Unexpected network request from local skill control"); };
 const settingsPath = path.join(process.env.CCAGENT_HOME, "settings.json");
 const settings = async () => JSON.parse(await fs.readFile(settingsPath, "utf8")) as Record<string, unknown>;
@@ -144,6 +146,7 @@ try {
   check(isAgentSkillsEnabled() && getAllTools().includes(skillTool), "Saved Open survives startup bootstrap");
   console.log(`\nAll ${checks} Agent Skills checks passed (no model/network calls).`);
 } finally {
+  await accountFixture.close();
   clearSkills();
   globalThis.fetch = previousFetch;
   if (previousHome === undefined) delete process.env.CCAGENT_HOME;

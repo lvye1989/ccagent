@@ -24,10 +24,12 @@ function check(value: unknown, label: string): void {
   assert.ok(value, label); checks++; console.log(`  [PASS] ${label}`);
 }
 const taskRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-agent-controls-"));
+const { loginForTest } = await import("./helpers/accountFixture.js");
 const oldHome = process.env.CCAGENT_HOME;
 const oldFetch = globalThis.fetch;
 const oldKey = process.env.TEST_AGENT_CONTROLS_KEY;
 process.env.CCAGENT_HOME = path.join(taskRoot, "user");
+const accountFixture = await loginForTest(process.env.CCAGENT_HOME);
 const settingsPath = path.join(process.env.CCAGENT_HOME, "settings.json");
 globalThis.fetch = async () => { throw new Error("Unexpected network request"); };
 const context: ToolContext = { cwd: taskRoot, sessionId: "agent-controls-test" };
@@ -60,13 +62,14 @@ try {
   const plugin = { ...getBuiltInAgents()[0], agentType: "plugin:helper", source: "plugin" as const };
   const definitions = [...getAllAgents(), plugin];
   setAgents(definitions);
-  check(getAllAgents().length === 6, "Built-in, project and plugin definitions are loaded");
+  const expectedAgents = getBuiltInAgents().length + 2;
+  check(getAllAgents().length === expectedAgents, "Built-in, project and plugin definitions are loaded");
   check(!classifyUserInput("/agents").isLlmTriggering, "Agent menu is a local command");
   const originalTools = getAllTools().map((t) => t.name).join(",");
   const originalTeams = isAgentTeamsEnabled();
   const originalSkills = isAgentSkillsEnabled();
   check((await command("/agents list")).includes("Open · built-in"), "List reports per-agent state and source");
-  check((await command("/agents")).includes("6 loaded"), "Noninteractive bare command retains detailed listing");
+  check((await command("/agents")).includes(`${expectedAgents} loaded`), "Noninteractive bare command retains detailed listing");
 
   check((await command("/agents close rhino_agent")).includes("Close"), "Direct Close applies to built-in Rhino");
   check(!isAgentEnabled("rhino_agent") && isAgentEnabled("Explore"), "Only selected agent is closed");
@@ -175,7 +178,7 @@ try {
   check(modelCalls === 1, "Subsequent invocation of the closed agent cannot make a model request");
 
   await Promise.all(getAllAgents().map((agent) => setAgentState(agent.agentType, "close")));
-  check(getEnabledAgents().length === 0 && (await command("/agents list")).includes("6 loaded"), "All agents may be closed while management retains every definition");
+  check(getEnabledAgents().length === 0 && (await command("/agents list")).includes(`${expectedAgents} loaded`), "All agents may be closed while management retains every definition");
   check((await command("/agents OPEN plugin:helper")).includes("Open") && getEnabledAgents().length === 1, "Local menu/direct commands can reopen an agent when all are closed");
 
   await fs.writeFile(settingsPath, "{ invalid", "utf8");
@@ -193,6 +196,7 @@ try {
   check(getEnabledAgents().length === 6, "Repaired settings restore default Open without reloading definitions");
   console.log(`\nAll ${checks} per-agent control checks passed (external network blocked/mocked).`);
 } finally {
+  await accountFixture.close();
   await tick(30); // Let read-only scheduler listeners settle before removing the test-owned root.
   clearWorkfriendTimers(); clearPendingNotifications(); clearAgents();
   globalThis.fetch = oldFetch;

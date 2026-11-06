@@ -25,11 +25,13 @@ import { QuestionPrompt } from "../ui/components/QuestionPrompt.js";
 import { stripVTControlCharacters } from "node:util";
 
 const taskHome = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-mcp-controls-"));
+const { loginForTest } = await import("./helpers/accountFixture.js");
 const oldHome = process.env.CCAGENT_HOME;
 process.env.CCAGENT_HOME = taskHome;
+const accountFixture = await loginForTest(taskHome);
 process.env.TEST_MCP_CLIENT_ID = "test-id";
 process.env.TEST_MCP_CLIENT_SECRET = "test-secret";
-const settingsFile = path.join(taskHome, "settings.json");
+const settingsFile = path.join(accountFixture.home, "settings.json");
 let passed = 0;
 function check(value: unknown, message: string): void { assert.ok(value, message); console.log(`  OK ${++passed}. ${message}`); }
 async function until(predicate: () => boolean): Promise<void> {
@@ -226,7 +228,7 @@ try {
   const discovered = await startMcpServer("list-auth", { ...config, oauth });
   check(discovered.type === "connected" && /Authorization required/.test(discovered.discoveryError ?? ""), "401 during tools/list reports authorization required instead of waiting five minutes");
   authAtDiscovery = false;
-  const tokenProvider = new GoogleWorkspaceOAuthProvider("127.0.0.1", oauth, { homeDir: taskHome });
+  const tokenProvider = new GoogleWorkspaceOAuthProvider("127.0.0.1", oauth, { homeDir: accountFixture.home });
   await tokenProvider.saveTokens({ access_token: "expired", token_type: "Bearer", refresh_token: "test-refresh" });
   const refreshed = await reconnectMcpServer("needs-auth");
   check(refreshed?.type === "connected" && refreshes === 1, "Stored refresh token renews silently; SDK recursive retry does not deadlock");
@@ -238,7 +240,7 @@ try {
   const fakeTransport = { finishAuth: async () => { finished++; } } as unknown as StreamableHTTPClientTransport;
   const providers = ["first", "queued"].map((name) => new GoogleWorkspaceOAuthProvider(name,
     { ...oauth, redirectUri: `http://127.0.0.1:${callbackPort}/oauth/callback` }, {
-      homeDir: taskHome, openExternal: async () => { opened++; return true; },
+      homeDir: accountFixture.home, openExternal: async () => { opened++; return true; },
     }));
   for (const provider of providers) {
     const state = provider.state(); provider.redirectToAuthorization(new URL(`https://accounts.google.test/auth?state=${state}`));
@@ -260,6 +262,7 @@ try {
   check(await fs.readFile(settingsFile, "utf8") === "{invalid settings", "Malformed user settings are never overwritten by switch persistence");
   console.log(`\n${passed} MCP control checks passed.`);
 } finally {
+  await accountFixture.close();
   await Promise.all(getMcpRegistry().map(({ connection }) => clearServerCache(connection.name, connection.config)));
   _resetMcpClientForTesting(); _resetMcpPreferencesForTesting(); clearMcpRegistry();
   await close(server);

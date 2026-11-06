@@ -72,6 +72,8 @@ const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-context-"));
 const projectDir = path.join(testRoot, "project");
 const previousHome = process.env.CCAGENT_HOME;
 process.env.CCAGENT_HOME = path.join(testRoot, "user-home");
+const { loginForTest } = await import("./helpers/accountFixture.js");
+const accountFixture = await loginForTest(process.env.CCAGENT_HOME);
 await fs.mkdir(path.join(projectDir, ".ccagent"), { recursive: true });
 await fs.writeFile(
   path.join(projectDir, ".ccagent", "settings.json"),
@@ -168,6 +170,7 @@ try {
   assert(summaryAborted, "The summary HTTP request receives the parent abort");
   assert.equal(stopped.reason, "aborted");
 } finally {
+  await accountFixture.close();
   process.chdir(originalCwd);
   globalThis.fetch = originalFetch;
   delete process.env.CTX_TEST_KEY;
