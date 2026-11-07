@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { requirePermission } from '@/core/auth';
 import { adminRows, adminView, csvResponse } from '@/core/admin-data';
 import { database } from '@/core/db';
@@ -14,7 +14,8 @@ export async function GET(request: Request, context: { params: Promise<{ section
     if (exporting) await requirePermission(request.headers, 'data.export');
     const result = await adminRows(section, url, exporting);
     if (exporting) {
-      await database().db.insert(audit).values({ id: randomUUID(), actorId: current.user.id, action: 'data.export', objectId: section, result: 'success', metadata: { rows: result.rows.length, total: result.total, limit: 10000 } });
+      const filterSha256 = createHash('sha256').update(JSON.stringify(result.filters)).digest('hex');
+      await database().db.insert(audit).values({ id: randomUUID(), actorId: current.user.id, action: 'data.export', objectId: section, result: 'success', metadata: { rows: result.rows.length, total: result.total, limit: 10000, filterFields: Object.keys(result.filters), filterSha256 } });
       return csvResponse(result.rows, section);
     }
     return json(result);

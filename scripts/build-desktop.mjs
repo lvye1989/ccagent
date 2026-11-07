@@ -17,6 +17,9 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
 process.env.NODE_USE_SYSTEM_CA = '1';
 delete process.env.CSC_LINK; // An unsigned local build never borrows unrelated signing identities.
 process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false';
+// Detect a running development payload before removing either staging directory.
+try { const handle = await fs.open(path.join(backend, 'runtime', 'node.exe'), 'r+'); await handle.close(); }
+catch (error) { if (error.code !== 'ENOENT') throw new Error('内置 Node 文件正在使用或无法更新。请先退出使用 output/desktop/backend 的测试应用，再重新打包；当前测试载荷未更改。'); }
 await fs.mkdir(cache, { recursive: true });
 async function resetStage(target) {
   const resolved = path.resolve(target);
@@ -57,7 +60,7 @@ for (const filename of ['main.cjs', 'runtime.cjs', 'preload.cjs', 'welcome.html'
 await fs.copyFile(path.join(assets, 'icon.ico'), path.join(stage, 'desktop', 'icon.ico'));
 await copy('LICENSE', stage);
 await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({ name: 'ccagent-desktop', version: pkg.version, private: true, description: 'CCAGENT AI 桌面工作区', author: 'CCAGENT', license: 'MIT', main: 'desktop/main.cjs' }, null, 2));
-const license = 'CCAGENT Windows 桌面版\r\n\r\n本应用按 MIT 许可证提供，许可证全文见下方。\r\n\r\n使用准备：\r\n1. 安装后选择工作文件夹，在首次使用向导或设置中添加模型。\r\n2. 使用你自己的模型服务配置；网络模型调用可能由服务商计费。\r\n3. 部分脚本、MCP 与专业软件工具需要额外运行环境。\r\n4. 升级和卸载保留用户配置与工作文件；删除配置请另行手动处理。\r\n5. 工具按应用权限规则执行，开始任务前请确认工作范围。\r\n\r\n' + await fs.readFile(path.join(root, 'LICENSE'), 'utf8');
+const license = 'CCAGENT Windows 桌面版\r\n\r\n本应用按 MIT 许可证提供，许可证全文见下方。\r\n\r\n使用准备：\r\n1. 安装后先使用邮箱和密码登录，再选择工作文件夹及模型服务。\r\n2. 官方服务使用人民币预付余额，按公开成本、实际用量和 1.3 倍率结算；也可使用自己的供应商或本地模型配置。\r\n3. 部分脚本、MCP 与专业软件工具需要额外运行环境。\r\n4. 升级和卸载保留用户配置与工作文件；删除配置请另行手动处理。\r\n5. 工具按应用权限规则执行，开始任务前请确认工作范围。\r\n\r\n' + await fs.readFile(path.join(root, 'LICENSE'), 'utf8');
 await fs.writeFile(path.join(assets, 'license.txt'), '\ufeff' + license, 'utf8');
 // Include notices for all installed build/runtime dependencies. This intentionally
 // over-includes notices rather than omit a bundled transitive dependency license.

@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const http = require('node:http');
+const { createHash } = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 
 function readState(file) {
@@ -52,7 +53,7 @@ function serviceRequest(origin, token, route, body, timeout = 10000) {
   });
 }
 function backendEnvironment(parent, runtime, token) {
-  const env = { ...parent, CCAGENT_DESKTOP_TOKEN: token };
+  const env = { ...parent, CCAGENT_DESKTOP_TOKEN: token, CCAGENT_DESKTOP_APP: '1' };
   for (const name of Object.keys(env)) {
     if (['PATH', 'NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'NODE_TLS_REJECT_UNAUTHORIZED'].includes(name.toUpperCase())) delete env[name];
   }
@@ -98,4 +99,15 @@ function sameOrigin(url, origin) {
 function externalUrl(url) {
   try { const parsed = new URL(url); return ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch { return false; }
 }
-module.exports = { readState, writeState, freePort, serviceRequest, backendEnvironment, startBackend, waitForBackend, stopBackend, sameOrigin, externalUrl };
+function onboardingAccountKey(account) {
+  if (!account || typeof account.user?.id !== 'string' || !account.user.id || !externalUrl(account.origin)) throw new Error('请先登录账户。');
+  return createHash('sha256').update(account.origin + '\0' + account.user.id).digest('hex');
+}
+function onboardingFinished(state, account) {
+  return Boolean(account && Array.isArray(state.onboardingAccounts) && state.onboardingAccounts.includes(onboardingAccountKey(account)));
+}
+function completeOnboarding(state, account) {
+  const keys = Array.isArray(state.onboardingAccounts) ? state.onboardingAccounts.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)) : [];
+  return { ...state, onboardingAccounts: [...new Set([...keys, onboardingAccountKey(account)])] };
+}
+module.exports = { readState, writeState, freePort, serviceRequest, backendEnvironment, startBackend, waitForBackend, stopBackend, sameOrigin, externalUrl, onboardingFinished, completeOnboarding };

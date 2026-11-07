@@ -17,6 +17,7 @@ src/scripts/__dbg*.ts
 rhino/output/
 rhino/_diag/
 output/playwright/
+output/checks/
 .playwright-cli/
 deliverables/
 output/desktop/

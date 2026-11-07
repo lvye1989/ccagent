@@ -2,13 +2,14 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { databaseMaxConnections, databaseUrl } from '../env';
 import * as schema from './schema';
+import { databaseOptions } from './options';
 
 function createDatabase() {
-  const client = postgres(databaseUrl(), { prepare: false, max: databaseMaxConnections(), idle_timeout: 20, connect_timeout: 15,
-    ssl: 'require', onnotice: () => {} });
+  const client = postgres(databaseUrl(), databaseOptions(databaseMaxConnections()));
   return { client, db: drizzle(client, { schema }) };
 }
 type Database = ReturnType<typeof createDatabase>;
+export type DatabaseReader = Pick<Database['db'], 'select'>;
 const globalDatabase = globalThis as typeof globalThis & { ccagentDatabase?: Database };
 let instance: Database | undefined;
 export function database(): Database {

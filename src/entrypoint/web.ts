@@ -16,7 +16,7 @@ const publicAssets: Record<string, [string, string]> = {
   "/favicon.svg": ["favicon.svg", "image/svg+xml"],
 };
 type Worker = { child: ChildProcess; port: number; token: string; userId: string; sessionFile: string };
-type LocalClient = { id: string; client: PlatformAccountClient; sessionFile: string; revision: number; worker?: Worker; starting?: Promise<Worker> };
+type LocalClient = { id: string; client: PlatformAccountClient; sessionFile: string; revision: number; closing: boolean; loggingOut?: boolean; worker?: Worker; starting?: Promise<Worker> };
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -64,6 +64,7 @@ async function stopWorker(worker?: Worker): Promise<void> {
   clearTimeout(deadline);
 }
 async function startWorker(local: LocalClient, session: AccountSession, workspace: string): Promise<Worker> {
+  if (local.closing) throw new AccountError("当前登录正在退出，请重新登录。", "account_changed", 401);
   if (local.worker && local.worker.userId === session.user.id && local.worker.child.exitCode === null && local.worker.child.signalCode === null) return local.worker;
   if (local.starting) return local.starting;
   local.starting = (async () => {
@@ -75,13 +76,25 @@ async function startWorker(local: LocalClient, session: AccountSession, workspac
     });
     const token = randomBytes(32).toString("hex"), base = getPlatformHome();
     await mkdir(accountHome(base, session.user.id), { recursive: true, mode: 0o700 });
+    let selectedWorkspace = workspace;
+    if (process.env.CCAGENT_DESKTOP_APP === "1") {
+      // A fresh desktop account must not open the previous account's folder.
+      selectedWorkspace = path.join(accountHome(base, session.user.id), "workspace");
+      await mkdir(selectedWorkspace, { recursive: true, mode: 0o700 });
+      const recent: unknown = await readFile(path.join(accountHome(base, session.user.id), "web-workspaces.json"), "utf8").then(value => { try { return JSON.parse(value) as unknown; } catch { return []; } }, () => []);
+      if (Array.isArray(recent)) {
+        for (const folder of recent) {
+          if (typeof folder === "string" && path.isAbsolute(folder) && (await stat(folder).catch(() => null))?.isDirectory()) { selectedWorkspace = folder; break; }
+        }
+      }
+    }
     const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_PLATFORM_HOME: base, CCAGENT_HOME: accountHome(base, session.user.id),
       CCAGENT_ACCOUNT_ID: session.user.id, CCAGENT_AUTH_SESSION_FILE: local.sessionFile,
       CCAGENT_WEB_WORKER_TOKEN: token, CCAGENT_DESKTOP_TOKEN: token };
     // TLS verification is mandatory for account and model traffic.
     delete env.NODE_TLS_REJECT_UNAUTHORIZED;
-    const child = spawn(process.execPath, [...process.execArgv, path.resolve(process.argv[1]!), "web-worker", "--workspace", workspace, "--port", String(port)], {
-      cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    const child = spawn(process.execPath, [...process.execArgv, path.resolve(process.argv[1]!), "web-worker", "--workspace", selectedWorkspace, "--port", String(port)], {
+      cwd: selectedWorkspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     // Forward no raw worker output: extensions may log private user content.
     child.stdout?.resume(); child.stderr?.resume();
@@ -98,13 +111,14 @@ async function startWorker(local: LocalClient, session: AccountSession, workspac
         });
       });
       const current = await local.client.requireSession();
-      if (revision !== local.revision || current.user.id !== session.user.id) throw new AccountError("账户状态已改变，请重新登录。", "account_changed", 401);
+      if (local.closing || revision !== local.revision || current.user.id !== session.user.id) throw new AccountError("账户状态已改变，请重新登录。", "account_changed", 401);
       local.worker = worker; return worker;
     } catch (error) { await stopWorker(worker); throw error; }
   })().finally(() => { local.starting = undefined; });
   return local.starting;
 }
 async function stopLocal(local: LocalClient): Promise<void> {
+  local.closing = true;
   local.revision++;
   if (local.starting) await local.starting.catch(() => {});
   await stopWorker(local.worker); local.worker = undefined;
@@ -146,11 +160,14 @@ export async function runWebServer(args: string[]): Promise<void> {
     const native = tokenEquals(req.headers["x-ccagent-desktop-token"], desktopToken);
     const id = native ? "native" : (!fresh && browserId(req)) || randomBytes(32).toString("hex");
     let local = locals.get(id);
+    if (local && local.client.origin !== (await getPlatformAccountClient()).origin) {
+      await stopLocal(local); locals.delete(id); local = undefined;
+    }
     if (!local) {
       if (locals.size > 64) throw new AccountError("本地会话过多，请重新启动应用。", "rate_limited", 429);
       const sessionFile = native ? getPlatformSessionFile() : path.join(getPlatformHome(), "platform", "web-sessions", id, "session.json");
-      local = { id, sessionFile, revision: 0, client: await getPlatformAccountClient(native ? undefined : sessionFile) };
-      locals.set(id, local);
+      local = { id, sessionFile, revision: 0, closing: false, client: await getPlatformAccountClient(native ? undefined : sessionFile) };
+      if (native) locals.set(id, local);
     }
     return local;
   }
@@ -186,6 +203,7 @@ export async function runWebServer(args: string[]): Promise<void> {
           const lockKey = native ? "native" : browserId(req) || "anonymous";
           if (loginBusy.has(lockKey)) return json(res, 409, { error: "请等待当前登录操作完成。" });
           const local = await localClient(req, action === "login");
+          if (local.loggingOut) return json(res, 409, { error: "请等待退出登录完成。" });
           loginBusy.add(lockKey);
           let signedIn = false;
           try {
@@ -195,24 +213,31 @@ export async function runWebServer(args: string[]): Promise<void> {
             const previousId = browserId(req), previous = native ? local : previousId ? locals.get(previousId) : undefined;
             const session = await local.client.signIn(text(body, "email"), text(body, "password"));
             signedIn = true;
+            locals.set(local.id, local);
             if (previous) { await stopLocal(previous); if (previous !== local) { await previous.client.signOut(); locals.delete(previous.id); } }
+            local.closing = false;
             if (!native) setCookie(res, local.id);
             return json(res, 200, { ...session, origin: local.client.origin });
           } finally { loginBusy.delete(lockKey); if (!signedIn && !native) locals.delete(local.id); }
         }
         const local = await localClient(req);
         if (req.method === "POST" && route === "/api/account/logout") {
-          await stopLocal(local);
-          const result = await local.client.signOut(); locals.delete(local.id); setCookie(res);
-          return json(res, 200, result);
+          local.loggingOut = true;
+          try {
+            await stopLocal(local);
+            const result = await local.client.signOut(); locals.delete(local.id); setCookie(res);
+            return json(res, 200, result);
+          } finally { local.loggingOut = false; }
         }
         if (req.method === "GET" && route === "/api/account/status") {
-          try { return json(res, 200, { ...await local.client.requireSession(), origin: local.client.origin }); }
+          if (local.loggingOut) throw new AccountError("当前登录正在退出。", "account_changed", 401);
+          try { const session = await local.client.requireSession(); local.closing = false; return json(res, 200, { ...session, origin: local.client.origin }); }
           catch (error) { await stopLocal(local); throw error; }
         }
         return json(res, 404, { error: "Not found" });
       }
       const local = await localClient(req);
+      if (local.closing) throw new AccountError("当前登录已退出，请重新登录。", "account_changed", 401);
       let session: AccountSession;
       try { session = await local.client.requireSession(); }
       catch (error) {
@@ -220,13 +245,21 @@ export async function runWebServer(args: string[]): Promise<void> {
         if (error instanceof AccountError && error.status === 401 && ["/", "/index.html"].includes(route)) { res.writeHead(303, { location: "/login", "cache-control": "no-store" }); return res.end(); }
         throw error;
       }
+      if (local.worker && local.worker.userId !== session.user.id) {
+        await stopLocal(local); local.closing = false;
+        throw new AccountError("当前账户已改变，请重新打开工作区。", "account_changed", 401);
+      }
+      locals.set(local.id, local);
       const worker = await startWorker(local, session, workspace);
-      if (loginBusy.has(local.id) || stopping) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+      if (local.closing || loginBusy.has(local.id) || stopping) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
       proxy(req, res, worker);
     } catch (error) {
       if (res.headersSent) { res.destroy(); return; }
       const known = error instanceof AccountError;
-      json(res, known ? error.status || (error.code === "configuration" ? 503 : 400) : 500, { error: known ? error.message : "本地账户服务暂时不可用，请重试。", ...(known ? { code: error.code } : {}) });
+      if (known && req.method === "GET" && /^\/(?:index\.html)?(?:\?|$)/.test(req.url ?? "/")) {
+        res.writeHead(303, { location: "/login", "cache-control": "no-store" }); return res.end();
+      }
+      json(res, known ? error.status || (["configuration", "network", "service_unavailable"].includes(error.code) ? 503 : 400) : 500, { error: known ? error.message : "本地账户服务暂时不可用，请重试。", ...(known ? { code: error.code } : {}) });
     }
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });

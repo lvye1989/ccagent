@@ -12,7 +12,8 @@ export default async function Usage({ searchParams }: { searchParams: Promise<{ 
   const current = await webAccount(), query = await searchParams;
   const paging = pagination(new URL(`http://local/?${new URLSearchParams(Object.entries(query).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))}`));
   const q = (query.q || '').slice(0, 120), where = and(eq(reservations.userId, current.user.id), q ? ilike(reservations.taskId, `%${q}%`) : undefined);
-  const rows = await database().db.select({ id: reservations.id, task_id: reservations.taskId, route_id: reservations.routeId, status: reservations.status,
+  const rows = await database().db.select({ id: reservations.id, task_id: reservations.taskId, route_id: reservations.routeId,
+    executed_route_id: sql<string | null>`coalesce(${reservations.usage}->>'executedRouteId',case when ${reservations.usage}->>'attempts' ~ '^[1-9][0-9]*$' then ${reservations.routeId} else null end)`, fallback_used: sql<boolean>`case when ${reservations.usage}->>'fallbackUsed'='true' then true else false end`, status: reservations.status,
     charged: reservations.charged, authorized: reservations.authorized, usage: reservations.usage, created_at: reservations.createdAt }).from(reservations).where(where)
     .orderBy(sql`${reservations.createdAt} desc`, reservations.id).limit(paging.pageSize).offset(paging.offset);
   const [total] = await database().db.select({ count: sql<number>`count(*)::integer` }).from(reservations).where(where);

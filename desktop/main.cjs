@@ -4,10 +4,11 @@ const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { readState, writeState, freePort, serviceRequest, startBackend, waitForBackend, stopBackend, sameOrigin, externalUrl } = require('./runtime.cjs');
+const { readState, writeState, freePort, serviceRequest, startBackend, waitForBackend, stopBackend, sameOrigin, externalUrl, onboardingFinished, completeOnboarding } = require('./runtime.cjs');
 
 app.setName('CCAGENT');
 app.setAppUserModelId('pro.ccagent.desktop');
+const productVersion = app.isPackaged ? app.getVersion() : readState(path.resolve(__dirname, '../package.json')).version || app.getVersion();
 if (process.env.CCAGENT_DESKTOP_USER_DATA) app.setPath('userData', path.resolve(process.env.CCAGENT_DESKTOP_USER_DATA));
 const locked = app.requestSingleInstanceLock();
 if (!locked) app.quit();
@@ -62,6 +63,11 @@ async function showMain(view = '') {
     webPreferences: { partition: 'persist:ccagent-desktop', contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
   });
   configureWindow(mainWindow);
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (!sameOrigin(mainWindow?.webContents.getURL(), origin)) return;
+    let route; try { route = new URL(mainWindow.webContents.getURL()).pathname; } catch { return; }
+    if (route === '/') void api('/api/account/status').then(account => { if (!onboardingFinished(state, account)) showGuide(); }).catch(() => {});
+  });
   const session = mainWindow.webContents.session;
   session.webRequest.onBeforeSendHeaders((details, callback) => {
     const headers = { ...details.requestHeaders };
@@ -120,12 +126,13 @@ async function status() {
   const account = ready ? await api('/api/account/status').catch(() => null) : null;
   const models = account ? (await api('/api/customize/models')).models : [];
   const workspace = account ? (await api('/api/workspaces')).current : state.workspace;
-  return { ready, authenticated: Boolean(account), error: startupError, version: app.getVersion(), workspace, models,
+  return { ready, authenticated: Boolean(account), email: account?.user?.email, error: startupError, version: productVersion, workspace, models,
     nodeVersion: readState(path.join(backendRoot, 'desktop-manifest.json')).nodeVersion,
     git: await checkCommand('git', ['--version']), python: await checkCommand(process.env.CCAGENT_PYTHON || 'python', ['--version']),
   };
 }
 function registerIpc() {
+  ipcMain.handle('ccagent:login', async event => { trustedGuide(event); await showMain(); guideWindow?.close(); });
   ipcMain.handle('ccagent:status', async event => { trustedGuide(event); return status(); });
   ipcMain.handle('ccagent:folder', async event => {
     trustedGuide(event);
@@ -145,10 +152,27 @@ function registerIpc() {
     trustedGuide(event); if (typeof id !== 'string' || id.length > 64) throw new Error('请选择模型。');
     return api('/api/customize/model-test', { id }, 100000);
   });
+  ipcMain.handle('ccagent:official-services', async event => { trustedGuide(event); return api('/api/customize/official-services', undefined, 45000); });
+  ipcMain.handle('ccagent:save-official-services', async (event, body) => {
+    trustedGuide(event);
+    if (!body || typeof body !== 'object' || Array.isArray(body) || (body.apiKey !== undefined && (typeof body.apiKey !== 'string' || body.apiKey.length > 8192))) throw new Error('请填写个人平台 Key 和服务选择。');
+    return api('/api/customize/official-services', Object.fromEntries(['apiKey', 'roles', 'auxiliaryEnabled', 'makeDefault'].filter(key => body[key] !== undefined).map(key => [key, body[key]])), 45000);
+  });
+  ipcMain.handle('ccagent:account-page', async (event, section) => {
+    trustedGuide(event);
+    const routes = { billing: '/account/billing', keys: '/account/keys', usage: '/account/usage' };
+    if (typeof section !== 'string' || !Object.hasOwn(routes, section)) throw new Error('账户页面无效。');
+    const account = await api('/api/account/status');
+    const url = new URL(routes[section], account.origin).href;
+    if (!externalUrl(url)) throw new Error('账户服务地址无效。');
+    await shell.openExternal(url);
+  });
   ipcMain.handle('ccagent:finish', async (event, view) => {
     trustedGuide(event); if (!['', 'settings'].includes(view)) throw new Error('Invalid view');
-    save({ onboardingComplete: true });
-    await showMain(view); guideWindow?.close();
+    save(completeOnboarding(state, await api('/api/account/status')));
+    await showMain(view);
+    if (sameOrigin(mainWindow?.webContents.getURL(), origin)) await mainWindow.webContents.executeJavaScript("document.dispatchEvent(new CustomEvent('ccagent:models-changed'))");
+    guideWindow?.close();
   });
   ipcMain.handle('ccagent:logs', async event => { trustedGuide(event); shell.showItemInFolder(logFile); });
 }
@@ -158,7 +182,7 @@ function installMenu() {
     { label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' }, { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' }] },
     { label: '查看', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'resetZoom', label: '实际大小' }, { role: 'zoomIn', label: '放大' }, { role: 'zoomOut', label: '缩小' }, { role: 'togglefullscreen', label: '全屏' }] },
     { label: '帮助', submenu: [{ label: '使用指南', click: showGuide }, { label: '打开诊断日志', click: () => shell.showItemInFolder(logFile) },
-      { label: '关于 CCAGENT', click: () => void dialog.showMessageBox(mainWindow || guideWindow, { type: 'info', title: '关于 CCAGENT', message: `CCAGENT ${app.getVersion()}`, detail: 'Windows 桌面版\n任务、模型、MCP、技能与权限均使用 CCAGENT 核心。\n源码优化后重新构建安装包即可升级。\n开源许可：MIT；第三方许可随安装文件提供。' }) }] },
+      { label: '关于 CCAGENT', click: () => void dialog.showMessageBox(mainWindow || guideWindow, { type: 'info', title: '关于 CCAGENT', message: `CCAGENT ${productVersion}`, detail: 'Windows 桌面版\n任务、模型、MCP、技能与权限均使用 CCAGENT 核心。\n源码优化后重新构建安装包即可升级。\n开源许可：MIT；第三方许可随安装文件提供。' }) }] },
   ]));
 }
 async function launch() {
@@ -182,9 +206,9 @@ async function launch() {
     if (!quitting) { startupError = '本地服务已停止，请退出并重新打开应用。'; log(`Backend exited: ${code}`); showGuide(); }
   });
   await waitForBackend(child, origin, token);
-  ready = true; log(`Started version ${app.getVersion()}`);
+  ready = true; log(`Started version ${productVersion}`);
   const account = await api('/api/account/status').catch(() => null);
-  if (!account || state.onboardingComplete) { await showMain(); guideWindow?.close(); }
+  if (!account || onboardingFinished(state, account)) { await showMain(); guideWindow?.close(); }
 }
 app.on('second-instance', () => reveal(mainWindow || guideWindow));
 app.on('window-all-closed', () => { if (!quitting) { quitting = true; app.quit(); } });

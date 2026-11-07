@@ -2,10 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { calculateCharge, type CostComponent } from '../../../src/platform/money';
-import { database } from './db';
+import { database, type DatabaseReader } from './db';
 import { audit, prices, routes } from './db/schema';
 import { configurationValues } from './configuration';
 import { HttpError } from './http';
+import { lockAdministration } from './database-locks';
 
 const metric = z.enum(['input_tokens', 'cached_input_tokens', 'image_input_tokens', 'audio_input_tokens', 'video_input_tokens', 'output_tokens', 'audio_output_tokens', 'requests', 'input_characters', 'search_credits']);
 export type UsageMetric = z.infer<typeof metric>;
@@ -49,12 +50,13 @@ export const routeInput = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._:-]
   credentialEnv: z.string().regex(/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/), enabled: z.boolean().default(false),
   timeoutMs: z.number().int().min(1000).max(180000).default(120000), retries: z.number().int().min(0).max(2).default(0),
   options: z.object({ contextWindow: z.number().int().min(128).max(4000000).default(131072), maxOutputTokens: z.number().int().min(1).max(1000000).default(8192),
-    maxImages: z.number().int().min(0).max(600).default(20), fallbackRouteId: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/).nullable().default(null),
+    maxImages: z.number().int().min(0).max(600).default(20), fallbackRouteId: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/).nullable().default(null), fallbackEnabled: z.boolean().default(false),
   }).strict(),
 }).strict().superRefine((value, context) => {
   const protocols: Record<string, string[]> = { chat: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], vision: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], decision: ['jev-decisions'], search: ['tavily', 'bocha'], voice: ['dashscope-tts'] };
   if (!protocols[value.service].includes(value.protocol)) context.addIssue({ code: 'custom', message: 'Service and protocol do not match' });
   if (value.options.fallbackRouteId === value.id) context.addIssue({ code: 'custom', message: 'Route cannot fall back to itself' });
+  if (value.options.fallbackEnabled && !value.options.fallbackRouteId) context.addIssue({ code: 'custom', message: 'Enabled fallback requires a route' });
   if (value.options.maxOutputTokens > value.options.contextWindow) context.addIssue({ code: 'custom', message: 'Output limit exceeds context window' });
 });
 export const priceInput = z.object({ routeId: z.string().min(1).max(80), currency: z.enum(['CNY', 'USD']), definition: priceDefinition,
@@ -88,17 +90,17 @@ export function quoteDefinition(definition: PriceDefinition, currency: 'CNY' | '
   return { ...calculateCharge(components, '1.3', usdCny), tariff };
 }
 
-export async function latestPrice(routeId: string, at = new Date()) {
-  const [price] = await database().db.select().from(prices).where(and(eq(prices.routeId, routeId), lte(prices.effectiveAt, at))).orderBy(desc(prices.version)).limit(1);
+export async function latestPrice(routeId: string, at = new Date(), reader: DatabaseReader = database().db) {
+  const [price] = await reader.select().from(prices).where(and(eq(prices.routeId, routeId), lte(prices.effectiveAt, at))).orderBy(desc(prices.version)).limit(1);
   return price;
 }
-export async function publishedRoute(id: string, service?: string) {
-  const [route] = await database().db.select().from(routes).where(eq(routes.id, id));
+export async function publishedRoute(id: string, service?: string, reader: DatabaseReader = database().db) {
+  const [route] = await reader.select().from(routes).where(eq(routes.id, id));
   if (!route || !route.enabled || (service && route.service !== service)) throw new HttpError(404, 'SERVICE_UNAVAILABLE', '该服务尚未开放。');
   validateUpstreamHost(route.baseUrl);
   if (!/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/.test(route.credentialEnv)) throw new HttpError(503, 'INVALID_CREDENTIAL_REFERENCE', '服务凭据配置需要更新。');
   if (!process.env[route.credentialEnv]) throw new HttpError(503, 'UPSTREAM_NOT_CONFIGURED', '服务供应商尚未配置。');
-  const price = await latestPrice(id), config = await configurationValues();
+  const price = await latestPrice(id, new Date(), reader), config = await configurationValues(reader);
   const stored = price?.components as { routeFingerprint?: unknown; definition?: unknown } | undefined;
   if (!price || stored?.routeFingerprint !== routeFingerprint(route)) throw new HttpError(503, 'PRICE_NOT_CONFIGURED', '该服务尚未配置有效价格。');
   const definition = priceDefinition.parse(stored.definition);
@@ -108,15 +110,38 @@ export async function publishedRoute(id: string, service?: string) {
   selectedTariff(definition, new Date());
   return { route, price, definition, currency, usdCny: currency === 'USD' ? config.settlement_usd_cny : null, markup: '1.3' as const };
 }
+export function publicPricing(selection: Awaited<ReturnType<typeof publishedRoute>>) {
+  const pricing = { currency: selection.currency, definition: selection.definition, markup: '1.3' as const, usdCny: selection.usdCny,
+    version: selection.price.version, sourceUrl: selection.price.sourceUrl };
+  const options = routeInput.shape.options.parse(selection.route.options);
+  const fingerprint = createHash('sha256').update(JSON.stringify([selection.route.id, routeFingerprint(selection.route), pricing,
+    { contextWindow: options.contextWindow, maxOutputTokens: options.maxOutputTokens, maxImages: options.maxImages }])).digest('hex');
+  return { ...pricing, fingerprint };
+}
 export async function saveRoute(actorId: string, input: z.infer<typeof routeInput>) {
   validateUpstreamHost(input.baseUrl);
   const fx = input.enabled ? (await configurationValues()).settlement_usd_cny : '';
   return database().db.transaction(async tx => {
-    await tx.execute(sql`select pg_advisory_xact_lock(804714033)`);
+    await lockAdministration(tx, 804714033);
     const [existing] = await tx.select().from(routes).where(eq(routes.id, input.id)).for('update');
     const changed = existing && routeFingerprint(existing) !== routeFingerprint(input);
     // A changed provider/model/protocol never reuses the previous supplier price.
     const enabled = changed ? false : input.enabled;
+    if (input.options.fallbackEnabled) {
+      const [target] = await tx.select().from(routes).where(eq(routes.id, input.options.fallbackRouteId!));
+      if (!target || target.service !== input.service || target.protocol !== input.protocol) throw new HttpError(409, 'INCOMPATIBLE_FALLBACK', '备用须为另一条同服务类型、同协议的路由。');
+      if (enabled) {
+        try { await publishedRoute(target.id, input.service, tx); }
+        catch { throw new HttpError(409, 'FALLBACK_NOT_READY', '启用前请完成备用路由的凭据、成本及开放配置。'); }
+      }
+      const graph = new Map((await tx.select({ id: routes.id, options: routes.options }).from(routes)).map(route => [route.id, routeInput.shape.options.parse(route.options)]));
+      graph.set(input.id, input.options);
+      const visited = new Set<string>(); let cursor: string | null = input.id;
+      while (cursor) {
+        if (visited.has(cursor)) throw new HttpError(409, 'FALLBACK_CYCLE', '备用路由不能形成循环。');
+        visited.add(cursor); const next = graph.get(cursor); cursor = next?.fallbackEnabled ? next.fallbackRouteId : null;
+      }
+    }
     if (enabled) {
       const [price] = await tx.select().from(prices).where(and(eq(prices.routeId, input.id), lte(prices.effectiveAt, new Date()))).orderBy(desc(prices.version)).limit(1);
       const stored = price?.components as { routeFingerprint?: unknown; definition?: unknown } | undefined;
@@ -129,13 +154,14 @@ export async function saveRoute(actorId: string, input: z.infer<typeof routeInpu
     const value = { ...input, enabled, updatedAt: new Date() };
     if (existing) await tx.update(routes).set(value).where(eq(routes.id, input.id));
     else await tx.insert(routes).values(value);
-    await tx.insert(audit).values({ id: randomUUID(), actorId, action: 'routes.save', objectId: input.id, result: 'success', metadata: { enabled, repricingRequired: !!changed } });
+    await tx.insert(audit).values({ id: randomUUID(), actorId, action: 'routes.save', objectId: input.id, result: 'success', metadata: { enabled, repricingRequired: !!changed,
+      fallbackEnabled: input.options.fallbackEnabled, fallbackRouteId: input.options.fallbackRouteId } });
     return { saved: true, enabled, repricingRequired: !!changed };
   });
 }
 export async function createPriceVersion(actorId: string, input: z.infer<typeof priceInput>) {
   return database().db.transaction(async tx => {
-    await tx.execute(sql`select pg_advisory_xact_lock(804714033)`);
+    await lockAdministration(tx, 804714033);
     const [route] = await tx.select().from(routes).where(eq(routes.id, input.routeId)).for('update');
     if (!route) throw new HttpError(404, 'ROUTE_NOT_FOUND', '服务路由不存在。');
     if (input.definition.tariff.kind === 'deepseek' && route.provider !== 'deepseek') throw new HttpError(400, 'TARIFF_MISMATCH', '峰谷价格策略与供应商不符。');

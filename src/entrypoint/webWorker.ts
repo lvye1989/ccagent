@@ -89,6 +89,8 @@ const MIME: Record<string, string> = {
   "/plugins.js": "text/javascript; charset=utf-8",
   "/voice.js": "text/javascript; charset=utf-8",
   "/browser-panel.js": "text/javascript; charset=utf-8",
+  "/cloudtv.js": "text/javascript; charset=utf-8",
+  "/cloudtv.css": "text/css; charset=utf-8",
   "/library.js": "text/javascript; charset=utf-8",
   "/memory.js": "text/javascript; charset=utf-8",
   "/schedules.js": "text/javascript; charset=utf-8",
@@ -331,6 +333,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
   try { await scheduleStore.load(); }
   catch (error) { schedulesReady = false; console.warn(`[ccagent web] Scheduled tasks: ${String(error)}`); }
   let scheduleDispatching = false;
+  let schedulePoll: Promise<void> | null = null;
   const workspaceListPath = getCCAgentPath("web-workspaces.json");
   async function listWebWorkspaces(): Promise<string[]> {
     let saved: unknown = [];
@@ -449,7 +452,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     return Object.values(profiles).map((profile) => ({
       id: profile.id, label: ({ deepseek: "DeepSeek", "qwen-plus": "Qwen Plus" } as Record<string, string>)[profile.id] || profile.id,
       model: profile.model, configured: true,
-      available: Boolean(profile.apiKey) || Boolean(profile.baseURL && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(profile.baseURL).hostname)),
+      available: Boolean(profile.apiKey || profile.platformService) || Boolean(profile.baseURL && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(profile.baseURL).hostname)),
     }));
   }
 
@@ -562,21 +565,23 @@ export async function runWebWorker(args: string[]): Promise<void> {
     await requirePlatformScope(0);
     if (!schedulesReady || scheduleDispatching || activeTurn || pluginMutationBusy) return;
     scheduleDispatching = true;
+    let finishPoll!: () => void;
+    schedulePoll = new Promise(resolve => { finishPoll = resolve; });
     try {
       const due = await scheduleStore.claimDue(workspace);
       if (!due) return;
       try {
         if (!(await validateWebModel(due.model))) throw new Error("Scheduled task model is unavailable");
         const session = await createSession(due.mode, due.model, false, true);
-        await scheduleStore.recordResult(due.id, { sessionId: session.id });
+        await scheduleStore.recordResult(due.id, due.runId, { sessionId: session.id });
         activeTurn = session.id;
-        void runTurn(session, due.prompt).then((succeeded) => scheduleStore.recordResult(due.id, {
+        void runTurn(session, due.prompt).then((succeeded) => scheduleStore.recordResult(due.id, due.runId, {
           finished: true, ...(succeeded ? {} : { error: "任务执行失败，请检查结果对话。" }),
         })).catch((error) => console.warn(`[ccagent web] Scheduled task completion: ${String(error)}`));
       } catch (error) {
-        await scheduleStore.recordResult(due.id, { finished: true, error: error instanceof Error ? error.message : String(error) });
+        await scheduleStore.recordResult(due.id, due.runId, { finished: true, error: error instanceof Error ? error.message : String(error) });
       }
-    } finally { scheduleDispatching = false; }
+    } finally { scheduleDispatching = false; schedulePoll = null; finishPoll(); }
   }
 
   const server = createServer(async (req, res) => {
@@ -600,6 +605,12 @@ export async function runWebWorker(args: string[]): Promise<void> {
 
       if (req.method === "GET" && route === "/api/health") return json(res, 200, { ok: true, version: VERSION });
       await requirePlatformScope();
+      // Polling the shared schedule file is a short transaction, not a running
+      // user task. Wait for it before deciding whether a mutation must be blocked.
+      if (schedulePoll && (req.method === "POST" || route === "/api/desktop/status")) {
+        await schedulePoll;
+        await requirePlatformScope(0);
+      }
       if (req.method === "GET" && route === "/api/desktop/status" && desktopToken) {
         return json(res, 200, { busy: Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) });
       }
@@ -621,7 +632,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
               void startMcpServer(name, config).catch(() => {});
             }
             if (resource === "teams") await bootstrapAgentTeams();
-            if (resource === "models" || resource === "settings") {
+            if (resource === "models" || resource === "settings" || resource === "official-services") {
               permissions = await loadPermissionSettings(workspace);
               model = (await readMergedStringSetting(workspace, "model")) ?? (await readMergedStringSetting(workspace, "defaultModel")) ?? model;
               const sources = await loadSettingSources(workspace);
@@ -704,7 +715,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       }
       if (route === "/api/schedules") {
         if (!schedulesReady) return json(res, 503, { error: "Scheduled task store could not be read; check web-schedules.json" });
-        if (req.method === "GET") return json(res, 200, { tasks: scheduleStore.list(workspace), running: activeTurn });
+        if (req.method === "GET") return json(res, 200, { tasks: await scheduleStore.list(workspace), running: activeTurn });
         if (req.method === "POST") {
           const body = await readJson(req);
           const title = typeof body.title === "string" ? body.title.trim() : "";
@@ -1223,7 +1234,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
   }
   if (schedulesReady) {
     setInterval(() => { void dispatchScheduledTask().catch((error) => console.warn(`[ccagent web] Scheduled task: ${String(error)}`)); }, 10_000).unref();
-    void dispatchScheduledTask();
+    void dispatchScheduledTask().catch(error => console.warn(`[ccagent web] Scheduled task: ${String(error)}`));
   }
   console.log(`CCAGENT Web: http://127.0.0.1:${port}`);
   setInterval(() => {

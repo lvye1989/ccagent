@@ -6,17 +6,31 @@ import { createServer } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
+import { startAccountFixture } from '../src/scripts/helpers/accountFixture.ts';
+import { accountHome } from '../src/platform/account.ts';
 const require = createRequire(import.meta.url);
-const { freePort, startBackend, stopBackend, waitForBackend, serviceRequest, backendEnvironment } = require('../desktop/runtime.cjs');
+const { freePort, startBackend, stopBackend, waitForBackend, serviceRequest, backendEnvironment, onboardingFinished, completeOnboarding } = require('../desktop/runtime.cjs');
 const root = path.resolve(import.meta.dirname, '..');
 const backendRoot = path.resolve(process.env.CCAGENT_TEST_BACKEND || path.join(root, 'output/desktop/backend'));
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'ccagent-desktop-test-'));
-const home = path.join(temp, 'home'), workspace = path.join(temp, '中文 工作区'), second = path.join(temp, '另一个 项目');
+const platformBase = path.join(temp, 'home'), workspace = path.join(temp, '中文 工作区'), second = path.join(temp, '另一个 项目');
+const accountFixture = await startAccountFixture(platformBase);
+const identityA = { origin: accountFixture.origin, user: accountFixture.users[0] }, identityB = { origin: accountFixture.origin, user: accountFixture.users[1] };
+const legacyState = { onboardingComplete: true, workspace: 'retained workspace' };
+assert(!onboardingFinished(legacyState, identityA), 'Machine-level legacy flags never skip a new account guide');
+const accountState = completeOnboarding(legacyState, identityA);
+assert(onboardingFinished(accountState, identityA)); assert(!onboardingFinished(accountState, identityB));
+assert(!onboardingFinished(accountState, { ...identityA, origin: 'https://another.example.invalid' }));
+assert(onboardingFinished(completeOnboarding(accountState, identityB), identityA));
+assert.equal(accountState.workspace, legacyState.workspace);
+assert.throws(() => completeOnboarding(accountState, null), /登录/);
+const home = accountHome(platformBase, accountFixture.users[0].id);
 for (const dir of [home, workspace, second]) await fs.mkdir(dir, { recursive: true });
 const envFile = path.join(home, 'empty.env'); await fs.writeFile(envFile, '');
 // User/project model configuration must never replace desktop authorization.
 await fs.writeFile(path.join(home, 'settings.json'), JSON.stringify({ env: { CCAGENT_DESKTOP_TOKEN: 'configuration-must-not-override-desktop-token' } }));
-const env = { ...process.env, CCAGENT_HOME: home, CCAGENT_ENV_FILE: envFile };
+const env = { ...process.env, CCAGENT_HOME: platformBase, CCAGENT_PLATFORM_HOME: platformBase, CCAGENT_ENV_FILE: envFile };
+delete env.CCAGENT_ACCOUNT_ID; delete env.CCAGENT_AUTH_SESSION_FILE;
 const manifest = JSON.parse(await fs.readFile(path.join(backendRoot, 'desktop-manifest.json'), 'utf8'));
 for (const file of manifest.payload) {
   assert(!/(^|\/)\.(?:ccagent|git)(\/|$)|(^|\/)\.env$|sessions/i.test(file.path));
@@ -50,6 +64,10 @@ try {
   assert.equal((await fetch(origin + '/api/health', { headers: { 'x-ccagent-desktop-token': 'wrong' } })).status, 403);
   assert.equal((await fetch(origin + '/api/health', { headers: { 'x-ccagent-desktop-token': token, origin: 'https://untrusted.example' } })).status, 403);
   assert.equal((await api('/api/health')).ok, true);
+  await assert.rejects(() => api('/api/bootstrap'), /邮箱和密码登录/);
+  await api('/api/account/login', { email: accountFixture.users[0].email, password: accountFixture.password });
+  assert.equal(await fs.realpath((await api('/api/workspaces')).current), await fs.realpath(path.join(home, 'workspace')), 'Fresh account uses its own folder instead of machine-level previous workspace');
+  await api('/api/workspaces/select', { path: workspace });
   for (const route of ['/', '/app.js', '/charts.js', '/favicon.svg']) {
     const response = await fetch(origin + route, { headers: { 'x-ccagent-desktop-token': token } });
     assert.equal(response.status, 200, route); assert((await response.text()).length > 20);
@@ -86,6 +104,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   console.log('PASS desktop: verified payload, bundled Node/npm, private service authorization, UI assets, model save/test, Chinese workspace switch, bundled-node MCP, graceful shutdown and restart persistence.');
 } finally {
   await stopBackend(child);
+  await accountFixture.close();
   mock.closeAllConnections(); await new Promise(resolve => mock.close(resolve));
   // Keep the isolated test directory for diagnosis; never touch user settings.
   console.log(`Isolated test evidence: ${temp}`);

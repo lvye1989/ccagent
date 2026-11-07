@@ -1,4 +1,5 @@
 import type { SearchResult } from "../../tools/webSearch/adapters.js";
+import { officialAuxiliaryEnabled } from "../../platform/serviceState.js";
 import {
   callOpenRouterJev,
   DEFAULT_OPENROUTER_JEV_ENDPOINT,
@@ -16,7 +17,7 @@ export interface JevSearchRerankResult {
 
 function enabled(): boolean {
   const value = process.env.CCAGENT_SEARCH_JEV?.trim().toLowerCase();
-  return Boolean(process.env.OPENROUTER_API_KEY?.trim()) && !["0", "false", "no", "off"].includes(value || "");
+  return (Boolean(process.env.OPENROUTER_API_KEY?.trim()) || officialAuxiliaryEnabled()) && !["0", "false", "no", "off"].includes(value || "");
 }
 
 function endpoint(): string {

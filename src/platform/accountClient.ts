@@ -1,6 +1,7 @@
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
 import { SecureCredentialStore } from "./secureStore.js";
+import { platformRequest } from "./transport.js";
 
 export interface AccountUser { id: string; email: string; name: string }
 export interface AccountSession { user: AccountUser; expiresAt: string }
@@ -97,6 +98,24 @@ export class PlatformAccountClient {
   readonly origin: string;
   constructor(origin: string, private readonly store: SecureCredentialStore<StoredAccountSession>) {
     this.origin = normalizePlatformOrigin(origin);
+  }
+
+  /** Server-side only: a platform Key is always accompanied by this verified email session. */
+  async serviceRequest(route: string, expectedUserId: string, options: {
+    method?: string; headers?: Record<string, string>; body?: Uint8Array; signal?: AbortSignal;
+    timeoutMs?: number; maximumBytes?: number;
+  } = {}): Promise<Response> {
+    if (!/^\/(?:v1\/(?:models|responses|chat\/completions|decisions|search|voice)|api\/(?:account\/(?:me|wallet|calls\/[A-Za-z0-9][A-Za-z0-9._:-]{0,199})|files(?:\/[a-f0-9-]{36})?))$/.test(route)) {
+      throw new AccountError("官方服务接口无效。", "invalid_route");
+    }
+    // Each destination endpoint performs authoritative session validation. Avoid
+    // a second remote login lookup before every chunk/file request.
+    const stored = await this.store.read();
+    if (stored?.user.id !== expectedUserId || stored.origin !== this.origin || !validCookie(stored.cookie) || !Number.isFinite(Date.parse(stored.expiresAt)) || Date.parse(stored.expiresAt) <= Date.now()) {
+      throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    }
+    const headers = { ...options.headers, origin: this.origin, cookie: stored.cookie, "cache-control": "no-store" };
+    return platformRequest(new URL(route, this.origin), { ...options, headers });
   }
 
   private async resolveSession(cookie: string): Promise<AccountSession> {

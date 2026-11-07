@@ -1,6 +1,7 @@
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { RHINO_EXTENDED_ACTIONS, RHINO_EXTENDED_HELP, rhinoTargetGuids, rhinoCapabilities } from "./rhinoCatalog.js";
 import type { EnabledToolManifest } from "./index.js";
+import { officialAuxiliaryEnabled } from "../platform/serviceState.js";
 import {
   callOpenRouterJev,
   DEFAULT_OPENROUTER_JEV_ENDPOINT,
@@ -178,7 +179,7 @@ export function getRhinoJevConfig(): {
     ? rawMode
     : "enforce";
   return {
-    enabled: Boolean(apiKey) && mode !== "off" && envBoolean(process.env.CCAGENT_RHINO_JEV, true),
+    enabled: (Boolean(apiKey) || officialAuxiliaryEnabled()) && mode !== "off" && envBoolean(process.env.CCAGENT_RHINO_JEV, true),
     mode,
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),

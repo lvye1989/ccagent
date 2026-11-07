@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { requirePlatformScope } from "../platform/account.js";
+import { inPlatformTask } from "../platform/taskScope.js";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import {
   query,
@@ -317,7 +318,11 @@ export class QueryEngine {
     this.toolContext.sessionInstructions = instructions;
   }
 
-  async *submitMessage(
+  submitMessage(input: string): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
+    return inPlatformTask(this.toolContext.sessionId, this.submitMessageInTask(input));
+  }
+
+  private async *submitMessageInTask(
     input: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
     await requirePlatformScope(0);

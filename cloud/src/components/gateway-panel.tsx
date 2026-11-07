@@ -1,16 +1,19 @@
 'use client';
 import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import type { UsageMetric } from '@/core/catalog';
 
 const protocols: Record<string, [string, string][]> = { chat: [['openai-responses', 'Responses'], ['openai-chat', 'Chat Completions']], vision: [['openai-chat', 'Chat Completions'], ['openai-responses', 'Responses']],
   decision: [['jev-decisions', 'Jev Decisions']], search: [['tavily', 'Tavily'], ['bocha', '博查']], voice: [['dashscope-tts', 'Qwen 语音']] };
 const services = [['chat', '主模型'], ['vision', '视觉读图'], ['decision', '结构化决策'], ['search', '联网搜索'], ['voice', '语音合成']];
-const metrics = [['input_tokens', '未缓存输入 Token'], ['cached_input_tokens', '缓存输入 Token'], ['output_tokens', '输出 Token'], ['search_credits', '搜索 Credit'], ['requests', '请求次数'], ['input_characters', '输入字符']];
+const metricNames: Record<UsageMetric, string> = { input_tokens: '未缓存输入 Token', cached_input_tokens: '缓存输入 Token', image_input_tokens: '图片输入 Token', audio_input_tokens: '音频输入 Token',
+  video_input_tokens: '视频输入 Token', output_tokens: '输出 Token', audio_output_tokens: '音频输出 Token', search_credits: '搜索 Credit', requests: '请求次数', input_characters: '输入字符' };
+const metrics = Object.entries(metricNames);
 type Route = { id: string; name: string; service: string; protocol: string; provider: string; baseUrl: string; upstreamModel: string; credentialEnv: string; enabled: boolean; timeoutMs: number; retries: number;
-  options: { contextWindow: number; maxOutputTokens: number; maxImages: number; fallbackRouteId: string | null } };
+  options: { contextWindow: number; maxOutputTokens: number; maxImages: number; fallbackRouteId: string | null; fallbackEnabled: boolean } };
 type Rate = { metric: string; price: string; unitQuantity: string; offPeakPrice?: string };
 const blankRoute = (): Route => ({ id: '', name: '', service: 'chat', protocol: 'openai-responses', provider: '', baseUrl: '', upstreamModel: '', credentialEnv: 'CCAGENT_PROVIDER_', enabled: false, timeoutMs: 120000, retries: 0,
-  options: { contextWindow: 131072, maxOutputTokens: 8192, maxImages: 20, fallbackRouteId: null } });
+  options: { contextWindow: 131072, maxOutputTokens: 8192, maxImages: 20, fallbackRouteId: null, fallbackEnabled: false } });
 const blankRates = (): Rate[] => [{ metric: 'input_tokens', price: '', unitQuantity: '1000000' }, { metric: 'cached_input_tokens', price: '', unitQuantity: '1000000' }, { metric: 'output_tokens', price: '', unitQuantity: '1000000' }];
 
 export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: Record<string, unknown>[] }) {
@@ -68,6 +71,8 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
         <div className="form-row"><label className="field">上下文上限（Token）<input type="number" min={128} max={4000000} value={route.options.contextWindow} onChange={event => change('options', { ...route.options, contextWindow: Number(event.target.value) })} required disabled={busy} /></label><label className="field">输出上限（Token）<input type="number" min={1} max={1000000} value={route.options.maxOutputTokens} onChange={event => change('options', { ...route.options, maxOutputTokens: Number(event.target.value) })} required disabled={busy} /></label></div>
         <div className="form-row"><label className="field">超时（毫秒）<input type="number" min={1000} max={180000} value={route.timeoutMs} onChange={event => change('timeoutMs', Number(event.target.value))} required disabled={busy} /></label><label className="field">内部重试次数<select value={route.retries} onChange={event => change('retries', Number(event.target.value))} disabled={busy}>{[0, 1, 2].map(value => <option key={value} value={value}>{value}</option>)}</select><small>内部重试产生的额外成本由平台承担。</small></label></div>
         <label className="field">每次最多图片数<input type="number" min={0} max={600} value={route.options.maxImages} onChange={event => change('options', { ...route.options, maxImages: Number(event.target.value) })} required disabled={busy} /></label>
+        <label className="field">管理员备用开关<select aria-label="管理员备用开关" aria-describedby="gateway-fallback-help" value={String(Boolean(route.options.fallbackEnabled))} disabled={busy} onChange={event => change('options', { ...route.options, fallbackEnabled: event.target.value === 'true' })}><option value="false">关闭备用</option><option value="true">启用一级备用</option></select><small id="gateway-fallback-help">用户须另外确认主、备用价格才会切换。一次调用共用原超时预算，内部失败成本由平台承担。</small></label>
+        <label className="field">备用路由编号<input aria-label="备用路由编号" value={route.options.fallbackRouteId || ''} list="gateway-route-ids" maxLength={80} pattern="[a-z0-9][a-z0-9._:\-]{0,79}" required={Boolean(route.options.fallbackEnabled)} disabled={busy} onChange={event => change('options', { ...route.options, fallbackRouteId: event.target.value || null })} /><small>须为另一条同服务类型、同协议且已开放的路由，不允许循环；不会调用用户的个人供应商 Key。</small></label>
         <label className="field">开放状态<select value={String(route.enabled)} onChange={event => change('enabled', event.target.value === 'true')} disabled={busy}><option value="false">暂停开放</option><option value="true">开放服务</option></select><small>启用前校验凭据、完整公开成本和美元结算汇率。</small></label>
       </> : <>
         <div className="notice neutral">当前版本：{version ? `v${version}` : '尚未载入'}。保存将追加新版本，服务费固定为公开成本 × 1.3。</div>

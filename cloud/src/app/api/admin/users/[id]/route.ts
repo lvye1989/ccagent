@@ -3,6 +3,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requirePermission } from '@/core/auth';
 import { database } from '@/core/db';
+import { lockAdministration } from '@/core/database-locks';
 import { audit, roles, session, user, userRoles } from '@/core/db/schema';
 import { errorResponse, HttpError, json, readJson, requireSameOrigin } from '@/core/http';
 
@@ -21,7 +22,7 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
       throw new HttpError(400, 'SELF_LOCKOUT', '请由其他管理员处理你自己的禁用或管理员权限移除。');
     }
     await database().db.transaction(async tx => {
-      await tx.execute(sql`select pg_advisory_xact_lock(804714032)`);
+      await lockAdministration(tx, 804714032);
       const [target] = await tx.select().from(user).where(eq(user.id, id)).for('update');
       if (!target) throw new HttpError(404, 'USER_NOT_FOUND', '用户不存在。');
       const assigned = await tx.select().from(userRoles).where(eq(userRoles.userId, id));

@@ -1,4 +1,5 @@
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
+import { officialAuxiliaryEnabled } from "../platform/serviceState.js";
 import type { Tool } from "../tools/Tool.js";
 import type { EnabledToolManifest } from "../tools/index.js";
 import { resolveToolDecisionPolicy } from "../tools/decisionPolicy.js";
@@ -79,7 +80,7 @@ function getConfig(): ToolJevConfig {
     ? rawMode
     : "enforce";
   return {
-    enabled: Boolean(apiKey) && mode !== "off" && envBoolean(process.env.CCAGENT_TOOL_JEV, true),
+    enabled: (Boolean(apiKey) || officialAuxiliaryEnabled()) && mode !== "off" && envBoolean(process.env.CCAGENT_TOOL_JEV, true),
     mode,
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),

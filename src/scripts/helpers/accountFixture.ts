@@ -1,23 +1,26 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { PlatformAccountClient, type AccountUser, type StoredAccountSession } from "../../platform/accountClient.js";
 import { SecureCredentialStore } from "../../platform/secureStore.js";
 import { enterPlatformAccount } from "../../platform/account.js";
 
 /** Real loopback HTTP + DPAPI fixture; production authentication has no test bypass. */
-export async function startAccountFixture(base: string) {
+export async function startAccountFixture(base: string, options: { handleService?: (request: IncomingMessage, response: ServerResponse, user: AccountUser | undefined) => Promise<boolean> } = {}) {
   const users: AccountUser[] = [
     { id: "fixture-account-a", email: "account-a@example.invalid", name: "Account A" },
     { id: "fixture-account-b", email: "account-b@example.invalid", name: "Account B" },
   ];
   const password = "Fixture-" + randomBytes(16).toString("hex");
   const sessions = new Map<string, AccountUser>(), disabled = new Set<string>();
-  let sessionChecks = 0, signIns = 0;
+  let sessionChecks = 0, signIns = 0, unavailable = false;
   const server = createServer(async (req, res) => {
     res.setHeader("content-type", "application/json");
     const reply = (status: number, value: unknown) => { res.writeHead(status); res.end(JSON.stringify(value)); };
+    if (unavailable) return reply(503, { code: "FIXTURE_UNAVAILABLE" });
     if (req.url === "/api/auth/sign-in/email" && req.method === "POST") {
       let data = ""; for await (const chunk of req) data += chunk;
       const input = JSON.parse(data) as Record<string, unknown>, user = users.find(user => user.email === input.email);
@@ -36,6 +39,7 @@ export async function startAccountFixture(base: string) {
     }
     if (req.url === "/api/auth/sign-out" && req.method === "POST") { if (token) sessions.delete(token); return reply(200, { success: true }); }
     if (["/api/auth/sign-up/email", "/api/auth/request-password-reset"].includes(req.url ?? "")) return reply(200, { success: true });
+    if (options.handleService && await options.handleService(req, res, user && !disabled.has(user.id) ? user : undefined)) return;
     return reply(404, {});
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -47,6 +51,7 @@ export async function startAccountFixture(base: string) {
     users, password, origin, nativeClient,
     disable(userId: string) { disabled.add(userId); }, enable(userId: string) { disabled.delete(userId); },
     counters() { return { sessionChecks, signIns }; },
+    setUnavailable(value: boolean) { unavailable = value; },
     async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); },
   };
 }
@@ -64,4 +69,15 @@ export async function loginForTest(base: string) {
     await fixture.close();
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   } };
+}
+
+export async function withTestAccount<T>(run: () => Promise<T>): Promise<T> {
+  const base = await mkdtemp(path.join(os.tmpdir(), "ccagent-auth-suite-"));
+  const fixture = await loginForTest(base);
+  try { return await run(); }
+  finally {
+    await fixture.close();
+    if (path.dirname(path.resolve(base)) !== path.resolve(os.tmpdir()) || !path.basename(base).startsWith("ccagent-auth-suite-")) throw new Error("Unsafe account suite cleanup");
+    await rm(base, { recursive: true, force: true });
+  }
 }

@@ -7,6 +7,9 @@
  * published CCAGENT bundle keeps its zero-runtime-dependency contract.
  */
 
+import { getPlatformGatewayClient, officialRole } from "../../platform/gatewayClient.js";
+import { officialAuxiliaryEnabled } from "../../platform/serviceState.js";
+
 export const DEFAULT_OPENROUTER_JEV_ENDPOINT =
   "https://openrouter.ai/api/alpha/decisions";
 export const DEFAULT_OPENROUTER_JEV_MODEL = "~typesafe/jev-latest";
@@ -250,6 +253,12 @@ export async function callOpenRouterJev(
   request: JevDecisionRequest,
   options: OpenRouterJevOptions,
 ): Promise<JevDecisionResponse> {
+  const official = officialAuxiliaryEnabled() ? await officialRole("decision") : null;
+  if (official) {
+    const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 8000)]) : AbortSignal.timeout(options.timeoutMs ?? 8000);
+    const response = await (await getPlatformGatewayClient()).call("decisions", { model: official.id, state: request.state, questions: request.questions }, { signal });
+    return { ...parseJevDecisionResponse(await response.json()), attempts: 1 };
+  }
   const apiKey = options.apiKey.trim();
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured.");
   const timeoutMs = options.timeoutMs ?? 8_000;

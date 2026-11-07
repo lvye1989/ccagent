@@ -37,6 +37,10 @@ const files = [
   { path: "book.xlsx", name: "book.xlsx", size: 20, format: "office", sheets: [{ name: "工作表1", rows: [["<img src=x>", "42"]] }] },
   { path: "other.bin", name: "other.bin", size: 20, format: "binary" },
 ];
+let officialConfigured = false, selectedOfficialRoles = {}, officialFallback = false;
+const catalogRevision = '11111111-1111-4111-8111-111111111111';
+const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }] } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
+const backupOfficialRoute = { ...defaultOfficialRoute, id: 'fixture-backup', name: '备用服务测试', limits: { fallbackEnabled: false, fallbackRouteId: null } };
 globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
   calls.push({ route, payload });
@@ -58,6 +62,14 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route.startsWith("/api/workspaces/browse")) data = { path: "C:\\offline-project", parent: null, breadcrumbs: [], folders: [], total: 0 };
   else if (route === "/api/changes") data = { files: [] };
   else if (route === "/api/models") data = { defaultModel: "fixture", models };
+  else if (route === '/api/customize/official-services') {
+    if (payload) {
+      if (!officialConfigured) { officialConfigured = true; selectedOfficialRoles = { main: defaultOfficialRoute.id }; }
+      else if (payload.roles !== undefined) selectedOfficialRoles = payload.roles;
+      if (payload.fallbackEnabled !== undefined) officialFallback = payload.fallbackEnabled;
+    }
+    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute] : [] };
+  }
   else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
   else if (route === "/api/customize/models") { if (payload) models.push({ id: payload.id, label: payload.id, model: payload.model, available: true }); data = payload ? { id: payload.id } : { models: models.map((m) => ({ ...m, protocol: "openai-chat", baseURL: "https://example.test/v1" })) }; }
   else if (route === "/api/customize/model-test") data = { ok: true, reply: "OK" };
@@ -178,6 +190,24 @@ try {
   await click('[data-setting="execution"]'); $("settings-mode").value = "auto";
   $("settings-content").querySelector("form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
   assert(calls.some((c) => c.route === "/api/customize/settings" && c.payload?.mode === "auto"));
+
+  await click('[data-setting="official"]');
+  assert($('official-auxiliary').disabled && $('official-default').disabled && $('official-fallback').disabled, 'A first Key verification cannot silently enable services fallback or replace the chat default');
+  $('official-api-key').value = 'ccagent_' + 'x'.repeat(43);
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  const firstVerification = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
+  assert.deepEqual(Object.keys(firstVerification), ['apiKey'], 'First verification leaves role initialization to the authenticated catalog');
+  assert.equal($('official-role-main').value, defaultOfficialRoute.id); assert.equal($('official-auxiliary').checked, false); assert.equal($('official-default').checked, false);
+  $('official-role-main').value = '';
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload.roles, {});
+  assert.equal($('official-role-main').value, '', 'A saved empty selection is kept on reload');
+  assert.equal($('official-fallback').checked, false); $('official-fallback').checked = true;
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  const consent = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
+  assert.equal(consent.fallbackEnabled, true); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback').checked, true);
+  assert($('settings-content').textContent.includes('管理员备用')); assert($('settings-content').textContent.includes('备用服务测试'));
+  console.log('Official service DOM: first verification uses catalog recommendations, requires explicit enable/default choices and preserves cleared selections.');
 
   await click('[data-customize-view="teams"]'); assert(!$("teams-view").classList.contains("hidden"));
   await click("#teams-create"); assert($("edit-team-name"));

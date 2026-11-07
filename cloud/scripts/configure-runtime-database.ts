@@ -3,8 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { databaseUrl } from '../src/core/env';
+import { databaseOptions } from '../src/core/db/options';
+import { grantRuntimeAccess } from '../src/core/db/runtime-permissions';
 
-const owner = postgres(databaseUrl(true), { prepare: false, max: 1, ssl: 'require', connect_timeout: 15, onnotice: () => {} });
+const owner = postgres(databaseUrl(true), databaseOptions(1));
 const role = 'ccagent_runtime';
 try {
   const exists = await owner`select 1 from pg_roles where rolname = ${role}`;
@@ -22,13 +24,8 @@ try {
     // The only plaintext destination is the already ignored server env file.
     await appendFile('.env.local', `\nDATABASE_URL=${JSON.stringify(url.toString())}\n`, { mode: 0o600 });
   }
-  await owner.unsafe(`GRANT USAGE ON SCHEMA ccagent TO ${role}`);
-  await owner.unsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ccagent TO ${role}`);
-  await owner.unsafe(`REVOKE ALL ON ccagent.__drizzle_migrations FROM ${role}`);
-  await owner.unsafe(`GRANT SELECT ON ccagent.__drizzle_migrations TO ${role}`);
-  await owner.unsafe(`REVOKE INSERT, UPDATE, DELETE ON ccagent.wallets, ccagent.ledger FROM ${role}`);
-  await owner.unsafe(`GRANT EXECUTE ON FUNCTION ccagent.post_ledger(text,text,text,bigint,bigint,jsonb) TO ${role}`);
-  const runtime = postgres(url.toString(), { prepare: false, max: 1, ssl: 'require', connect_timeout: 15, onnotice: () => {} });
+  await grantRuntimeAccess(owner, 'ccagent');
+  const runtime = postgres(url.toString(), databaseOptions(1));
   try {
     const [who] = await runtime`select current_user as role`;
     const [permissions] = await runtime`select has_table_privilege(current_user, 'ccagent.wallets', 'UPDATE') as wallet_update, has_table_privilege(current_user, 'ccagent.ledger', 'DELETE') as ledger_delete, has_schema_privilege(current_user, 'public', 'CREATE') as public_create`;

@@ -1,9 +1,11 @@
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import { configurePlatform, getPlatformAccountClient } from "../platform/account.js";
+import { configurePlatform, enterPlatformAccount, getPlatformAccountClient } from "../platform/account.js";
 import { AccountError } from "../platform/accountClient.js";
+import { officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
+import { importLegacyData, previewLegacyData, legacyCategories } from "../platform/legacyData.js";
 
-const help = `CCAGENT 账户\n\n  ccagent account setup --server https://<官方服务地址>\n  ccagent account login [--email 邮箱]\n  ccagent account register [--email 邮箱]\n  ccagent account forgot [--email 邮箱]\n  ccagent account status\n  ccagent account logout\n\n登录及注册密码在交互终端中隐藏输入，不接受命令行密码参数。\n`;
+const help = `CCAGENT 账户\n\n  ccagent account setup --server https://<官方服务地址>\n  ccagent account login [--email 邮箱]\n  ccagent account register [--email 邮箱]\n  ccagent account forgot [--email 邮箱]\n  ccagent account status\n  ccagent account logout\n  ccagent account key\n  ccagent account services\n  ccagent account fallback [--enabled true|false]\n  ccagent account import-preview [--source original-data-folder]\n  ccagent account import [--source original-data-folder]\n\n登录及注册密码在交互终端中隐藏输入，不接受命令行密码参数。\n`;
 
 interface AccountPrompter { ask(label: string): Promise<string>; secret(label: string): Promise<string>; close(): void }
 
@@ -31,18 +33,18 @@ export async function runAccountCommand(args: string[], options: { prompter?: Ac
   const output = options.output ?? process.stdout;
   const command = args[0] ?? "help";
   if (command === "help" || args.includes("--help") || args.includes("-h")) { output.write(help); return 0; }
-  if (!["setup", "login", "register", "forgot", "status", "logout"].includes(command)) { output.write(help); return 1; }
+  if (!["setup", "login", "register", "forgot", "status", "logout", "key", "services", "fallback", "import-preview", "import"].includes(command)) { output.write(help); return 1; }
   const flags: Record<string, string> = {};
   for (let index = 1; index < args.length; index += 2) {
     const name = args[index];
     const value = args[index + 1];
-    if (!name || !["--email", "--server"].includes(name) || !value || value.startsWith("--") || flags[name]) {
+    if (!name || !["--email", "--server", "--source", ...(command === 'fallback' ? ['--enabled'] : [])].includes(name) || !value || value.startsWith("--") || flags[name]) {
       output.write("账户参数无效。密码只能在交互提示中输入。\n");
       return 1;
     }
     flags[name] = value;
   }
-  if ((flags["--server"] && command !== "setup") || (flags["--email"] && !["login", "register", "forgot"].includes(command))) {
+  if ((flags["--server"] && command !== "setup") || (flags["--email"] && !["login", "register", "forgot"].includes(command)) || (flags["--source"] && !["import", "import-preview"].includes(command))) {
     output.write("此账户命令不支持提供的参数。\n"); return 1;
   }
   let prompt: AccountPrompter | undefined;
@@ -53,6 +55,60 @@ export async function runAccountCommand(args: string[], options: { prompter?: Ac
       return 0;
     }
     const client = await getPlatformAccountClient();
+    if (["import", "import-preview"].includes(command)) {
+      await enterPlatformAccount(); const preview = await previewLegacyData(flags["--source"]);
+      output.write(`原数据：${preview.source}\n当前账户目录：${preview.destination}\n`);
+      for (const category of preview.categories) output.write(`${category.id}: ${category.files} 个文件，${category.bytes} 字节\n`);
+      output.write("保留已有同名文件与配置；原文件保留。导入的定时任务暂停，扩展与自动执行设置需复核。\n");
+      if (command === "import-preview") return 0;
+      prompt = options.prompter ?? terminalPrompter();
+      const categories = (await prompt.ask("导入类别（configuration,history,extensions,credentials，逗号分隔）") || "configuration,history,extensions").split(",").map(value => value.trim());
+      if (categories.some(category => !legacyCategories.includes(category as typeof legacyCategories[number]))) throw new Error("导入类别无效。");
+      const environmentFiles: string[] = [];
+      if (categories.includes("credentials")) for (const file of preview.environmentFiles.filter(file => file.external)) if ((await prompt.ask(`同时读取来源引用的环境文件 ${file.path}？输入 yes 确认`)).toLowerCase() === "yes") environmentFiles.push(file.id);
+      const enableHistory = preview.historyDisabled && categories.includes("history") && (await prompt.ask("当前关闭会话保存，是否开启 30 天保存以导入？输入 yes 确认")).toLowerCase() === "yes";
+      if ((await prompt.ask("确认这些原数据属于当前登录账户？输入 yes 开始复制")).toLowerCase() !== "yes") { output.write("未开始导入，原数据保持原状。\n"); return 0; }
+      const report = await importLegacyData({ id: preview.id, categories, environmentFiles, enableHistory, confirmOwned: true });
+      output.write(`导入${report.state === "complete" ? "完成" : "中断"}：复制 ${report.copied} 项，新增配置 ${report.settingsAdded} 项，保留同名已有项 ${report.conflicts} 项；待补全凭据 ${report.missingCredentials} 项。\n${report.restartRequired ? "请重新打开应用以完整加载配置与授权。\n" : ""}`);
+      return report.state === "complete" ? 0 : 1;
+    }
+    if (command === 'fallback') {
+      await enterPlatformAccount();
+      const enabled = flags['--enabled'];
+      if (enabled !== undefined && !['true', 'false'].includes(enabled)) throw new Error('--enabled 仅接受 true 或 false。');
+      if (enabled === 'false') { await saveOfficialServices({ fallbackEnabled: false }); output.write('已关闭新调用的管理员备用授权。\n'); return 0; }
+      if (enabled === 'true') await saveOfficialServices({});
+      const view = await officialServicesView();
+      output.write(`管理员备用授权：${view.fallbackEnabled ? '已开启' : '关闭'}\n`);
+      output.write('按实际成功路由的用量 × 其公开成本 × 1.3 结算，冻结取主、备用较高上限；内部失败成本由平台承担。\n');
+      for (const route of view.routes.filter(route => route.limits.fallbackEnabled)) {
+        const target = view.routes.find(item => item.id === route.limits.fallbackRouteId && item.service === route.service && item.protocol === route.protocol);
+        output.write(`${route.id} → ${target?.id || '备用当前不可用'}\n`);
+        for (const selected of target ? [route, target] : [route]) {
+          output.write(`${selected.name} · 价格 v${selected.pricing.version} · ${selected.pricing.currency}${selected.pricing.currency === 'USD' ? ` · 汇率 ${selected.pricing.usdCny}` : ''}\n`);
+          for (const rate of selected.pricing.definition.rates) output.write(`  ${rate.metric}：每 ${rate.unitQuantity} 单位 ${rate.price}${rate.offPeakPrice !== undefined ? `（低峰 ${rate.offPeakPrice}）` : ''}\n`);
+          output.write(`  来源：${selected.pricing.sourceUrl}\n`);
+        }
+      }
+      if (enabled === undefined) { output.write('使用 account fallback --enabled true 核对价格并开启，或 --enabled false 关闭。\n'); return 0; }
+      prompt = options.prompter ?? terminalPrompter();
+      if (!/^(y|yes|是)$/i.test(await prompt.ask('允许按备用服务实际用量 × 其公开成本 × 1.3 结算，并冻结主、备用较高上限？[y/N]'))) { output.write('未开启新的备用授权。\n'); return 0; }
+      await saveOfficialServices({ fallbackEnabled: true, catalogRevision: view.catalogRevision }); output.write('已确认目录价格并开启新调用的管理员备用授权。\n'); return 0;
+    }
+    if (command === "key" || command === "services") {
+      await enterPlatformAccount();
+      if (command === "key") {
+        prompt = options.prompter ?? terminalPrompter();
+        await saveOfficialServices({ apiKey: await prompt.secret("个人 CCAGENT API Key") });
+        output.write("平台 Key 已验证并安全保存。可在应用设置中选择官方辅助服务，或使用 --model ccagent:<服务编号>。\n");
+      } else {
+        const view = await officialServicesView();
+        output.write(`账户服务：${view.origin}\n平台 Key：${view.configured ? view.keyPrefix + "… 已验证" : "尚未配置"}\n`);
+        for (const route of view.routes) output.write(`${route.id} · ${route.name} · ${route.protocol} · 价格 v${route.pricing.version}\n`);
+        output.write(`充值与 Key：${view.origin}/account\n调用及费用：${view.origin}/account/usage\n`);
+      }
+      return 0;
+    }
     if (command === "status") {
       const session = await client.requireSession();
       output.write(`已登录：${session.user.email}\n账户服务：${client.origin}\n会话有效期：${session.expiresAt}\n`);

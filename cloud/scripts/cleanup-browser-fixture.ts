@@ -1,10 +1,11 @@
 import './load-env';
 import postgres from 'postgres';
 import { databaseUrl } from '../src/core/env';
+import { databaseOptions } from '../src/core/db/options';
 
 const schema = process.argv[2];
 if (!schema || !/^ccagent_test_[a-f0-9]{16}$/.test(schema)) throw new Error('REFUSE_UNSCOPED_CLEANUP');
-const owner = postgres(databaseUrl(true), { prepare: false, max: 1, ssl: 'require', onnotice: () => {} });
+const owner = postgres(databaseUrl(true), databaseOptions(1));
 try {
   const users = await owner.unsafe<{ email: string }[]>(`select email from "${schema}"."user"`);
   if (users.length > 2 || users.some(user => !['ui-user@ccagent.example.invalid', 'ui-admin@ccagent.example.invalid'].includes(user.email))) throw new Error('REFUSE_NON_FIXTURE_DATA');

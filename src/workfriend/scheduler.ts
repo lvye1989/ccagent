@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import * as path from "node:path";
+import { lstat, readFile } from "node:fs/promises";
 import { enqueuePendingNotification } from "../state/notificationStore.js";
 import { getCCAgentPath } from "../utils/paths.js";
 import { isAgentEnabled, onAgentStatesChanged } from "../agents/preferences.js";
+import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
 
 export interface WorkfriendSchedule {
   id: string;
@@ -44,22 +44,30 @@ export function getWorkfriendSchedulePath(): string {
 
 async function readSchedules(): Promise<WorkfriendSchedule[]> {
   try {
+    if (!(await lstat(getWorkfriendSchedulePath())).isFile()) throw new Error("Not a regular file");
     const raw = JSON.parse(await readFile(getWorkfriendSchedulePath(), "utf-8")) as Partial<ScheduleFile>;
-    return Array.isArray(raw.schedules) ? raw.schedules : [];
+    if (raw.version !== 1 || !Array.isArray(raw.schedules) || raw.schedules.some(item => !item ||
+      typeof item.id !== "string" || typeof item.cwd !== "string" || typeof item.workdayEnd !== "string" ||
+      typeof item.workSummary !== "string" || typeof item.moodSummary !== "string" ||
+      typeof item.checkInAt !== "string" || !Number.isFinite(Date.parse(item.checkInAt)) ||
+      !["pending", "fired", "cancelled"].includes(item.status)) || new Set(raw.schedules.map(item => item.id)).size !== raw.schedules.length) {
+      throw new Error("Invalid schedules");
+    }
+    return raw.schedules;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw new Error(`Could not read Workfriend schedules: ${(error as Error).message}`);
+    throw new Error("Workfriend schedules could not be read; existing schedules were left untouched");
   }
 }
 
-async function writeSchedules(schedules: WorkfriendSchedule[]): Promise<void> {
+async function withSchedules<T>(action: (schedules: WorkfriendSchedule[]) => T): Promise<T> {
   const filePath = getWorkfriendSchedulePath();
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify({ version: 1, schedules }, null, 2) + "\n", {
-    encoding: "utf-8",
-    mode: 0o600,
+  return withFileTransaction(filePath, async () => {
+    const schedules = await readSchedules(), before = JSON.stringify(schedules);
+    const result = action(schedules);
+    if (JSON.stringify(schedules) !== before) await writeJsonAtomically(filePath, { version: 1, schedules });
+    return result;
   });
-  if (process.platform !== "win32") await chmod(filePath, 0o600);
 }
 
 function escapeXml(value: string): string {
@@ -91,12 +99,13 @@ function formatCheckIn(schedule: WorkfriendSchedule): string {
 
 async function fireSchedule(id: string): Promise<void> {
   timers.delete(id);
-  const schedules = await readSchedules();
-  const schedule = schedules.find((item) => item.id === id);
-  if (!schedule || schedule.status !== "pending") return;
-  if (!isAgentEnabled("workfriend")) return; // Keep the persisted pending reminder for Open.
-  schedule.status = "fired";
-  await writeSchedules(schedules);
+  const schedule = await withSchedules(schedules => {
+    const item = schedules.find(item => item.id === id && item.status === "pending");
+    if (!item || !isAgentEnabled("workfriend")) return null;
+    item.status = "fired";
+    return item;
+  });
+  if (!schedule) return;
   enqueuePendingNotification({
     mode: "workfriend-notification",
     text: formatCheckIn(schedule),
@@ -113,7 +122,7 @@ function armSchedule(schedule: WorkfriendSchedule): void {
       armSchedule(schedule);
       return;
     }
-    void fireSchedule(schedule.id);
+    void fireSchedule(schedule.id).catch(() => console.warn("[ccagent] Workfriend reminder could not be claimed; check its schedule file."));
   }, Math.min(delay, MAX_TIMER_DELAY));
   timers.set(schedule.id, timer);
 }
@@ -160,32 +169,32 @@ export async function createWorkfriendSchedule(input: {
     cwd: input.cwd,
     status: "pending",
   };
-  const schedules = await readSchedules();
-  schedules.push(schedule);
-  await writeSchedules(schedules);
+  await withSchedules(schedules => { schedules.push(schedule); });
   armSchedule(schedule);
   return schedule;
 }
 
 export async function listWorkfriendSchedules(): Promise<WorkfriendSchedule[]> {
-  return await readSchedules();
+  return withSchedules(schedules => schedules);
 }
 
 export async function cancelWorkfriendSchedule(id: string): Promise<boolean> {
-  const schedules = await readSchedules();
-  const schedule = schedules.find((item) => item.id === id && item.status === "pending");
-  if (!schedule) return false;
-  schedule.status = "cancelled";
+  const cancelled = await withSchedules(schedules => {
+    const schedule = schedules.find(item => item.id === id && item.status === "pending");
+    if (!schedule) return false;
+    schedule.status = "cancelled";
+    return true;
+  });
+  if (!cancelled) return false;
   const timer = timers.get(id);
   if (timer) clearTimeout(timer);
   timers.delete(id);
-  await writeSchedules(schedules);
   return true;
 }
 
 export async function bootstrapWorkfriendScheduler(): Promise<number> {
   schedulerStarted = true;
-  const schedules = await readSchedules();
+  const schedules = await withSchedules(schedules => schedules);
   let pending = 0;
   for (const schedule of schedules) {
     if (schedule.status !== "pending") continue;

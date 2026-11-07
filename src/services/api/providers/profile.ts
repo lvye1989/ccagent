@@ -35,6 +35,8 @@ import {
   loadTrustedSettingSources,
   isTrustedScopeForSensitiveKeys,
 } from "../../../config/sources.js";
+import { officialModelPrefix, readServiceBinding } from "../../../platform/serviceState.js";
+import { getPlatformAccountClient } from "../../../platform/account.js";
 
 export type ModelProtocol =
   | "anthropic"
@@ -43,6 +45,8 @@ export type ModelProtocol =
   | "gemini";
 
 export interface ModelProfile {
+  /** Only synthesized from the authenticated account's official catalog. Never read from project settings. */
+  platformService?: string;
   /** The map key / user-facing handle. */
   id: string;
   protocol: ModelProtocol;
@@ -61,6 +65,7 @@ export interface ModelProfile {
 }
 
 interface RawProfile {
+  disabled?: unknown;
   protocol?: unknown;
   model?: unknown;
   baseURL?: unknown;
@@ -101,6 +106,7 @@ function usesEnvInterpolation(value: string): boolean {
 }
 
 export interface LoadedProfiles {
+  disabledProfiles?: string[];
   profiles: Record<string, ModelProfile>;
   defaultModel?: string;
   /** Non-fatal notices (dropped inline secrets, malformed entries). */
@@ -133,7 +139,8 @@ export async function resolveModelRole(
   const roles = await loadModelRoles(cwd);
   const handle = roleNames.map((name) => roles[name]).find(Boolean);
   if (!handle) return undefined;
-  const { profiles } = await loadProfiles(cwd);
+  const { profiles, disabledProfiles } = await loadProfiles(cwd);
+  if (disabledProfiles?.includes(handle)) throw new Error("该角色关联的导入模型尚未启用，请先在设置中补全配置并保存。");
   return profiles[handle] ? handle : undefined;
 }
 
@@ -184,11 +191,25 @@ export async function loadProfiles(cwd: string = process.cwd()): Promise<LoadedP
 
   const profiles: Record<string, ModelProfile> = {};
   for (const [id, raw] of Object.entries(merged)) {
+    if (raw.disabled === true) { warnings.push(`models.${id}: disabled; complete the imported configuration in Settings`); continue; }
+    if (id.startsWith(officialModelPrefix)) { warnings.push("CCAGENT 官方模型编号不能由项目或自定义配置覆盖。"); continue; }
     const built = buildProfile(id, raw, warnings);
     if (built) profiles[id] = built;
   }
 
-  return { profiles, defaultModel, warnings };
+  if (process.env.CCAGENT_ACCOUNT_ID) {
+    try {
+      const binding = await readServiceBinding();
+      if (binding && binding.configuration.origin !== (await getPlatformAccountClient()).origin) throw new Error("Official service origin changed");
+      for (const route of binding?.configuration.routes ?? []) {
+        if (!["chat", "vision"].includes(route.service) || !["openai-chat", "openai-responses"].includes(route.protocol)) continue;
+        const id = officialModelPrefix + route.id;
+        profiles[id] = { id, platformService: route.id, protocol: route.protocol as ModelProtocol, model: route.id,
+          baseURL: binding!.configuration.origin + "/v1", maxTokens: route.limits.maxOutputTokens, contextWindow: route.limits.contextWindow };
+      }
+    } catch { warnings.push("官方服务配置需要重新验证；不会切换到其他供应商密钥。"); }
+  }
+  return { profiles, defaultModel, warnings, disabledProfiles: Object.entries(merged).filter(([, raw]) => raw.disabled === true).map(([id]) => id) };
 }
 
 function buildProfile(
@@ -252,8 +273,10 @@ export async function resolveProfile(
   handle: string,
   cwd: string = process.cwd(),
 ): Promise<ModelProfile> {
-  const { profiles } = await loadProfiles(cwd);
+  const { profiles, disabledProfiles } = await loadProfiles(cwd);
   const declared = profiles[handle];
   if (declared) return declared;
+  if (disabledProfiles?.includes(handle)) throw new Error("该导入模型尚未启用，请先在设置中补全配置并保存。");
+  if (handle.startsWith(officialModelPrefix)) throw new Error("官方模型不可用，请验证平台 Key 并刷新服务目录。");
   return { id: handle, protocol: "anthropic", model: handle };
 }

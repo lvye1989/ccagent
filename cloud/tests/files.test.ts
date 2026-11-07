@@ -49,6 +49,16 @@ test('live private Vercel Blob and isolated Supabase file ownership, scoped uplo
       await assert.rejects(() => readOwnedFile(userB, upload.id), { status: 404 });
       await assert.rejects(() => readOwnedFile(userA, upload.id, ['image']), { status: 400 });
     });
+    await t.test('decoded streams enforce exact file size even when transfer headers differ', async () => {
+      const original = Buffer.byteLength(body);
+      try {
+        for (const size of [original - 1, original + 1]) {
+          await database().db.update(tables.blobs).set({ size }).where(eq(tables.blobs.id, upload.id));
+          const file = await readOwnedFile(userA, upload.id, ['request']);
+          await assert.rejects(() => new Response(file.stream).arrayBuffer(), { code: 'FILE_SIZE_MISMATCH' });
+        }
+      } finally { await database().db.update(tables.blobs).set({ size: original }).where(eq(tables.blobs.id, upload.id)); }
+    });
     await t.test('content type and byte-size restrictions are enforced by the storage delegation', async () => {
       const small = await initializeUpload(userA, { purpose: 'request', contentType: 'application/json', size: 2 }); await track(small.id);
       const tooLarge = await send(small.upload.url, 'too large'); await tooLarge.body?.cancel();

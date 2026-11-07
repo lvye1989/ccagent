@@ -72,6 +72,20 @@ test('ZPAY protocol fixture with real isolated Supabase orders, notification eve
       await assert.rejects(() => service.receiveNotification(notification(first, { pid: 'othermerchant' })));
       assert.equal(queryCalls, 0);
     });
+    await t.test('a locked order stays pending without blocking or crediting a duplicate reconciliation', async () => {
+      let unlock!: () => void, acquired!: () => void;
+      const released = new Promise<void>(resolve => { unlock = resolve; }), ready = new Promise<void>(resolve => { acquired = resolve; });
+      const held = fixture.owner.begin(async sql => {
+        await sql`select id from ${sql(fixture.schema)}.orders where id=${first} for update`;
+        acquired(); await released;
+      });
+      const safety = setTimeout(unlock, 12000);
+      try {
+        await Promise.race([ready, held]);
+        assert.equal((await service.reconcileOrder(first, `trade_${first}`)).status, 'pending');
+        assert.equal((await walletFor(payer)).balance, 0n);
+      } finally { unlock(); clearTimeout(safety); await held; }
+    });
     await t.test('concurrent authenticated upstream queries credit a paid order exactly once', async () => {
       await Promise.all(Array.from({ length: 4 }, () => service.reconcileOrder(first, `trade_${first}`)));
       assert.equal((await walletFor(payer)).balance, 1000000n);

@@ -3,10 +3,14 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { databaseSchema, databaseUrl } from '../src/core/env';
+import { databaseOptions } from '../src/core/db/options';
+import { requiredDatabaseContract } from '../src/core/db/migration-contract';
+import { assertMigrationContract } from './lib/migration-contract';
 
+assertMigrationContract(requiredDatabaseContract);
 const schema = databaseSchema();
 if (schema !== 'ccagent') throw new Error('Use the isolated test migration helper for test schemas');
-const client = postgres(databaseUrl(true), { max: 1, prepare: false, ssl: 'require', connect_timeout: 15, onnotice: () => {} });
+const client = postgres(databaseUrl(true), databaseOptions(1));
 try {
   await migrate(drizzle(client), { migrationsFolder: './migrations', migrationsSchema: schema, migrationsTable: '__drizzle_migrations' });
   const versions = await client`select count(*)::integer as count from ccagent.__drizzle_migrations`;

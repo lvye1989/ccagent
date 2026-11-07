@@ -11,7 +11,9 @@ const postLedgerFunction = sql`${sql.identifier(namespace.schemaName)}.${sql.ide
 
 export async function postLedger(tx: Transaction, userId: string, reference: string, kind: LedgerKind, balanceDelta: bigint, frozenDelta: bigint,
   metadata: Record<string, unknown> = {}): Promise<void> {
-  try { await tx.execute(sql`select ${postLedgerFunction}(${userId}::text, ${reference}::text, ${kind}::text, ${balanceDelta.toString()}::bigint, ${frozenDelta.toString()}::bigint, ${JSON.stringify(metadata)}::jsonb)`); }
+  // The helper returns void; request a builtin scalar instead of the unused
+  // composite ledger row so concurrent first calls need no type discovery.
+  try { await tx.execute(sql`select (${postLedgerFunction}(${userId}::text, ${reference}::text, ${kind}::text, ${balanceDelta.toString()}::bigint, ${frozenDelta.toString()}::bigint, ${JSON.stringify(metadata)}::jsonb)).id`); }
   catch (error) { financialError(error); }
 }
 
@@ -42,7 +44,8 @@ function financialError(error: unknown): never {
   const known: Record<string, [number, string]> = { KEY_DISABLED: [403, '账户或 API Key 已停用。'], WALLET_NOT_FOUND: [503, '账户余额信息暂不可用。'],
     INSUFFICIENT_BALANCE: [402, '可用余额不足，请充值后重试。'], KEY_LIMIT_EXCEEDED: [402, '本 Key 的可用额度不足。'],
     IDEMPOTENCY_CONFLICT: [409, '同一请求标识不能用于不同的调用。'], SETTLEMENT_CONFLICT: [409, '调用已按其他结果结算。'],
-    CALL_NOT_FOUND: [404, '调用记录不存在。'], INVALID_AUTHORIZATION: [400, '授权参数无效。'], INVALID_SETTLEMENT: [400, '结算金额超出授权额度。'] };
+    CALL_NOT_FOUND: [404, '调用记录不存在。'], INVALID_AUTHORIZATION: [400, '授权参数无效。'], INVALID_SETTLEMENT: [400, '结算金额超出授权额度。'],
+    DATABASE_LOCK_BUSY: [503, '当前操作较多，请稍后重试。'] };
   const entry = cause instanceof Error ? known[cause.message] : undefined;
   if (entry && cause instanceof Error) throw new HttpError(entry[0], cause.message, entry[1]);
   throw error;

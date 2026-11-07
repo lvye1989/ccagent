@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { spawn, execFile } from "node:child_process";
@@ -73,6 +73,15 @@ try {
     assert.equal((await fetch(origin + "/login")).status, 200);
     assert.equal((await post("/api/account/login", { email: fixture.users[0]!.email, password: fixture.password }, undefined, { origin: "https://evil.example" })).status, 403);
   });
+  await test("a first launch without a configured cloud service opens the login/setup page", async () => {
+    const configuration = path.join(base, "platform", "configuration.json"), saved = configuration + ".fixture-saved";
+    await rename(configuration, saved);
+    try {
+      assert.equal((await fetch(origin, { redirect: "manual" })).status, 303);
+      assert.equal((await fetch(origin + "/login")).status, 200);
+      assert.equal((await (await fetch(origin + "/api/account/config")).json() as { configured: boolean }).configured, false);
+    } finally { await rename(saved, configuration); }
+  });
   const cookieA = await login(0), cookieB = await login(1);
   const get = (route: string, cookie: string) => fetch(origin + route, { headers: { cookie } });
   await test("different browser logins run the real engine with isolated sessions", async () => {
@@ -85,12 +94,42 @@ try {
     assert.notEqual(accountHome(base, fixture.users[0]!.id), accountHome(base, fixture.users[1]!.id));
     assert.equal(await readFile(path.join(base, "legacy-sentinel.txt"), "utf8"), "legacy data remains untouched");
   });
+  await test("an authentication outage blocks work and a fresh online session check recovers access", async () => {
+    fixture.setUnavailable(true);
+    try { assert.equal((await get("/api/bootstrap", cookieA)).status, 503); }
+    finally { fixture.setUnavailable(false); }
+    assert.equal((await get("/api/account/status", cookieA)).status, 200);
+    assert.equal((await get("/api/bootstrap", cookieA)).status, 200);
+  });
   await test("logout and account disable immediately block business APIs without affecting the other login", async () => {
     assert.equal((await post("/api/account/logout", {}, cookieA)).status, 200);
     assert.equal((await get("/api/bootstrap", cookieA)).status, 401);
     assert.equal((await get("/api/bootstrap", cookieB)).status, 200);
     fixture.disable(fixture.users[1]!.id);
     assert.equal((await get("/api/bootstrap", cookieB)).status, 403);
+  });
+  // Exercise the exact private-header path used by Electron, with a real login.
+  if (child.connected) { const closed = new Promise<void>(resolve => child!.once("exit", () => resolve())); child.send("ccagent:shutdown", () => {}); await closed; }
+  const desktopHeader = { "x-ccagent-desktop-token": "b".repeat(64) };
+  child = spawn(process.execPath, [entry, "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env: { ...env, CCAGENT_DESKTOP_TOKEN: desktopHeader["x-ccagent-desktop-token"] }, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  child.stdout?.resume(); child.stderr?.resume();
+  for (let i = 0; i < 100; i++) { if (await fetch(origin + "/api/health", { headers: desktopHeader }).then(response => response.ok, () => false)) break; await delay(100); }
+  await test("desktop private token and email login are both required, and native logout revokes access", async () => {
+    assert.equal((await fetch(origin + "/api/health")).status, 403);
+    assert.equal((await fetch(origin + "/api/account/status", { headers: desktopHeader })).status, 200);
+    assert.equal((await fetch(origin + "/api/bootstrap", { headers: desktopHeader })).status, 200);
+    assert.equal((await post("/api/account/logout", {}, undefined, desktopHeader)).status, 200);
+    assert.equal((await fetch(origin + "/api/bootstrap", { headers: desktopHeader })).status, 401);
+    assert.equal((await post("/api/account/login", { email: fixture.users[0]!.email, password: fixture.password }, undefined, desktopHeader)).status, 200);
+    assert.equal((await fetch(origin + "/api/bootstrap", { headers: desktopHeader })).status, 200);
+  });
+  await test("switching the shared native login clears the previous engine before serving the new account", async () => {
+    fixture.enable(fixture.users[1]!.id);
+    await fixture.nativeClient.signIn(fixture.users[1]!.email, fixture.password);
+    assert.equal((await fetch(origin + "/api/bootstrap", { headers: desktopHeader })).status, 401);
+    const status = await (await fetch(origin + "/api/account/status", { headers: desktopHeader })).json() as { user: { id: string } };
+    assert.equal(status.user.id, fixture.users[1]!.id);
+    assert.equal((await fetch(origin + "/api/bootstrap", { headers: desktopHeader })).status, 200);
   });
   console.log(`${passed} authentication enforcement checks passed (real local HTTP and DPAPI; no production email or provider request).`);
 } finally {

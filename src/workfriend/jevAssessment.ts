@@ -1,3 +1,4 @@
+import { officialAuxiliaryEnabled } from "../platform/serviceState.js";
 import {
   callOpenRouterJev,
   DEFAULT_OPENROUTER_JEV_ENDPOINT,
@@ -93,7 +94,7 @@ export function getWorkfriendJevConfig(): WorkfriendJevConfig {
     ? modeValue
     : "decision";
   return {
-    enabled: Boolean(apiKey) && mode !== "off" && envBoolean(process.env.CCAGENT_WORKFRIEND_JEV, true),
+    enabled: (Boolean(apiKey) || officialAuxiliaryEnabled()) && mode !== "off" && envBoolean(process.env.CCAGENT_WORKFRIEND_JEV, true),
     mode,
     apiKey,
     endpoint: safeEndpoint(process.env.JEV_BASE_URL),

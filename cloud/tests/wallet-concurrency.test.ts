@@ -11,6 +11,17 @@ test('isolated wallet lock order permits competing authorizations and settlement
   const { createKey } = await import('../src/core/keys');
   const { authorizeUsage, finishUsage, postLedger, walletFor } = await import('../src/core/wallet');
   try {
+    const competingUser = randomUUID();
+    await database().db.insert(tables.user).values({ id: competingUser, name: 'Pooled transaction fixture', email: `${competingUser}@example.invalid`, emailVerified: true });
+    for (let round = 0; round < 4; round++) {
+      await Promise.all([
+        ...Array.from({ length: 8 }, () => database().db.transaction(tx => postLedger(tx, competingUser, `pooled-credit-${round}`, 'recharge', 1000n, 0n))),
+        ...Array.from({ length: 12 }, () => walletFor(competingUser)),
+      ]);
+      assert.equal((await walletFor(competingUser)).balance, BigInt(round + 1) * 1000n);
+    }
+    await assert.rejects(database().db.transaction(async tx => { await postLedger(tx, competingUser, 'must-rollback', 'recharge', 1000n, 0n); throw new Error('ROLLBACK_FIXTURE'); }), /ROLLBACK_FIXTURE/);
+    assert.equal((await walletFor(competingUser)).balance, 4000n);
     const id = randomUUID(), routeId = randomUUID();
     await database().db.insert(tables.user).values({ id, name: 'Concurrency fixture', email: `${id}@example.invalid`, emailVerified: true });
     const key = await createKey(id, 'fixture');

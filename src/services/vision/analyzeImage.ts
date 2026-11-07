@@ -1,4 +1,5 @@
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
+import { officialRole } from "../../platform/gatewayClient.js";
 import type { ContentBlock } from "../../types/message.js";
 import { createMessage } from "../api/streaming.js";
 import { collectViaProvider } from "../api/providers/providerStream.js";
@@ -34,6 +35,8 @@ function envVisionProfile(): ModelProfile | null {
 }
 
 export async function resolveVisionProfile(cwd: string): Promise<ModelProfile | null> {
+  const official = await officialRole("image");
+  if (official) return (await loadProfiles(cwd)).profiles["ccagent:" + official.id] ?? null;
   const fromEnv = envVisionProfile();
   if (fromEnv) return fromEnv;
   const roles = await loadModelRoles(cwd);

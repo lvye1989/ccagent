@@ -28,7 +28,8 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     const wrap = el("label", "context-team", "Agent Team"); const select = el("select"); select.id = id; select.setAttribute("aria-label", id === "home-team" ? "新对话 Agent Team" : "当前对话 Agent Team");
     const off = el("option", "", "不启用团队"); off.value = "off"; select.append(off); wrap.append(select); parent.append(wrap);
   }
-  let selectedSettings = "general", modalRequest = 0, modalBusy = false, teamsData = { teams: [], enabled: true };
+  const initialSetting = new URLSearchParams(location.search).get("setting");
+  let selectedSettings = ["general", "official", "models", "execution", "import"].includes(initialSetting) ? initialSetting : "general", modalRequest = 0, modalBusy = false, teamsData = { teams: [], enabled: true };
   const request = (resource, body) => api(`/api/customize/${resource}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
   function close() { if (!modalBusy) { modalRequest++; $("editor-overlay").classList.add("hidden"); } }
   function openDialog(title, subtitle) {
@@ -128,22 +129,78 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   }
 
   async function renderSettings() {
+    const url = new URL(location.href); url.searchParams.set("setting", selectedSettings); history.replaceState({}, "", url);
     const root = $("settings-content"); root.replaceChildren(el("p", "editor-hint", "正在读取设置…"));
     try {
       const data = await request("settings");
       root.replaceChildren();
-      const head = el("header", "settings-head"); head.append(el("div", "page-eyebrow", "PREFERENCES"), el("h1", "", selectedSettings === "models" ? "模型接入" : selectedSettings === "execution" ? "权限与执行" : "通用设置"));
+      const head = el("header", "settings-head"); head.append(el("div", "page-eyebrow", "PREFERENCES"), el("h1", "", selectedSettings === "import" ? "导入原有数据" : selectedSettings === "official" ? "CCAGENT 官方服务" : selectedSettings === "models" ? "模型接入" : selectedSettings === "execution" ? "权限与执行" : "通用设置"));
       root.append(head);
       $("settings-nav").querySelectorAll("button").forEach((b) => b.classList.toggle("selected", b.dataset.setting === selectedSettings));
+      if (selectedSettings === "import") { await renderLegacyImport(root); return; }
+      if (selectedSettings === "official") {
+        const service = await request("official-services");
+        const form = el("form", "settings-form");
+        form.append(el("p", "editor-hint", `账户服务：${service.origin}`));
+        const money = value => { try { const amount = BigInt(value); return `${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, "0").slice(0, 4)}`; } catch { return "—"; } };
+        if (service.wallet) form.append(el("p", "editor-hint", `余额 ¥${money(service.wallet.available ?? service.wallet.balance)} · 冻结 ¥${money(service.wallet.frozen)}`));
+        const links = el("div", "settings-row-actions");
+        for (const [label, route] of [["余额与充值", "/account/billing"], ["创建或管理平台 Key", "/account/keys"], ["调用与费用明细", "/account/usage"]]) {
+          const link = el("a", "settings-secondary", label); link.href = new URL(route, service.origin).href; link.target = "_blank"; link.rel = "noopener noreferrer"; links.append(link);
+        }
+        form.append(links);
+        const key = field(form, "个人 CCAGENT API Key", "official-api-key", "", { type: "password", placeholder: service.configured ? `${service.keyPrefix}… 已验证，留空保留` : "从用户中心创建后粘贴；不填写上游供应商 Key" });
+        form.append(el("p", "editor-hint", "验证 Key 和刷新目录不会调用收费模型。平台 Key 在 Windows 按当前账户加密保存。"));
+        const selections = {};
+        if (service.routes.length) {
+          for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"]]) {
+            selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`])] });
+          }
+        } else form.append(el("p", "editor-hint", service.configured ? "暂无已开放且价格配置完整的服务，请联系管理员。" : "请先验证平台 Key，再选择官方服务。"));
+        const auxiliary = field(form, "读图、决策、搜索和语音使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
+        const makeDefault = field(form, "将所选官方主模型设为新对话的默认模型", "official-default", false, { type: "checkbox" });
+        const fallback = field(form, "允许使用已确认价格的管理员备用路由", "official-fallback", service.fallbackEnabled, { type: "checkbox" });
+        auxiliary.disabled = makeDefault.disabled = fallback.disabled = !service.configured;
+        form.append(el('p', 'editor-hint', '开启前请核对下方主、备用价格。备用按自身实际用量与公开成本 × 1.3 结算，冻结额度取两者较高上限；目录变化后须重新确认。设置影响新调用，已发出调用继续按原授权核对。'));
+        form.append(el("p", "editor-hint", "收费按公开成本 × 实际用量 × 1.3 计算；美元成本按平台结算汇率换算。完整价格及生效版本见下方服务目录。"));
+        const save = el("button", "settings-primary", service.configured ? "保存选择并刷新目录" : "验证平台 Key"); save.type = "submit"; form.append(save);
+        form.addEventListener("submit", async event => {
+          event.preventDefault(); save.disabled = true;
+          try {
+            const roles = Object.fromEntries(Object.entries(selections).filter(([, input]) => input.value).map(([role, input]) => [role, input.value]));
+            await request("official-services", { apiKey: key.value, ...(service.configured ? { roles, auxiliaryEnabled: auxiliary.checked, makeDefault: makeDefault.checked,
+              fallbackEnabled: fallback.checked, catalogRevision: service.catalogRevision } : {}) });
+            key.value = ""; await changed("models"); await renderSettings(); toast("官方服务配置已保存");
+          } catch (error) { toast(error.message); } finally { save.disabled = false; }
+        });
+        if (service.configured) form.append(button("刷新服务目录", async () => { await request("official-services", {}); await changed("models"); await renderSettings(); toast("目录已刷新，停止提供的服务已取消选择"); }, "settings-secondary"), button("移除 Key 并停用官方辅助服务", async () => { await request("official-services", { op: "forget" }); key.value = ""; await changed("models"); await renderSettings(); toast("本机 Key 已移除，云端 Key 可在用户中心撤销"); }, "settings-secondary"));
+        root.append(form);
+        for (const route of service.routes) {
+          const row = el("article", "settings-row"), copy = el("div");
+          copy.append(el("strong", "", route.name), el("p", "", `${route.id} · 价格 v${route.pricing.version}`));
+          if (route.limits?.fallbackEnabled) {
+            const backup = service.routes.find(item => item.id === route.limits.fallbackRouteId && item.service === route.service && item.protocol === route.protocol);
+            copy.append(el('p', 'editor-hint', backup ? `管理员备用：${backup.name}（${backup.id}），价格 v${backup.pricing.version}，完整价格见该服务条目。需单独开启备用授权。` : '管理员配置的备用当前不可用，请刷新目录核对。'));
+          }
+          const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", search_credits: "搜索 credit" };
+          for (const rate of route.pricing.definition.rates || []) copy.append(el("p", "editor-hint", `每 ${rate.unitQuantity} ${labels[rate.metric] || rate.metric}：${route.pricing.currency} ${rate.price}${rate.offPeakPrice !== undefined ? `（低峰 ${rate.offPeakPrice}）` : ""}`));
+          copy.append(el("p", "editor-hint", `收费倍率 1.3${route.pricing.currency === "USD" ? ` · 结算汇率 ${route.pricing.usdCny} 元/美元` : ""}；最终按实际用量结算并释放未使用的冻结额度。`));
+          const source = el("a", "settings-secondary", "供应商公开价格"); source.href = route.pricing.sourceUrl; source.target = "_blank"; source.rel = "noopener noreferrer"; copy.append(source);
+          row.append(copy); root.append(row);
+        }
+        return;
+      }
       if (selectedSettings === "models") {
         const models = await request("models");
-        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。连接测试会发送一条简短测试消息。"), button("＋ 接入 LLM", () => modelEditor(), "settings-primary"));
+        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。连接测试会发送简短消息；官方模型按实际用量计费。"), button("＋ 接入 LLM", () => modelEditor(), "settings-primary"));
         if (!models.models.length) root.append(el("p", "settings-empty", "还没有模型，点击接入 LLM 开始。"));
         for (const item of models.models) {
           const row = el("article", "settings-row");
           const copy = el("div"); copy.append(el("strong", "", item.id + (item.id === data.defaultModel ? " · 默认" : "")), el("p", "", `${item.model} · ${item.protocol}`), el("small", "", `${item.baseURL || "协议默认地址"} · ${item.hasKey ? "密钥已配置" : "未配置密钥"}`));
           const controls = el("div", "settings-row-actions");
-          controls.append(button("编辑", () => modelEditor(item)), button("测试连接", async (event) => {
+          if (item.setupRequired) copy.append(el("p", "editor-hint", "从旧数据导入，需补全地址或凭据后保存启用。"));
+          controls.append(item.managedByPlatform ? button("官方服务设置", () => { selectedSettings = "official"; void renderSettings(); }) : button("编辑", () => modelEditor(item)));
+          if (!item.setupRequired) controls.append(button("测试连接", async (event) => {
             const b = event.currentTarget; b.disabled = true; b.textContent = "测试中…";
             try { const result = await request("model-test", { id: item.id }); toast(`连接成功：${result.reply}`); }
             catch (error) { toast(error.message); }
@@ -175,6 +232,53 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       });
       root.append(form, el("p", "settings-path", `用户配置：${data.settingsPath}`));
     } catch (error) { root.replaceChildren(el("p", "editor-error", error.message)); }
+  }
+
+  async function renderLegacyImport(root) {
+    const defaults = await request("legacy-source"), labels = { configuration: "偏好、模型、MCP 与 RAG 配置", history: "会话、记忆、任务与文件历史", extensions: "Agent、Skill、命令与 Rhino 定义", credentials: "个人供应商凭据与 Google / MCP 授权" };
+    const form = el("form", "settings-form"), review = el("div", "settings-form"), status = el("p", "editor-hint"); status.setAttribute("role", "status");
+    form.append(el("p", "editor-hint", "先扫描来源并核对类别，再复制到当前账户。原文件保留，当前同名文件与配置优先。工作区中的项目文件继续保存在原位置。"));
+    const source = field(form, "原 CCAGENT 数据目录", "import-source", defaults.source);
+    const scan = el("button", "settings-primary", "扫描并预览"); scan.type = "submit"; form.append(scan); root.append(form, review, status);
+    form.addEventListener("submit", async event => {
+      event.preventDefault(); scan.disabled = true; status.textContent = "正在扫描文件目录…"; review.replaceChildren();
+      try {
+        const preview = await request("legacy-preview", { source: source.value });
+        status.textContent = "预览已生成，请核对来源与当前账户。";
+        review.append(el("p", "settings-path", `来源：${preview.source}`), el("p", "settings-path", `目标：${preview.destination}`));
+        const choices = {}, environment = [];
+        for (const item of preview.categories) {
+          choices[item.id] = field(review, `${labels[item.id]} · ${item.files} 个文件 · ${(item.bytes / 1048576).toFixed(2)} MiB`, "import-" + item.id, item.id !== "credentials" && item.files > 0 && !(item.id === "configuration" && preview.configurationError), { type: "checkbox" });
+          choices[item.id].disabled = !item.files || (item.id === "configuration" && preview.configurationError);
+        }
+        if (preview.configurationError) review.append(el("p", "editor-hint", "来源 settings.json 需修复；仍可选择其他类别。"));
+        if (preview.canonicalEnvironmentMissing) review.append(el("p", "editor-hint", "来源指定的凭据文件缺失或不可用，依赖它的模型会保持待补全；不会改用其他文件中的旧 Key。"));
+        if (preview.environmentFiles.length) {
+          review.append(el("p", "editor-hint", "选择凭据类别后会读取原目录中的环境文件。引用的外部文件须逐项勾选，值不会显示在预览中。"));
+          for (const file of preview.environmentFiles) {
+            if (file.external) environment.push([file.id, field(review, file.path, "import-env-" + file.id, false, { type: "checkbox" })]);
+            else review.append(el("p", "settings-path", file.path));
+          }
+        }
+        review.append(el("p", "editor-hint", `跳过 ${preview.skippedLinks} 个链接、${preview.skippedCaches} 个缓存目录。来源中的 ${preview.executionFields} 项执行权限/脚本设置保留在原处，导入后需复核；定时任务暂停，新扩展关闭。`));
+        const enableHistory = preview.historyDisabled ? field(review, "开启 30 天会话保存，以保留导入的历史", "import-enable-history", false, { type: "checkbox" }) : null;
+        const owned = field(review, "确认这些原有数据属于当前登录账户", "import-owned", false, { type: "checkbox" });
+        const apply = el("button", "settings-primary", "复制到当前账户"); apply.type = "button"; apply.disabled = true; review.append(apply);
+        const eligible = () => { apply.disabled = !owned.checked || !Object.values(choices).some(input => input.checked); };
+        owned.addEventListener("change", eligible); Object.values(choices).forEach(input => input.addEventListener("change", eligible));
+        apply.addEventListener("click", async () => {
+          if (getBusy()) { status.textContent = "请先等待当前任务结束。"; return; }
+          apply.disabled = true; scan.disabled = true; status.textContent = "正在复制并保存到当前账户，请保持应用开启…";
+          try {
+            const report = await request("legacy-import", { id: preview.id, confirmOwned: owned.checked, categories: Object.entries(choices).filter(([, input]) => input.checked).map(([id]) => id), environmentFiles: environment.filter(([, input]) => input.checked).map(([id]) => id), enableHistory: Boolean(enableHistory?.checked) });
+            status.textContent = `${report.state === "complete" ? "导入完成" : "导入尚未全部完成"}：复制 ${report.copied} 个文件/记录，新增 ${report.settingsAdded} 项配置，保留 ${report.conflicts} 项同名内容；${report.missingCredentials} 项凭据待补全。${report.restartRequired ? "请重新打开应用以完整加载配置和授权。" : "可刷新会话列表查看。"}`;
+            review.replaceChildren(); await changed("models"); await changed("settings"); await changed("history");
+          } catch (error) { status.textContent = error.message; eligible(); }
+          finally { scan.disabled = false; }
+        });
+      } catch (error) { status.textContent = error.message; }
+      finally { scan.disabled = false; }
+    });
   }
 
   async function refreshTeams() {
@@ -293,7 +397,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     catch (error) { for (const selectId of ["home-effort", "thread-effort"]) $(selectId).value = currentEffort; toast(error.message); }
     finally { effortBusy = false; for (const selectId of ["home-effort", "thread-effort"]) $(selectId).disabled = getBusy(); }
   });
-  return { agentEditor, refreshTeams, refreshPreferences, open: async (view) => { if (view === "settings") await renderSettings(); else if (view === "teams") await refreshTeams(); }, setSessionTeam: (team) => {
+  return { agentEditor, refreshTeams, refreshPreferences, openOfficial() { selectedSettings = "official"; navigate("settings"); }, open: async (view) => { if (view === "settings") await renderSettings(); else if (view === "teams") await refreshTeams(); }, setSessionTeam: (team) => {
     const select = $("thread-team");
     if (team && ![...select.options].some((o) => o.value === team)) { const option = el("option", "", "原团队已关闭"); option.value = team; option.disabled = true; select.append(option); }
     select.value = team || "off";

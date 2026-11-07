@@ -193,7 +193,7 @@ try {
   check((await command("/agents open Explore")).includes("JSON object"), "Non-object settings cannot be overwritten");
   await fs.writeFile(settingsPath, "{}");
   await bootstrapAgentStates();
-  check(getEnabledAgents().length === 6, "Repaired settings restore default Open without reloading definitions");
+  check(getEnabledAgents().length === expectedAgents, "Repaired settings restore default Open without reloading definitions");
   console.log(`\nAll ${checks} per-agent control checks passed (external network blocked/mocked).`);
 } finally {
   await accountFixture.close();

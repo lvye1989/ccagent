@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { ensureRealPathInsideAllowedRoots, resolveWorkspacePath } from "./pathUtils.js";
 import { writeWorkfriendDocx } from "../workfriend/docx.js";
+import { getPlatformGatewayClient, officialRole } from "../platform/gatewayClient.js";
 
 const MAX_TTS_TEXT = 10_000;
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
@@ -55,6 +56,18 @@ async function synthesizeVoice(
 ): Promise<{ bytes: number; model: string; voice: string }> {
   if (content.length > MAX_TTS_TEXT) {
     throw new Error(`Voice content exceeds ${MAX_TTS_TEXT} characters; shorten the spoken summary.`);
+  }
+  const official = await officialRole("voice");
+  if (official) {
+    const client = await getPlatformGatewayClient();
+    const signal = context.abortSignal ? AbortSignal.any([context.abortSignal, AbortSignal.timeout(180000)]) : AbortSignal.timeout(180000);
+    const response = await client.call("voice", { model: official.id, text: content, ...(voiceOverride ? { voice: voiceOverride } : {}) }, { signal });
+    const result = await response.json() as { audio?: { file_id?: string } };
+    if (!result.audio?.file_id) throw new Error("官方语音服务没有返回结果文件。");
+    const audio = Buffer.from(await client.download(result.audio.file_id, signal));
+    if (audio.length < 12 || audio.length > MAX_AUDIO_BYTES || audio.toString("ascii", 0, 4) !== "RIFF" || audio.toString("ascii", 8, 12) !== "WAVE") throw new Error("官方语音结果不是有效的 WAV 文件。");
+    await writeFile(outputPath, audio);
+    return { bytes: audio.length, model: official.id, voice: voiceOverride || "平台默认" };
   }
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim() || process.env.QWEN_API_KEY?.trim();
   if (!apiKey) throw new Error("DASHSCOPE_API_KEY (or QWEN_API_KEY) is not configured in ~/.ccagent/.env.");

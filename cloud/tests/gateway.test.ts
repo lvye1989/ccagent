@@ -19,6 +19,7 @@ test('authenticated gateway executes native protocols with real isolated ledger 
   const { postLedger, walletFor } = await import('../src/core/wallet');
   const { routeInput, saveRoute, createPriceVersion, quoteDefinition, priceDefinition } = await import('../src/core/catalog');
   const { createGateway, availableModels } = await import('../src/core/gateway');
+  const { ownedCallStatus } = await import('../src/core/calls');
   const { initializeUpload, completeUpload } = await import('../src/core/files');
   const userId = randomUUID(), otherId = randomUUID(), password = randomBytes(24).toString('base64url');
   const email = `${userId}@example.invalid`;
@@ -61,6 +62,8 @@ test('authenticated gateway executes native protocols with real isolated ledger 
       assert.equal((await gateway.execute(request('protocol', payload), 'chat')).status, 400);
       assert.equal((await gateway.execute(request('paid-tool', { ...payload, tools: [{ type: 'web_search' }] }), 'responses')).status, 400);
       assert.equal((await gateway.execute(request('server-state', { ...payload, previous_response_id: 'another-users-provider-id' }), 'responses')).status, 400);
+      assert.equal((await gateway.execute(request('old-price', payload, { 'x-ccagent-price-version': '999999' }), 'responses')).status, 409);
+      assert.equal((await gateway.execute(request('bad-price', payload, { 'x-ccagent-price-version': 'invalid' }), 'responses')).status, 400);
       assert.equal(calls, 0); assert.equal((await walletFor(userId)).frozen, 0n);
       const models = await availableModels(request('discovery', payload));
       assert.equal(models.data.length, 2); assert.equal(JSON.stringify(models).includes(credentialEnv), false);
@@ -139,6 +142,19 @@ test('authenticated gateway executes native protocols with real isolated ledger 
       assert.ok((await fetch(large.upload.url, { method: 'PUT', headers: large.upload.headers, body })).ok);
       await completeUpload(userId, large.id); queued.push(reply);
       const accepted = await gateway.execute(request('large', { request_file_id: large.id }), 'responses'); assert.equal(accepted.status, 200); await accepted.arrayBuffer();
+    });
+    await t.test('call status is login-owned, omits private identifiers and remains readable after key revocation', async () => {
+      const status = await ownedCallStatus(new Request(process.env.AUTH_URL + '/api/account/calls/measured', { headers: { cookie } }), 'measured');
+      assert.equal(status.status, 'settled'); assert.equal(status.resultAvailable, true);
+      assert.equal(status.charged, (await record('measured')).charged);
+      assert.equal('userId' in status || 'keyId' in status || 'resultId' in status || 'requestHash' in status, false);
+      await assert.rejects(ownedCallStatus(new Request(process.env.AUTH_URL + '/api/account/calls/measured'), 'measured'), error => (error as { status?: number }).status === 401);
+      await database().db.insert(tables.account).values({ id: randomUUID(), userId: otherId, providerId: 'credential', accountId: otherId, password: await hashPassword(password) });
+      const login = await auth.handler(new Request(process.env.AUTH_URL + '/api/auth/sign-in/email', { method: 'POST', headers: { origin: process.env.AUTH_URL!, 'content-type': 'application/json' }, body: JSON.stringify({ email: `${otherId}@example.invalid`, password }) }));
+      assert.equal(login.status, 200); const otherCookie = login.headers.getSetCookie().find(value => value.startsWith('ccagent.session_token='))!.split(';')[0];
+      await assert.rejects(ownedCallStatus(new Request(process.env.AUTH_URL + '/api/account/calls/measured', { headers: { cookie: otherCookie } }), 'measured'), error => (error as { status?: number }).status === 404);
+      const { revokeKey } = await import('../src/core/keys'); await revokeKey(userId, key.key.id);
+      assert.equal((await ownedCallStatus(new Request(process.env.AUTH_URL + '/api/account/calls/measured', { headers: { cookie } }), 'measured')).status, 'settled');
     });
   } finally {
     await Promise.allSettled(work);

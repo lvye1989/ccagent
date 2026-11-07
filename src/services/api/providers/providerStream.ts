@@ -40,6 +40,7 @@ import type {
   Usage,
 } from "../../../types/message.js";
 import { writeStreamDebug } from "../../../utils/streamDebug.js";
+import { getPlatformGatewayClient } from "../../../platform/gatewayClient.js";
 import {
   buildDefaultThinkingConfig,
   getSessionEffortLevel,
@@ -167,7 +168,7 @@ export function prepareRequest(profile: ModelProfile, params: StreamRequestParam
 
   const anthropicBody = {
     model: profile.model,
-    max_tokens: profile.maxTokens ?? params.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: profile.platformService ? Math.min(profile.maxTokens ?? DEFAULT_MAX_TOKENS, params.maxTokens ?? profile.maxTokens ?? DEFAULT_MAX_TOKENS) : profile.maxTokens ?? params.maxTokens ?? DEFAULT_MAX_TOKENS,
     messages: params.messages,
     ...(params.system ? { system: params.system } : {}),
     ...(params.tools && params.tools.length > 0 ? { tools: params.tools } : {}),
@@ -315,7 +316,9 @@ export async function* streamViaProvider(
     thinkingConfig: (prepared.body.generationConfig as Record<string, unknown> | undefined)?.thinkingConfig,
   });
 
-  let response = await fetch(prepared.url, {
+  let response = profile.platformService ? await (await getPlatformGatewayClient()).call(profile.protocol === "openai-responses" ? "responses" : "chat/completions", prepared.body, {
+    requestId: params.platformRequestId, signal: params.signal,
+  }) : await fetch(prepared.url, {
     method: "POST",
     headers: prepared.headers,
     body: JSON.stringify(prepared.body),

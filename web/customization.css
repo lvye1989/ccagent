@@ -21,8 +21,14 @@
 .settings-head { margin-bottom: 26px; }
 .settings-head h1 { font-size: 25px; font-weight: 600; margin: 7px 0 20px; letter-spacing: -.5px; }
 .settings-form { max-width: 640px; }
+.settings-layout > * { min-width: 0; }
+.settings-form { min-width: 0; overflow-wrap: anywhere; }
+.settings-form input[type=checkbox] { flex: 0 0 18px; }
 .settings-form .editor-field { padding: 16px 0; margin: 0; border-bottom: 1px solid #eeeef2; font-size: 13px; }
 .settings-primary { background: #30333c; border: 1px solid #30333c; color: #fff; border-radius: 9px; padding: 10px 16px; font-size: 12px; margin-top: 20px; cursor: pointer; }
+.settings-secondary { display: inline-flex; align-items: center; border: 1px solid #e2e3e8; background: #fff; padding: 9px 12px; color: #505360; border-radius: 9px; font: inherit; font-size: 12px; line-height: 1.5; text-decoration: none; cursor: pointer; }
+.settings-secondary:hover { background: #f6f7fa; }
+.settings-form > button { margin-right: 8px; margin-bottom: 8px; }
 .settings-path { color: #9a9ba3; font-size: 11px; margin-top: 32px; overflow-wrap: anywhere; }
 .settings-row { padding: 22px 0; border-bottom: 1px solid #ececf0; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-row strong { font-size: 14px; font-weight: 600; }.settings-row p { font-size: 13px; color: #6f727d; margin: 7px 0; }.settings-row small { color: #92959e; font-size: 11px; overflow-wrap: anywhere; }

@@ -802,7 +802,8 @@ async function main(): Promise<void> {
   console.log("\nAll agents checks passed.\n");
 }
 
-main().catch((err: unknown) => {
+const { withTestAccount } = await import("./helpers/accountFixture.js");
+withTestAccount(main).catch((err: unknown) => {
   console.error("Fatal:", err);
   process.exit(1);
 });

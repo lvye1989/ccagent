@@ -8,6 +8,7 @@ import { authEnvironment, databaseSchema } from './env';
 import { configurationValues } from './configuration';
 import { HttpError } from './http';
 import { postLedger } from './wallet';
+import { lockAccount } from './database-locks';
 
 type Provider = Pick<ZpayClient, 'checkout' | 'queryPaidOrder' | 'refund'>;
 export function createPaymentService(options: { merchantId: string; key: string; origin: string; provider: Provider }) {
@@ -52,8 +53,12 @@ export function createPaymentService(options: { merchantId: string; key: string;
     const paid = await options.provider.queryPaidOrder(expected(original, tradeNo));
     if (!paid) { await db.update(orders).set({ checkedAt: new Date() }).where(eq(orders.id, orderId)); return { status: 'pending' }; }
     return db.transaction(async tx => {
-      const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
-      if (order.merchantId !== options.merchantId || order.amountFen * MICRO_FEN !== paid.amountMicro || order.channel !== paid.channel || (order.tradeNo && order.tradeNo !== paid.tradeNo)) throw new HttpError(409, 'ORDER_MISMATCH', '支付查单与本地订单不符。');
+      await lockAccount(tx, original.userId);
+      // Another reconciliation/refund may own this order. Leave it pending for a
+      // later check instead of keeping a duplicate request waiting on its lock.
+      const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update', { skipLocked: true });
+      if (!order) return { status: 'pending' };
+      if (order.userId !== original.userId || order.merchantId !== options.merchantId || order.amountFen * MICRO_FEN !== paid.amountMicro || order.channel !== paid.channel || (order.tradeNo && order.tradeNo !== paid.tradeNo)) throw new HttpError(409, 'ORDER_MISMATCH', '支付查单与本地订单不符。');
       if (order.status === 'pending') {
         await postLedger(tx, order.userId, `recharge:${order.id}`, 'recharge', paid.amountMicro, 0n, { orderId: order.id, tradeNo: paid.tradeNo });
         await tx.update(orders).set({ status: 'credited', tradeNo: paid.tradeNo, creditedAt: new Date(), checkedAt: new Date() }).where(eq(orders.id, orderId));
@@ -67,8 +72,10 @@ export function createPaymentService(options: { merchantId: string; key: string;
     return database().db.transaction(async tx => {
       const [reference] = await tx.select().from(refunds).where(eq(refunds.id, refundId));
       if (!reference) throw new HttpError(404, 'REFUND_NOT_FOUND', '退款申请不存在。');
+      await lockAccount(tx, reference.userId);
       const [order] = await tx.select().from(orders).where(eq(orders.id, reference.orderId)).for('update');
       const [refund] = await tx.select().from(refunds).where(eq(refunds.id, refundId)).for('update');
+      if (!order || !refund || order.userId !== reference.userId || refund.userId !== reference.userId || refund.orderId !== order.id) throw new HttpError(409, 'REFUND_CONFLICT', '退款与原订单的归属需要核验。');
       if (['success', 'rejected'].includes(refund.status)) {
         if (refund.status !== outcome) throw new HttpError(409, 'REFUND_CONFLICT', '退款已有不同的处理结果。');
         return refund;
@@ -87,8 +94,12 @@ export function createPaymentService(options: { merchantId: string; key: string;
   async function requestRefund(orderId: string, actorId: string, reason: string) {
     const db = database().db;
     const prepared = await db.transaction(async tx => {
+      const [reference] = await tx.select({ userId: orders.userId }).from(orders).where(eq(orders.id, orderId));
+      if (!reference) throw new HttpError(404, 'ORDER_NOT_FOUND', '订单不存在。');
+      await lockAccount(tx, reference.userId);
       const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for('update');
       if (!order) throw new HttpError(404, 'ORDER_NOT_FOUND', '订单不存在。');
+      if (order.userId !== reference.userId) throw new HttpError(409, 'ORDER_MISMATCH', '订单归属信息发生变化，请刷新后核验。');
       const [existing] = await tx.select().from(refunds).where(eq(refunds.orderId, orderId));
       if (existing) return { refund: existing, created: false, order };
       if (order.status !== 'credited' || !order.tradeNo || order.merchantId !== options.merchantId) throw new HttpError(409, 'REFUND_NOT_AVAILABLE', '该订单目前不能发起原路退款。');

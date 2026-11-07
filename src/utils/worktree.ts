@@ -68,23 +68,27 @@ export function worktreePathFor(repoRoot: string, slug: string): string {
  * entry (file or directory — submodules and worktrees use a `.git` file).
  * Returns null when no enclosing repo is found.
  *
- * We deliberately avoid shelling out to `git rev-parse --show-toplevel`:
- * (1) it's slower than a few `stat` calls; (2) it returns the worktree
- * root rather than the canonical repo root if we're already inside one,
- * which would let nested-worktree mistakes happen. Same reasoning as
- * `findCanonicalGitRoot` in source.
+ * A marker alone does not prove that Git can use the repository. Validate
+ * candidates with Git, while retaining the marker-based root selection
+ * used by existing worktree callers. Do not let inherited Git overrides
+ * validate an unrelated repository instead of the candidate directory.
  */
 export async function findGitRoot(cwd: string): Promise<string | null> {
   let current = path.resolve(cwd);
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"]) delete env[key];
   // Bound the walk — we shouldn't traverse more than ~50 levels in any
   // realistic filesystem.
   for (let i = 0; i < 64; i++) {
     try {
       const dotGit = path.join(current, ".git");
-      // .git can be a directory (normal repo) OR a file (submodule /
-      // linked worktree). Either is enough to call `current` the root.
-      await fs.stat(dotGit);
-      return current;
+      const marker = await fs.stat(dotGit);
+      if (marker.isDirectory() || marker.isFile()) {
+        const result = await execFileAsync("git", ["-C", current, "rev-parse", "--is-inside-work-tree"], {
+          env, windowsHide: true, timeout: 4000, maxBuffer: 16 * 1024,
+        });
+        if (result.stdout.trim() === "true") return current;
+      }
     } catch {
       // not present here — keep walking
     }

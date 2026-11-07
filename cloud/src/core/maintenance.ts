@@ -14,7 +14,7 @@ export function requireMaintenanceIdentity(request: Request): void {
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(401, 'MAINTENANCE_UNAUTHORIZED', '维护请求未获授权。');
 }
 
-/** One autocommit settlement per call preserves the key -> wallet -> reservation lock order. */
+/** One autocommit settlement per call acquires the account lock before key, wallet and reservation locks. */
 export async function releaseExpiredUsage(options: { limit?: number; deadline?: number } = {}) {
   const db = database().db;
   const expired = await db.select({ id: reservations.id, userId: reservations.userId }).from(reservations)

@@ -168,4 +168,5 @@ async function main(): Promise<void> {
   process.stdout.write("\n\u001b[32mStage 33 batch 3 smoke test complete.\u001b[0m\n");
 }
 
-void main();
+const { withTestAccount } = await import("./helpers/accountFixture.js");
+await withTestAccount(main);

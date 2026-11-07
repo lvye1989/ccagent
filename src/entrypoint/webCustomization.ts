@@ -17,6 +17,9 @@ import { getActiveTeam } from "../state/teamContext.js";
 import { splitFrontmatter } from "../services/skills/parseFrontmatter.js";
 import { stringify as yamlStringify } from "yaml";
 import { isAgentTeamsEnabled } from "../utils/agentTeamsEnabled.js";
+import { forgetOfficialKey, officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
+import { importLegacyData, previewLegacyData } from "../platform/legacyData.js";
+import { getPlatformHome } from "../platform/account.js";
 
 export interface TeamRole { name: string; prompt: string; agentType: string }
 export interface TeamPreset { id: string; name: string; description: string; enabled: boolean; roles: TeamRole[] }
@@ -190,7 +193,10 @@ function publicUrl(value: string | undefined): string {
 async function modelsView(context: CustomizationContext) {
   const { profiles } = await loadProfiles(context.workspace);
   const own = map((await userSettings()).models);
-  return { defaultModel: context.defaultModel, models: Object.values(profiles).map((p) => ({ id: p.id, protocol: p.protocol, model: p.model, baseURL: publicUrl(p.baseURL), hasKey: Boolean(p.apiKey), maxTokens: p.maxTokens, contextWindow: p.contextWindow, editable: Object.hasOwn(own, p.id) })) };
+  return { defaultModel: context.defaultModel, models: [...Object.values(profiles).map((p) => ({ id: p.id, protocol: p.protocol, model: p.model, baseURL: publicUrl(p.baseURL), hasKey: Boolean(p.apiKey || p.platformService), managedByPlatform: Boolean(p.platformService), maxTokens: p.maxTokens, contextWindow: p.contextWindow, editable: !p.platformService && Object.hasOwn(own, p.id) })),
+    ...Object.entries(own).filter(([id, value]) => !id.startsWith("ccagent:") && !profiles[id] && value && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).disabled === true).map(([id, value]) => {
+      const raw = object(value); return { id, protocol: raw.protocol, model: raw.model, baseURL: publicUrl(typeof raw.baseURL === "string" ? raw.baseURL : ""), hasKey: Boolean(resolveWebSecret(raw.apiKey)), managedByPlatform: false, editable: true, setupRequired: true };
+    })] };
 }
 async function saveModel(body: Record<string, unknown>, context: CustomizationContext) {
   const config = await userSettings();
@@ -200,7 +206,10 @@ async function saveModel(body: Record<string, unknown>, context: CustomizationCo
   const endpoint = validateServiceUrl(text(body.baseURL, "API address", 4096)).replace(/\/$/, "");
   if (new URL(endpoint).search) throw new Error("API address cannot contain query credentials.");
   const old = models[id] ? object(models[id]) : {};
+  if (old.disabled === true && typeof old.apiKey === "string" && old.apiKey.includes("CCAGENT_IMPORT_UNSET_") && !(typeof body.apiKey === "string" && body.apiKey.trim())) throw new Error("请补全此导入模型的 API Key 后再启用。");
   const next: Record<string, unknown> = { ...old, protocol: body.protocol, model: text(body.model, "Model name", 200), baseURL: endpoint };
+  delete next.disabled;
+  delete next.legacyImport;
   for (const key of ["maxTokens", "contextWindow"]) {
     const value = body[key];
     if (value !== undefined && value !== "") { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1 || n > 10000000) throw new Error(`Invalid ${key}.`); next[key] = n; }
@@ -214,6 +223,8 @@ async function saveModel(body: Record<string, unknown>, context: CustomizationCo
 
 export async function handleCustomization(resource: string, method: string, body: Record<string, unknown>, context: CustomizationContext): Promise<unknown> {
   if (method === "GET") {
+    if (resource === "legacy-source") return { source: getPlatformHome() };
+    if (resource === "official-services") return officialServicesView();
     if (resource === "models") return modelsView(context);
     if (resource === "teams") return { teams: await listTeamPresets(), enabled: isAgentTeamsEnabled(), activeTeam: getActiveTeam()?.teamName ?? null };
     if (resource === "rag") return { connections: (await loadRagConnections()).map(({ apiKey, ...c }) => ({ ...c, hasKey: Boolean(resolveWebSecret(apiKey)) })) };
@@ -225,6 +236,17 @@ export async function handleCustomization(resource: string, method: string, body
     throw new Error("Unknown customization resource.");
   }
   if (method !== "POST") throw new Error("Method not supported.");
+  if (resource === "legacy-preview") return previewLegacyData(body.source);
+  if (resource === "legacy-import") return importLegacyData(body);
+  if (resource === "official-services") {
+    if (body.op === "forget") await forgetOfficialKey();
+    else await saveOfficialServices(body);
+    if (body.makeDefault === true && typeof (body.roles as Record<string, unknown> | undefined)?.main === "string") {
+      const id = "ccagent:" + (body.roles as Record<string, string>).main;
+      await updateUserSettings({ model: id, defaultModel: id });
+    }
+    return { saved: true };
+  }
   if (resource === "draft") { const result = await draft(body, context); if (result.error) throw new Error(String(result.error)); return result; }
   if (resource === "agents") return saveAgent(body, context);
   if (resource === "local-skill") return importLocalSkill(body, context);

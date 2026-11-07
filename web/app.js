@@ -9,6 +9,7 @@ import { createWorkspacePicker } from "./workspace-picker.js";
 import { createWorkspaceFiles } from "./workspace-files.js";
 import { createComposerTools } from "./composer-tools.js";
 import { createVisualizationUI } from "./visualization.js";
+import { createCloudTVUI } from "./cloudtv.js";
 
 const $ = (id) => document.getElementById(id);
 const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), storageWarningShown: false };
@@ -165,6 +166,10 @@ function setView(view) {
   document.querySelector(".main-area").classList.toggle("home-active", view === "tasks");
   $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings" || view === "visualization");
   document.querySelector(".main-area").classList.toggle("visualization-active", view === "visualization");
+  document.querySelector(".main-area").classList.toggle("cloudtv-active", view === "cloudtv");
+  $("cloudtv-entry").classList.toggle("selected", view === "cloudtv");
+  if (view === "cloudtv") $("cloudtv-entry").setAttribute("aria-current", "page");
+  else $("cloudtv-entry").removeAttribute("aria-current");
   $("customize-sidebar").classList.toggle("hidden", !customizing);
   $("feature-sidebar").classList.toggle("hidden", !feature);
   document.querySelector(".main-area").classList.toggle("customizing", customizing);
@@ -187,6 +192,7 @@ function setView(view) {
   $("settings-view").classList.toggle("hidden", view !== "settings");
   $("teams-view").classList.toggle("hidden", view !== "teams");
   $("visualization-view").classList.toggle("hidden", view !== "visualization");
+  $("cloudtv-view").classList.toggle("hidden", view !== "cloudtv");
   $("header-title").textContent = view === "thread" ? $("thread-title").textContent : ({ tasks: "任务", changes: "代码更改", about: "关于工作区", library: "资料空间", memory: "记忆管理", schedules: "定时任务", plugins: "Plugins", skills: "Skills", agents: "Agents", mcp: "MCP 服务", teams: "Agent Teams", settings: "设置" })[view];
   document.querySelectorAll(".rail-button[data-view]").forEach((item) => item.classList.toggle("selected", item.dataset.view === (view === "thread" ? "tasks" : ["skills", "agents", "mcp", "teams"].includes(view) ? "plugins" : view)));
   $("customize-search").classList.toggle("hidden", view === "teams");
@@ -202,6 +208,7 @@ function setView(view) {
   if (view === "memory") void memoryUI.open();
   if (view === "schedules") void schedulesUI.open();
   if (view === "visualization") { $("header-title").textContent = "数据可视化"; void visualizationUI.open(); }
+  if (view === "cloudtv") { $("header-title").textContent = "cloudTV"; cloudTVUI.open(); }
 }
 
 function setComposeMode(mode) {
@@ -588,7 +595,7 @@ function syncModelSelectors() {
     if (selected && !state.availableModels.some((item) => item.id === selected)) {
       const option = document.createElement("option");
       option.value = selected;
-      option.textContent = `${selected}（此会话）`;
+      option.textContent = selected.startsWith("ccagent:") ? "原官方模型不可用，请更新服务或手动选择模型" : `${selected}（此会话）`;
       option.disabled = true;
       select.append(option);
     }
@@ -608,7 +615,8 @@ async function refreshModels() {
     const data = await api("/api/models");
     state.availableModels = data.models;
     if (!state.selectedModel || !data.models.some((item) => item.id === state.selectedModel && item.available)) {
-      state.selectedModel = data.models.find((item) => item.id === data.defaultModel && item.available)?.id
+      const requested = state.selectedModel || data.defaultModel;
+      state.selectedModel = requested?.startsWith("ccagent:") ? requested : data.models.find((item) => item.id === data.defaultModel && item.available)?.id
         || data.models.find((item) => item.available)?.id || "";
     }
     syncModelSelectors();
@@ -853,6 +861,8 @@ async function selectWorkspace(folder) {
 }
 
 function installHandlers() {
+  document.addEventListener("ccagent:official-services", () => customizationUI.openOfficial());
+  document.addEventListener("ccagent:models-changed", () => { state.selectedModel = ""; void refreshModels(); });
   $("temporary-chat").addEventListener("click", async () => {
     try {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ temporary: true, mode: "default", model: state.selectedModel || undefined }) });
@@ -878,6 +888,7 @@ function installHandlers() {
   $("feature-memory-chats").addEventListener("click", () => $("memory-session-list").scrollIntoView({ block: "start" }));
   $("feature-memory-files").addEventListener("click", () => $("memory-file-list").scrollIntoView({ block: "start" }));
   $("workspace-entry").addEventListener("click", () => setView("about"));
+  $("cloudtv-entry").addEventListener("click", () => setView("cloudtv"));
   $("sidebar-open").addEventListener("click", () => {
     const shell = document.querySelector(".app-shell");
     if (shell.classList.contains("sidebar-collapsed")) shell.classList.remove("sidebar-collapsed");
@@ -917,7 +928,7 @@ function installHandlers() {
     if (event.key === "Escape" && !$("interaction-overlay").classList.contains("hidden")) answerInteraction(false);
     if (event.key === "Escape") workspacePicker.close();
   });
-  $("refresh-all").addEventListener("click", () => { if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
+  $("refresh-all").addEventListener("click", () => { if (state.view === "cloudtv") cloudTVUI.refresh(); else if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
   $("activity-refresh").addEventListener("click", refreshChanges);
   $("close-diff").addEventListener("click", () => $("diff-view").classList.add("hidden"));
   $("stop-button").addEventListener("click", async () => {
@@ -941,10 +952,16 @@ const customizationUI = createCustomizationUI({ api, toast, navigate: setView, g
   else if (resource === "models") { state.selectedModel = ""; await refreshModels(); }
   else if (resource === "session" && state.sessionId) await openSession(state.sessionId);
   else if (resource === "settings") await customizationUI.refreshPreferences();
+  else if (resource === "history") await refreshSessions();
 } });
 const workspacePicker = createWorkspacePicker({ api, onSelect: selectWorkspace, getWorkspace: () => state.workspace });
 const workspaceFiles = createWorkspaceFiles({ api, toast, getWorkspace: () => state.workspace, reference: (file) => composerTools.reference(file) });
 const composerTools = createComposerTools({ api, toast, getWorkspace: () => state.workspace, getInput: () => $(state.view === "thread" ? "thread-input" : "home-input"), files: workspaceFiles, chooseWorkspace: () => workspacePicker.open(), navigate: setView });
+const cloudTVUI = createCloudTVUI({ onBack: () => {
+  setView(state.sessionId ? "thread" : "tasks");
+  if (state.sessionId) history.replaceState(null, "", `/?session=${encodeURIComponent(state.sessionId)}`);
+  $(state.sessionId ? "thread-input" : "home-input").focus();
+} });
 const visualizationUI = createVisualizationUI({ api, toast, getWorkspace: () => state.workspace, onAnalyze: ({ dataset, analysis }) => {
   newTask(); $("home-input").value = `请使用 AnalyzeData 分析当前工作文件夹的数据集 ${dataset.id}（${dataset.name} / ${dataset.sheet}）。字段映射：${JSON.stringify(analysis.config)}。筛选条件：${JSON.stringify(analysis.filters)}。请核对数据质量、解释图表趋势与异常，并给出有数据依据的建议。保留原文件，标注数据口径和源行。`; $("home-input").dispatchEvent(new Event("input", { bubbles: true })); toast("已填写分析请求，发送即可继续");
 } });
@@ -954,5 +971,5 @@ await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customi
 const params = new URLSearchParams(location.search);
 const savedSession = params.get("session");
 if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
-else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization"].includes(params.get("view"))) setView(params.get("view"));
+else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv"].includes(params.get("view"))) setView(params.get("view"));
 else setView("tasks");

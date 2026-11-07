@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { eq, sql } from 'drizzle-orm';
 import { isolatedDatabase } from './database-fixture';
@@ -48,8 +49,9 @@ test('real Supabase: migrations, email auth, permissions, keys and transactional
   try {
     await t.test('applies versioned migrations twice without duplicating tables', async () => {
       await fixture.apply();
-      const [versions] = await fixture.owner.unsafe(`SELECT count(*)::integer as count FROM "${fixture.schema}".__drizzle_migrations`);
-      assert.equal(versions.count, 3);
+      const journal = JSON.parse(await readFile('migrations/meta/_journal.json', 'utf8')) as { entries: { when: number }[] };
+      const versions = await fixture.owner.unsafe(`SELECT created_at::text as version FROM "${fixture.schema}".__drizzle_migrations ORDER BY created_at`);
+      assert.deepEqual(versions.map(row => row.version), journal.entries.map(entry => String(entry.when)));
     });
     const accountA = await register('Alice'), accountB = await register('Bob');
     a = accountA.id; b = accountB.id; cookieA = accountA.cookie; cookieB = accountB.cookie;

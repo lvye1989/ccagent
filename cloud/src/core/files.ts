@@ -60,8 +60,25 @@ export async function readOwnedFile(userId: string, id: string, allowedPurposes?
   const record = await ownedFile(userId, id, allowedPurposes);
   const result = await get(checkedPath(record), { access: 'private', useCache: false, abortSignal: AbortSignal.timeout(30000) });
   if (!result || result.statusCode !== 200) throw new HttpError(404, 'FILE_NOT_FOUND', '文件不存在。');
-  if (result.blob.size !== record.size) { await result.stream.cancel(); throw new HttpError(503, 'FILE_SIZE_MISMATCH', '文件内容需要核验。'); }
-  return { record, stream: result.stream };
+  if (result.blob.contentType.split(';')[0] !== record.contentType) { await result.stream.cancel(); throw new HttpError(503, 'FILE_TYPE_MISMATCH', '文件类型需要核验。'); }
+  // CDN compression or chunked delivery can omit/change Content-Length. Check decoded bytes instead.
+  const reader = result.stream.getReader(); let size = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const item = await reader.read();
+        if (item.done) {
+          if (size !== record.size) throw new HttpError(503, 'FILE_SIZE_MISMATCH', '文件内容需要核验。');
+          controller.close(); return;
+        }
+        size += item.value.byteLength;
+        if (size > record.size) throw new HttpError(503, 'FILE_SIZE_MISMATCH', '文件内容需要核验。');
+        controller.enqueue(item.value);
+      } catch (error) { await reader.cancel().catch(() => {}); controller.error(error); }
+    },
+    async cancel(reason) { await reader.cancel(reason); },
+  });
+  return { record, stream };
 }
 export async function deleteOwnedFile(userId: string, id: string) {
   requireStorage();

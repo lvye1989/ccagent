@@ -22,6 +22,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import he from "he";
 import { getAnthropicClientForProfile } from "../../services/api/client.js";
 import { resolveProfile } from "../../services/api/providers/profile.js";
+import { getPlatformGatewayClient, officialRole } from "../../platform/gatewayClient.js";
 
 export interface SearchResult {
   title: string;
@@ -495,6 +496,17 @@ export async function createAdapter(
   modelHandle?: string,
   preferredProvider: SearchProvider = "auto",
 ): Promise<WebSearchAdapter> {
+  const official = await officialRole("search");
+  if (official) return {
+    name: "ccagent:" + official.id,
+    async search(query, options) {
+      const response = await (await getPlatformGatewayClient()).call("search", { model: official.id, query, max_results: clampMaxResults(options.maxResults),
+        ...(options.allowedDomains?.length ? { include_domains: options.allowedDomains } : {}), ...(options.blockedDomains?.length ? { exclude_domains: options.blockedDomains } : {}),
+        ...(official.protocol === "tavily" ? { search_depth: "basic", ...(options.topic ? { topic: options.topic } : {}), ...(options.timeRange ? { time_range: options.timeRange } : {}) } : { freshness: bochaFreshness(options.timeRange) }) }, { signal: options.signal });
+      const value: unknown = await response.json();
+      return filterByDomains(official.protocol === "tavily" ? parseTavilyResponse(value) : parseBochaResponse(value), options).slice(0, clampMaxResults(options.maxResults));
+    },
+  };
   const envOverride = process.env.WEB_SEARCH_ADAPTER?.trim().toLowerCase();
   const selected = preferredProvider !== "auto" ? preferredProvider : envOverride;
   if (selected === "tavily") return new TavilySearchAdapter();
@@ -522,6 +534,7 @@ export async function createAdapter(
 
 /** Ordered secondary providers used for errors and empty-result isolation. */
 export function createFallbackAdapters(primaryName: string): WebSearchAdapter[] {
+  if (primaryName.startsWith("ccagent:")) return [];
   const fallbacks: WebSearchAdapter[] = [];
   if (primaryName !== "tavily" && tavilyApiKey()) fallbacks.push(new TavilySearchAdapter());
   if (primaryName !== "bocha" && bochaApiKey()) fallbacks.push(new BochaSearchAdapter());

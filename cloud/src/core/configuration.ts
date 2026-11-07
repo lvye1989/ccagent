@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { database } from './db';
+import { database, type DatabaseReader } from './db';
 import { audit, settings } from './db/schema';
 import { HttpError } from './http';
+import { lockAdministration } from './database-locks';
+import { authEnvironment, databaseMaxConnections, databaseSchema } from './env';
 
 const definitions = {
   support_email: { default: '', env: 'SUPPORT_EMAIL', validate: z.union([z.literal(''), z.email()]) },
@@ -36,16 +38,16 @@ function environmentValue(key: ConfigurationKey, value: string): unknown {
   return value;
 }
 /** No process cache: all Vercel instances observe database changes on the next request. */
-export async function configuration(): Promise<ConfigurationEntry[]> {
-  const rows = await database().db.select().from(settings);
+export async function configuration(reader: DatabaseReader = database().db): Promise<ConfigurationEntry[]> {
+  const rows = await reader.select().from(settings);
   return (Object.keys(definitions) as ConfigurationKey[]).map(key => {
     const definition = definitions[key], stored = rows.find(row => row.key === key), override = process.env[definition.env];
     const value = definition.validate.parse(override === undefined ? stored ? storedValue(key, stored.value) : definition.default : environmentValue(key, override));
     return { key, value, version: stored?.version ?? 0, source: override !== undefined ? 'environment' : stored ? 'database' : 'default', readonly: override !== undefined };
   });
 }
-export async function configurationValues() {
-  return Object.fromEntries((await configuration()).map(item => [item.key, item.value])) as {
+export async function configurationValues(reader: DatabaseReader = database().db) {
+  return Object.fromEntries((await configuration(reader)).map(item => [item.key, item.value])) as {
     support_email: string; payment_enabled: boolean; recharge_min_fen: number; recharge_max_fen: number; settlement_usd_cny: string;
   };
 }
@@ -65,7 +67,7 @@ export async function saveConfiguration(actorId: string, input: z.infer<typeof c
   if (Number(merged.recharge_min_fen) > Number(merged.recharge_max_fen)) throw new HttpError(400, 'INVALID_RECHARGE_RANGE', '最低充值额不能高于最高充值额。');
   await database().db.transaction(async tx => {
     // Serialize multi-field updates, including the first write of a setting.
-    await tx.execute(sql`select pg_advisory_xact_lock(804714031)`);
+    await lockAdministration(tx, 804714031);
     const latest = await tx.select().from(settings);
     const values = Object.fromEntries((Object.keys(definitions) as ConfigurationKey[]).map(key => {
       const definition = definitions[key], override = process.env[definition.env];
@@ -85,8 +87,27 @@ export async function saveConfiguration(actorId: string, input: z.infer<typeof c
 }
 
 export function credentialStatuses() {
-  return { database: !!process.env.DATABASE_URL, auth: (process.env.AUTH_SECRET?.length || 0) >= 32,
-    email: !!process.env.RESEND_API_KEY, emailDomain: 'notify.cjai.pro',
+  let baseUrl: string | null = null, origin: string | null = null;
+  try {
+    const url = new URL(process.env.ZPAY_API_BASE_URL || 'https://zpayz.cn');
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash && url.pathname === '/') baseUrl = url.origin;
+  } catch { /* Never echo malformed URLs, which may contain credentials. */ }
+  try { origin = authEnvironment().origin; } catch { /* Status only; no raw validation error leaves this function. */ }
+  const from = process.env.AUTH_EMAIL_FROM || 'CCAGENT <account@notify.cjai.pro>';
+  const address = from.match(/<([^<>]+)>$/)?.[1] || from;
+  const senderValid = !/[\r\n]/.test(from) && z.email().safeParse(address).success;
+  const channelId = process.env.ZPAY_CHANNEL_ID || '';
+  const providerCount = Object.entries(process.env).filter(([name, value]) => /^CCAGENT_PROVIDER_[A-Z0-9_]+$/.test(name) && value).length;
+  const callbackHttps = !!origin?.startsWith('https://');
+  return { database: !!(process.env.DATABASE_URL || process.env.POSTGRES_URL), auth: (process.env.AUTH_SECRET?.length || 0) >= 32,
+    authentication: { emailPasswordRequired: true, emailVerificationRequired: true },
+    backend: { provider: 'postgresql', schema: databaseSchema(), maxConnections: databaseMaxConnections() },
+    email: !!process.env.RESEND_API_KEY, emailDomain: senderValid ? address.slice(address.lastIndexOf('@') + 1).toLowerCase() : null, senderValid,
+    storage: { configured: !!(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID), access: 'private' },
+    providers: { configuredCount: providerCount },
     payment: { merchantConfigured: !!process.env.ZPAY_PID, keyConfigured: !!process.env.ZPAY_KEY,
-      baseUrl: new URL(process.env.ZPAY_API_BASE_URL || 'https://zpayz.cn').origin, channel: 'alipay' }, markup: '1.3' };
+      baseUrl, baseUrlValid: !!baseUrl, baseUrlSource: process.env.ZPAY_API_BASE_URL ? 'environment' : 'default', channel: 'alipay',
+      channelIdConfigured: !!channelId, channelIdValid: !channelId || /^\d+(?:,\d+)*$/.test(channelId), callbackHttps,
+      notifyUrl: callbackHttps ? `${origin}/api/payments/zpay/notify` : null, returnUrl: callbackHttps ? `${origin}/payment/return` : null }, markup: '1.3' };
 }
+export type CredentialStatuses = ReturnType<typeof credentialStatuses>;

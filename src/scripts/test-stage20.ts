@@ -48,6 +48,7 @@ import {
   enqueuePendingNotification,
   formatTaskNotification,
   pendingNotificationCount,
+  peekPendingNotifications,
   subscribePendingNotifications,
 } from "../state/notificationStore.js";
 import {
@@ -80,6 +81,25 @@ import type {
 const execFileAsync = promisify(execFile);
 
 const failures: string[] = [];
+async function removeTestDirectory(directory: string): Promise<void> {
+  const target = await fs.realpath(directory), temporaryRoot = await fs.realpath(os.tmpdir());
+  if (path.dirname(target) !== temporaryRoot || !/^(?:stage20-|outside-)/.test(path.basename(target))) throw new Error("Unsafe test cleanup");
+  await fs.rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+/** The killed status precedes lifecycle cleanup; wait for its actual completion notification. */
+async function awaitAgentCleanup(agentId: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let unsubscribe = () => {};
+    const timeout = setTimeout(() => { unsubscribe(); reject(new Error("Background agent cleanup did not finish")); }, 10_000);
+    const check = () => {
+      if (!peekPendingNotifications().some(item => item.text.includes(`<task_id>${agentId}</task_id>`))) return;
+      clearTimeout(timeout); unsubscribe(); resolve();
+    };
+    unsubscribe = subscribePendingNotifications(check);
+    check();
+  });
+}
 function assert(condition: unknown, label: string): void {
   if (condition) {
     console.log(`  ✓ ${label}`);
@@ -97,7 +117,7 @@ async function withTempDir(
   try {
     await fn(tmp);
   } finally {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTestDirectory(tmp);
   }
 }
 
@@ -403,8 +423,12 @@ async function main(): Promise<void> {
     const tmpOutside = await fs.mkdtemp(path.join(os.tmpdir(), "outside-"));
     try {
       assert((await isInsideGitRepo(tmpOutside)) === false, "isInsideGitRepo false outside any repo");
+      await fs.mkdir(path.join(tmpOutside, ".git"));
+      assert((await isInsideGitRepo(tmpOutside)) === false, "an empty .git directory does not make a repository");
+      await fs.writeFile(path.join(tmpOutside, ".git", "HEAD"), "not a valid Git HEAD\n");
+      assert((await isInsideGitRepo(tmpOutside)) === false, "a malformed .git marker does not make a repository");
     } finally {
-      await fs.rm(tmpOutside, { recursive: true, force: true });
+      await removeTestDirectory(tmpOutside);
     }
 
     // Path / branch naming convention
@@ -509,6 +533,7 @@ async function main(): Promise<void> {
 
   // ─── [6] agentTool sync isolation — cwd is overridden to worktree ────
   console.log("\n[6] agentTool sync isolation — cwd routed to worktree");
+  clearAllAsyncAgents(); clearPendingNotifications();
 
   await withTempDir(async (repoDir) => {
     await initGitRepo(repoDir);
@@ -568,6 +593,7 @@ async function main(): Promise<void> {
       // Kill the background agent so we don't leak the LLM call.
       const all = getAllAsyncAgents();
       for (const e of all) killAsyncAgent(e.agentId);
+      await Promise.all(all.map(entry => awaitAgentCleanup(entry.agentId)));
       clearAllAsyncAgents();
 
       // Best-effort cleanup of the leftover worktree (the lifecycle
@@ -587,7 +613,7 @@ async function main(): Promise<void> {
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
-      await fs.rm(tmpHome, { recursive: true, force: true });
+      await removeTestDirectory(tmpHome);
     }
   });
 
@@ -642,6 +668,7 @@ async function main(): Promise<void> {
 
       // Kill it so the background lifecycle doesn't try to call the LLM.
       killAsyncAgent(all[0]!.agentId);
+      await awaitAgentCleanup(all[0]!.agentId);
       clearAllAsyncAgents();
       clearPendingNotifications();
     } finally {
@@ -956,7 +983,7 @@ Bad iso value should be silently dropped.`,
       assert(typeof launchedAgentId === "string", "async_launched response carried an agent_id");
       if (launchedAgentId) {
         killAsyncAgent(launchedAgentId);
-        await new Promise<void>((r) => setTimeout(r, 50));
+        await awaitAgentCleanup(launchedAgentId);
         assert(
           parentPromptCalled === false,
           "parent's onPermissionRequest still not invoked after background kill",
@@ -968,7 +995,7 @@ Bad iso value should be silently dropped.`,
       } else {
         process.env.HOME = prevHome;
       }
-      await fs.rm(tmpHome, { recursive: true, force: true });
+      await removeTestDirectory(tmpHome);
       clearAllAsyncAgents();
     }
 
@@ -1012,7 +1039,8 @@ Bad iso value should be silently dropped.`,
         getPermissionMode: () => "default",
       };
 
-      const { toolResultsMessage } = await runTools(
+      const { withTestAccount } = await import("./helpers/accountFixture.js");
+      const { toolResultsMessage } = await withTestAccount(() => runTools(
         [askProbeBlock] as never,
         probeCtx,
         {
@@ -1022,7 +1050,7 @@ Bad iso value should be silently dropped.`,
           onPermissionRequest: probeOnPermissionRequest,
           shouldAvoidPermissionPrompts: true,
         },
-      );
+      ));
 
       assert(
         probeOnPermissionRequestCalled === false,

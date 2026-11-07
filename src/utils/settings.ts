@@ -29,6 +29,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { withFileTransaction, writeJsonAtomically } from "./fileTransaction.js";
 import {
   getLocalSettingsPath,
   getProjectCCAgentDir,
@@ -142,14 +143,15 @@ async function writeSettingsPatch(
   filePath: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
-  const { raw } = await readJsonSettingsFile<Record<string, unknown>>(filePath);
-  const merged: Record<string, unknown> = { ...(raw ?? {}) };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) delete merged[key];
-    else merged[key] = value;
-  }
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(merged, null, 2) + "\n", "utf-8");
+  await withFileTransaction(filePath, async () => {
+    const { raw } = await readJsonSettingsFile<Record<string, unknown>>(filePath);
+    const merged: Record<string, unknown> = { ...(raw ?? {}) };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete merged[key];
+      else merged[key] = value;
+    }
+    await writeJsonAtomically(filePath, merged);
+  });
   // Bust the merged-read cache so the freshly written value is visible to the
   // next `loadSettingSources` call (e.g. `/config set` → live reload), even if
   // the filesystem's mtime resolution is too coarse to register the change.

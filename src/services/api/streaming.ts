@@ -17,6 +17,8 @@ import {
 } from "./client.js";
 import { resolveProfile } from "./providers/profile.js";
 import { streamViaProvider, collectViaProvider } from "./providers/providerStream.js";
+import { randomUUID } from "node:crypto";
+import { PlatformServiceError } from "../../platform/gatewayClient.js";
 import type {
   AssistantMessage,
   ContentBlock,
@@ -53,6 +55,8 @@ import {
 // ─── Request Parameters ────────────────────────────────────────────
 
 export interface StreamRequestParams {
+  /** One logical request keeps its identity across retries and result recovery. */
+  platformRequestId?: string;
   messages: MessageParam[];
   model?: string;
   maxTokens?: number;
@@ -450,6 +454,7 @@ async function* streamOnce(
 export async function* streamMessage(
   params: StreamRequestParams,
 ): AsyncGenerator<StreamEvent, StreamResult> {
+  params = { ...params, platformRequestId: params.platformRequestId ?? randomUUID() };
   const maxRetries = getMaxRetries();
   const model = params.model ?? DEFAULT_MODEL;
   let attempt = 0;
@@ -477,6 +482,10 @@ export async function* streamMessage(
         yield value;
       }
     } catch (error) {
+      if (error instanceof PlatformServiceError) {
+        yield { type: "error", error, category: params.signal?.aborted ? "aborted" : "platform" };
+        return errorStreamResult();
+      }
       writeStreamDebug("stream_error", {
         attempt,
         message: error instanceof Error ? error.message : String(error),
@@ -547,6 +556,7 @@ export async function createMessage(
 ): Promise<{ content: ContentBlock[]; usage: Usage; stopReason: string }> {
   const profile = await resolveProfile(params.model ?? DEFAULT_MODEL);
   params.signal?.throwIfAborted();
+  if (profile.platformService) return collectViaProvider(profile, { ...params, platformRequestId: params.platformRequestId ?? randomUUID() });
 
   // Non-Anthropic profiles have no native non-streaming primitive here; drain
   // the translated provider stream into a single result, with the same

@@ -17,6 +17,8 @@ const previousCleanup = process.env.CCAGENT_RHINO_AUTO_CLEANUP;
 const previousKeep = process.env.CCAGENT_RHINO_KEEP_CAPTURES;
 process.env.CCAGENT_HOME = path.join(taskRoot, "user");
 await fs.mkdir(process.env.CCAGENT_HOME, { recursive: true });
+const { loginForTest } = await import("./helpers/accountFixture.js");
+const accountFixture = await loginForTest(process.env.CCAGENT_HOME);
 process.env.CCAGENT_RHINO_AUTO_CLEANUP = "1";
 process.env.CCAGENT_RHINO_KEEP_CAPTURES = "1";
 const testJobs: RhinoJobFiles[] = [];
@@ -187,6 +189,7 @@ try {
   } finally { globalThis.fetch = originalFetch; registerMcpTools([]); delete process.env.TEST_CLEANUP_KEY; }
   console.log(`\nRhino cleanup: ${passed} checks passed.`);
 } finally {
+  await accountFixture.close();
   // Test-created roots only. Explicit containment checks before recursive fixture removal.
   for (const files of testJobs) {
     const dir = path.resolve(files.root.path);

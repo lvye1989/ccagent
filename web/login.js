@@ -4,7 +4,7 @@ function message(value, error = false) { $('status').textContent = value; $('sta
 async function api(route, body) {
   const response = await fetch('/api/account/' + route, { method: body ? 'POST' : 'GET', credentials: 'same-origin', headers: { 'x-ccagent-web': '1', ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error || '暂时无法完成操作，请重试。');
+  if (!response.ok) { const error = new Error(value.error || '暂时无法完成操作，请重试。'); error.status = response.status; throw error; }
   return value;
 }
 function setMode(next) {
@@ -42,5 +42,5 @@ $('account-form').addEventListener('submit', async event => {
 });
 try {
   panels(await api('config'));
-  if (!$('account-panel').hidden) { try { await api('status'); window.location.replace('/'); } catch { /* A fresh browser must sign in separately. */ } }
+  if (!$('account-panel').hidden) { try { await api('status'); window.location.replace('/'); } catch (error) { if (![401, 403].includes(error.status)) message(error.message, true); } }
 } catch (error) { message(error.message, true); }
