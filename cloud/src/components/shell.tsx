@@ -14,6 +14,6 @@ export function Shell({ children, title, path, user, admin = false, canAdmin = f
     <div className="sidebar-bottom"><div className="user-label"><strong>{user.name || 'CCAGENT 用户'}</strong><span>{user.email}</span></div><Logout /></div></aside>
     <div className="main-column"><header className="topbar"><div className="breadcrumb">{admin ? '管理后台' : '账户中心'}<b>/ {title}</b></div><div className="inline-actions"><span className="tag success">{admin ? '管理员' : '已登录'}</span><span className="mobile-brand"><Logout /></span></div></header><main className="main-content">{children}</main></div></div>;
 }
-export function PageHeader({ title, description, children }: { title: string; description: string; children?: React.ReactNode }) {
-  return <div className="page-header"><div><div className="section-label">CCAGENT / {title}</div><h1>{title}</h1><p>{description}</p></div>{children && <div className="inline-actions">{children}</div>}</div>;
+export function PageHeader({ title, description, children }: { title: string; description?: string; children?: React.ReactNode }) {
+  return <div className="page-header"><div><div className="section-label">CCAGENT / {title}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{children && <div className="inline-actions">{children}</div>}</div>;
 }

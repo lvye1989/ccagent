@@ -35,7 +35,7 @@ async function stopServer() {
   server.send?.("ccagent:shutdown", () => {}); const timeout = setTimeout(() => server?.kill(), 6000); await closed; clearTimeout(timeout);
 }
 async function checkPackagedApps(origin: string) {
-  for (const asset of ["/app-catalog.js", "/app-icons.js", "/promotion.js", "/promotion.css"]) {
+  for (const asset of ["/account-center.js", "/app-catalog.js", "/app-icons.js", "/promotion.js", "/promotion.css"]) {
     const response = await authorizedFetch(origin + asset);
     assert.equal(response.status, 200, asset);
     assert.match(response.headers.get("content-type") ?? "", asset.endsWith(".css") ? /text\/css/ : /(?:text|application)\/javascript/, asset);

@@ -14,6 +14,9 @@ globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 globalThis.setInterval = () => 0;
 globalThis.EventSource = class { constructor() { globalThis.lastEventSource = this; } close() {} };
 const calls = [], models = [{ id: "fixture", label: "Fixture", model: "fixture", available: true }];
+const accountPopups = [];
+let accountGesture = false;
+window.open = (url, name) => { const popup = { url, name, inGesture: accountGesture, closed: false, sent: [], postMessage(value, targetOrigin) { this.sent.push({ value, targetOrigin }); } }; accountPopups.push(popup); return popup; };
 const agent = { name: "qa", description: "QA Agent", source: "project", editable: true, enabled: true, prompt: "Check evidence" };
 const skill = { name: "test-skill", description: "Skill", source: "project", enabled: true };
 const teams = [{ id: "qa-team", name: "QA Team", description: "Evidence", enabled: true, roles: [{ name: "reviewer", agentType: "qa", prompt: "Check facts" }] }];
@@ -79,6 +82,7 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === "/api/plugins") data = { installed: [], available: [], marketplaces: [] };
   else if (route === "/api/apps") data = { apps: [] };
   else if (route === "/api/account/status") data = { user: { id: "offline-ui-user" } };
+  else if (route === '/api/account/bridge') data = { ticket: 'T'.repeat(43), expiresAt: new Date(Date.now() + 30000).toISOString(), userId: 'offline-ui-user', origin: 'https://ccagent.example.invalid' };
   else if (route === "/api/agents") data = { agents: [agent] };
   else if (route === "/api/skills") data = { globallyEnabled: true, skills: [skill] };
   else if (route === "/api/skills/state") { skill.enabled = payload.state === "open"; data = {}; }
@@ -197,7 +201,11 @@ try {
   assert(calls.some((c) => c.route === "/api/customize/local-skill" && c.payload.path === "C:\\offline-skill"));
 
   await click('[data-view="settings"]'); assert(!$("settings-view").classList.contains("hidden"));
-  await click('[data-setting="models"]'); await click(".settings-primary");
+  await click('[data-setting="models"]');
+  assert.equal(document.querySelector('.settings-primary').textContent, '＋ 接入大模型');
+  assert(!$('settings-content').textContent.includes('连接测试会发送简短消息'));
+  await click(".settings-primary");
+  assert.equal($('editor-title').textContent, '接入大模型');
   $("edit-model-id").value = "new-ui-model"; $("edit-model-name").value = "new-model"; $("edit-model-url").value = "https://example.test/v1"; $("edit-model-key").value = "fake-ui-key";
   await click(action("保存模型")); assert([...$("home-model").options].some((o) => o.value === "new-ui-model"), "Saved model updates home selector");
   await click('[data-setting="execution"]'); $("settings-mode").value = "auto";
@@ -205,24 +213,50 @@ try {
   assert(calls.some((c) => c.route === "/api/customize/settings" && c.payload?.mode === "auto"));
 
   await click('[data-setting="official"]');
+  assert.equal(accountPopups.length, 0, 'Rendering official services never opens an account window');
+  assert(!$('settings-content').textContent.includes('账户服务：'));
+  assert(!$('settings-content').textContent.includes('验证 Key 和刷新目录不会调用收费模型'));
+  assert(!$('settings-content').textContent.includes('请先验证平台 Key'));
+  assert(!$('settings-content').textContent.includes('收费按公开成本'));
+  assert(!$('settings-content').textContent.includes('开启前请核对下方'));
+  assert.equal($('settings-content').querySelector('a[href$="/account/usage"]'), null);
+  assert.equal($('settings-content').querySelector('a[href$="/account/keys"]').textContent, '创建管理平台APIkey');
+  for (const [route, type, extra] of [['/account/billing', 'click', {}], ['/account/keys', 'auxclick', { button: 1 }]]) {
+    const link = [...$('settings-content').querySelectorAll('a')].find(item => new URL(item.href).pathname === route);
+    assert.equal(link.href, 'https://ccagent.example.invalid' + route, 'Account links keep their static destinations');
+    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, ...extra });
+    accountGesture = true; link.dispatchEvent(event); accountGesture = false;
+    assert.equal(event.defaultPrevented, true); const popup = accountPopups.at(-1); assert.equal(popup.inGesture, true);
+    const channel = new URL(popup.url).searchParams.get('channel'); assert.equal(new URL(popup.url).searchParams.get('target'), route);
+    window.dispatchEvent(new window.MessageEvent('message', { origin: 'https://ccagent.example.invalid', source: popup, data: { type: 'ccagent:account-bridge-ready', channel, state: 'offline.payload.signature' } })); await settle();
+    assert.equal(popup.sent.length, 1); assert.equal(popup.sent[0].targetOrigin, 'https://ccagent.example.invalid');
+    window.dispatchEvent(new window.MessageEvent('message', { origin: 'https://ccagent.example.invalid', source: popup, data: { type: 'ccagent:account-bridge-complete', channel } })); await settle();
+  }
   document.querySelector('[data-setting="official"]').click(); document.querySelector('[data-setting="official"]').click(); await settle();
-  assert.equal(document.querySelectorAll('#official-fallback').length, 1, 'Concurrent settings renders never append duplicate forms or duplicate ids');
-  assert($('official-auxiliary').disabled && $('official-default').disabled && $('official-fallback').disabled, 'A first Key verification cannot silently enable services fallback or replace the chat default');
+  assert.equal(document.querySelectorAll('#official-api-key').length, 1, 'Concurrent settings renders never append duplicate forms or duplicate ids');
+  assert.equal($('official-fallback'), null, 'Removed fallback authorization is not rendered');
+  assert($('official-auxiliary').disabled && $('official-default').disabled, 'A first Key verification cannot silently enable services or replace the chat default');
+  assert.equal($('official-api-key').closest('details').open, false, 'Manual Key entry is optional and collapsed');
+  assert(!calls.some(call => call.route === '/api/customize/official-services' && call.payload), 'Rendering never creates or connects a Key');
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload, { op: 'connect', fallbackEnabled: false });
+  officialConfigured = false; await click('[data-setting="official"]');
   $('official-api-key').value = 'ccagent_' + 'x'.repeat(43);
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   const firstVerification = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
-  assert.deepEqual(Object.keys(firstVerification), ['apiKey'], 'First verification leaves role initialization to the authenticated catalog');
+  assert.deepEqual(Object.keys(firstVerification), ['apiKey', 'fallbackEnabled'], 'First verification leaves role initialization to the authenticated catalog');
+  assert.equal(firstVerification.fallbackEnabled, false);
   assert.equal($('official-role-main').value, defaultOfficialRoute.id); assert.equal($('official-auxiliary').checked, false); assert.equal($('official-default').checked, false);
   $('official-role-main').value = '';
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload.roles, {});
   assert.equal($('official-role-main').value, '', 'A saved empty selection is kept on reload');
-  assert.equal($('official-fallback').checked, false); $('official-fallback').checked = true;
+  officialFallback = true; await click('[data-setting="official"]');
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   const consent = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
-  assert.equal(consent.fallbackEnabled, true); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback').checked, true);
-  assert($('settings-content').textContent.includes('管理员备用')); assert($('settings-content').textContent.includes('备用服务测试'));
-  console.log('Official service DOM: first verification uses catalog recommendations, requires explicit enable/default choices and preserves cleared selections.');
+  assert.equal(consent.fallbackEnabled, false); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback'), null);
+  assert(!$('settings-content').textContent.includes('需单独开启备用授权')); assert($('settings-content').textContent.includes('备用服务测试'));
+  console.log('Official service DOM: streamlined links/copy, explicit account connection, optional manual Key, fallback disabled on save, catalog recommendations and cleared selections passed.');
 
   const originalBackupPricing = backupOfficialRoute.pricing;
   backupOfficialRoute.pricing = { ...originalBackupPricing, definition: { tariff: { kind: 'qwen-input-tiers', defaultThinking: true, maxThinkingTokens: 32768 },

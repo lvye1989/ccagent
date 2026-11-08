@@ -242,6 +242,22 @@ export async function runWebServer(args: string[]): Promise<void> {
           } finally { loginBusy.delete(lockKey); if (action === "login" && !signedIn && !native) locals.delete(local.id); }
         }
         const local = await localClient(req);
+        if (req.method === "POST" && route === "/api/account/bridge") {
+          const revision = local.revision;
+          const unchanged = () => !local.closing && !local.loggingOut && !loginBusy.has(local.id)
+            && local.revision === revision && (!locals.has(local.id) || locals.get(local.id) === local);
+          if (!unchanged()) throw new AccountError("当前登录状态已改变，请重新登录。", "account_changed", 401);
+          const body = await readBody(req);
+          if (typeof body.state !== "string") throw new AccountError("账户中心授权请求无效。", "invalid_input", 400);
+          const session = await local.client.requireSession();
+          if (!unchanged()) throw new AccountError("当前账户已改变，请重新点击入口。", "account_changed", 401);
+          // Restore a browser's encrypted session after a server restart without requiring a worker launch.
+          locals.set(local.id, local);
+          const ticket = await local.client.issueAccountBridge(body.state, session.user.id);
+          const current = await local.client.requireSession();
+          if (!unchanged() || current.user.id !== session.user.id) throw new AccountError("当前账户已改变，请重新点击入口。", "account_changed", 401);
+          return json(res, 200, { ...ticket, origin: local.client.origin, userId: session.user.id });
+        }
         if (req.method === "POST" && route === "/api/account/logout") {
           local.loggingOut = true;
           try {

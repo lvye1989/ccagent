@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
-import { requirePlatformScope, getPlatformAccountClient } from "./account.js";
-import type { PlatformAccountClient } from "./accountClient.js";
+import { lstat, readFile, rm } from "node:fs/promises";
+import { requirePlatformScope, getPlatformAccountClient, getPlatformSessionFile } from "./account.js";
+import { AccountError, type PlatformAccountClient } from "./accountClient.js";
 import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
 import { platformRequest, PlatformTransportError } from "./transport.js";
 import { currentPlatformTaskId } from "./taskScope.js";
@@ -49,7 +49,8 @@ function catalogConsent(routes: OfficialServiceRoute[]) {
   return digest(JSON.stringify(canonical([...routes].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map(route => ({ id: route.id, service: route.service, protocol: route.protocol,
     pricing: route.pricing, fallbackRouteId: route.limits.fallbackRouteId, fallbackEnabled: route.limits.fallbackEnabled })))));
 }
-export async function saveOfficialServices(input: { apiKey?: unknown; roles?: unknown; auxiliaryEnabled?: unknown; fallbackEnabled?: unknown; catalogRevision?: unknown }): Promise<void> {
+type ServiceSaveGuard = { assertCurrent(): Promise<void>; expectedRevision: string | null };
+export async function saveOfficialServices(input: { apiKey?: unknown; roles?: unknown; auxiliaryEnabled?: unknown; fallbackEnabled?: unknown; catalogRevision?: unknown }, guard?: ServiceSaveGuard): Promise<void> {
   const session = await requirePlatformScope(0), account = await getPlatformAccountClient();
   const old = await readServiceBinding().catch(error => { if (typeof input.apiKey === "string" && input.apiKey.trim()) return null; throw error; });
   const apiKey = typeof input.apiKey === "string" && input.apiKey.trim() ? input.apiKey.trim() : old?.credential.apiKey;
@@ -66,8 +67,13 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
   if (input.auxiliaryEnabled !== undefined && typeof input.auxiliaryEnabled !== "boolean") throw new Error("请选择是否启用官方辅助服务。");
   if (input.fallbackEnabled !== undefined && typeof input.fallbackEnabled !== 'boolean') throw new Error('请选择是否允许管理员备用服务。');
   const store = serviceCredentialStore(), paths = servicePaths();
+  await guard?.assertCurrent();
   await withFileTransaction(paths.state, async () => {
+    await guard?.assertCurrent();
     const current = await readServiceBinding().catch(error => { if (typeof input.apiKey === "string" && input.apiKey.trim()) return null; throw error; });
+    if (guard && (await readServiceConfiguration())?.revision !== (guard.expectedRevision ?? undefined)) {
+      throw new PlatformServiceError("其他窗口已更新官方服务，请刷新后重新连接。", "SERVICE_CONFIGURATION_CHANGED", 409);
+    }
     if (!(typeof input.apiKey === "string" && input.apiKey.trim()) && current?.credential.apiKey !== apiKey) {
       throw new PlatformServiceError("其他窗口已更新平台 Key，请重新载入后再保存。", "SERVICE_CONFIGURATION_CHANGED");
     }
@@ -85,10 +91,86 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
     const configuration = serviceConfigurationSchema.parse({ version: 1, revision: randomUUID(), userId: session.user.id, origin: account.origin, routes, roles,
       auxiliaryEnabled: input.auxiliaryEnabled ?? current?.configuration.auxiliaryEnabled ?? false, fallbackEnabled, updatedAt: new Date().toISOString() });
     const before = await store.read();
-    await store.write({ apiKey, userId: session.user.id, origin: account.origin, revision: configuration.revision });
-    try { await writeJsonAtomically(paths.state, configuration); }
-    catch (error) { if (before) await store.write(before); else await store.clear(); throw error; }
+    const beforeState = await readFile(paths.state, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    await guard?.assertCurrent();
+    try {
+      await store.write({ apiKey, userId: session.user.id, origin: account.origin, revision: configuration.revision });
+      await guard?.assertCurrent();
+      await writeJsonAtomically(paths.state, configuration);
+      await guard?.assertCurrent();
+    } catch (error) {
+      if (before) await store.write(before); else await store.clear();
+      if (beforeState !== null) await writeJsonAtomically(paths.state, JSON.parse(beforeState));
+      else await rm(paths.state, { force: true });
+      throw error;
+    }
   });
+}
+
+type ConnectionAttempt = { version: 1; userId: string; origin: string; state: "pending" | "unknown" | "failed" | "complete"; completedAt?: number };
+
+/** Explicit POST only. A separate lock serializes callers without nesting the configuration lock. */
+export async function connectOfficialServices() {
+  const beganAt = Date.now();
+  try {
+    const session = await requirePlatformScope(0), account = await getPlatformAccountClient();
+    const source = getPlatformSessionFile(), paths = servicePaths(), connectionFile = paths.state + ".connect";
+    const keySession = await account.applicationKeySession(session.user.id);
+    const assertCurrent = async () => {
+      await keySession.assertCurrent();
+      if (getPlatformSessionFile() !== source || servicePaths().state !== paths.state || (await getPlatformAccountClient()).origin !== account.origin
+        || (await requirePlatformScope(0)).user.id !== session.user.id) throw new AccountError("当前账户或服务地址已改变，请重新连接官方服务。", "account_changed", 401);
+      await keySession.assertCurrent();
+    };
+    return await withFileTransaction(connectionFile, async () => {
+      await assertCurrent();
+      const binding = await readServiceBinding();
+      const expectedRevision = (await readServiceConfiguration())?.revision ?? null;
+      if (binding && binding.configuration.userId === session.user.id && binding.configuration.origin === account.origin) {
+        try {
+          await saveOfficialServices({ fallbackEnabled: false }, { assertCurrent, expectedRevision });
+          const view = await officialServicesView(); await assertCurrent(); return view;
+        } catch (error) {
+          // Only an authoritative Key rejection permits replacement. Network/account errors do not.
+          if (!(error instanceof PlatformServiceError) || !["INVALID_API_KEY", "API_KEY_REQUIRED"].includes(error.code)) throw error;
+        }
+      }
+      let previous: ConnectionAttempt | null = null;
+      const info = await lstat(connectionFile).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+      if (info) {
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) throw new Error("Invalid connection state");
+        const value = JSON.parse(await readFile(connectionFile, "utf8")) as ConnectionAttempt;
+        if (value.version !== 1 || typeof value.userId !== "string" || typeof value.origin !== "string" || !["pending", "unknown", "failed", "complete"].includes(value.state)) throw new Error("Invalid connection state");
+        previous = value;
+      }
+      if (previous?.userId === session.user.id && previous.origin === account.origin && (["pending", "unknown"].includes(previous.state)
+        || previous.state === "failed" && (!Number.isFinite(previous.completedAt) || previous.completedAt! >= beganAt))) {
+        throw new PlatformServiceError("上一次应用 Key 关联尚未完成或结果待核对，请先查看用户中心的 Key，勿重复创建；也可手动关联已有 Key。", "APPLICATION_KEY_REVIEW_REQUIRED", 409);
+      }
+      const attempt = (state: ConnectionAttempt["state"]): ConnectionAttempt => ({ version: 1, userId: session.user.id, origin: account.origin, state,
+        ...(state === "pending" ? {} : { completedAt: Date.now() }) });
+      await writeJsonAtomically(connectionFile, attempt("pending"));
+      let created: { id: string; secret: string } | undefined;
+      try {
+        await assertCurrent();
+        created = await keySession.create();
+        await assertCurrent();
+        await saveOfficialServices({ apiKey: created.secret, fallbackEnabled: false }, { assertCurrent, expectedRevision });
+      } catch (error) {
+        let compensated = false;
+        if (created) { try { await keySession.revoke(created.id); compensated = true; } catch { /* Original-session cleanup is best effort, never retried blindly. */ } }
+        const unknown = created ? !compensated : error instanceof AccountError && error.code === "application_key_result_unknown";
+        await writeJsonAtomically(connectionFile, attempt(unknown ? "unknown" : "failed"));
+        if (unknown) throw new PlatformServiceError("应用 Key 关联未完成，创建或撤销结果待核对，请在用户中心检查后手动关联，勿重复创建。", "APPLICATION_KEY_REVIEW_REQUIRED", 503);
+        throw error;
+      }
+      await writeJsonAtomically(connectionFile, attempt("complete"));
+      const view = await officialServicesView(); await assertCurrent(); return view;
+    });
+  } catch (error) {
+    if (error instanceof AccountError || error instanceof PlatformServiceError) throw error;
+    throw new PlatformServiceError("官方服务关联暂未完成，请稍后重试或在用户中心手动管理 Key。", "APPLICATION_KEY_CONNECT_FAILED", 503);
+  }
 }
 
 export async function forgetOfficialKey(): Promise<void> {

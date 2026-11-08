@@ -7,6 +7,7 @@ import * as schema from './db/schema';
 import { authEnvironment } from './env';
 import { accountMailDelivery, deliverAccountMail, requireAccountMailConfiguration, type MailTransport } from './mail';
 import { HttpError } from './http';
+import { accountBridgePlugin } from './account-bridge';
 
 export function createAuthentication(options: { db: ReturnType<typeof database>['db']; origin: string; secret: string; deliverMail: MailTransport }) {
   const mail = accountMailDelivery(options.deliverMail,
@@ -24,7 +25,7 @@ export function createAuthentication(options: { db: ReturnType<typeof database>[
         '/request-password-reset': { window: 60, max: 5 }, '/send-verification-email': { window: 60, max: 5 } } },
     advanced: { cookiePrefix: 'ccagent', useSecureCookies: options.origin.startsWith('https://'),
       ipAddress: { ipAddressHeaders: ['x-vercel-forwarded-for'] } },
-    plugins: [admin({ defaultRole: 'user', bannedUserMessage: '账户已被禁用，请联系管理员。' })],
+    plugins: [admin({ defaultRole: 'user', bannedUserMessage: '账户已被禁用，请联系管理员。' }), accountBridgePlugin()],
     // Query errors may contain password hashes or session tokens; never log raw adapter errors.
     logger: { log: level => { if (level === 'error') console.error('AUTH_REQUEST_FAILED'); } },
   });

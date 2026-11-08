@@ -6,7 +6,6 @@ import { webAccount } from '@/core/web-account';
 import { database } from '@/core/db';
 import { reservations } from '@/core/db/schema';
 import { pagination } from '@/core/http';
-import { CallStatusPanel } from '@/components/call-status-panel';
 
 export const dynamic = 'force-dynamic';
 export default async function Usage({ searchParams }: { searchParams: Promise<{ page?: string; pageSize?: string; q?: string }> }) {
@@ -18,5 +17,5 @@ export default async function Usage({ searchParams }: { searchParams: Promise<{ 
     charged: reservations.charged, authorized: reservations.authorized, usage: reservations.usage, created_at: reservations.createdAt }).from(reservations).where(where)
     .orderBy(sql`${reservations.createdAt} desc`, reservations.id).limit(paging.pageSize).offset(paging.offset);
   const [total] = await database().db.select({ count: sql<number>`count(*)::integer` }).from(reservations).where(where);
-  return <Shell user={current.user} title="使用明细" path="/account/usage" canAdmin={current.permissions.includes('admin.read')}><PageHeader title="使用明细" description="逐笔查看调用、任务归属与结算费用。金额以整数微元展示，1 元 = 1,000,000 微元。" /><CallStatusPanel recentCalls={rows.map(row => ({ requestId: row.request_id, taskId: row.task_id }))} /><section className="panel"><form className="filters"><input name="q" maxLength={120} placeholder="按任务编号搜索" defaultValue={q} aria-label="任务编号" /><button className="button secondary">查询</button></form><DataTable rows={rows} empty="服务使用后的调用记录会显示在这里。" /><Pager path="/account/usage" {...paging} total={total.count} q={q} /></section></Shell>;
+  return <Shell user={current.user} title="使用明细" path="/account/usage" canAdmin={current.permissions.includes('admin.read')}><PageHeader title="使用明细" /><section className="panel"><form className="filters"><input name="q" maxLength={120} placeholder="按任务编号搜索" defaultValue={q} aria-label="任务编号" /><button className="button secondary">查询</button></form><DataTable rows={rows} empty="服务使用后的调用记录会显示在这里。" /><Pager path="/account/usage" {...paging} total={total.count} q={q} /></section></Shell>;
 }

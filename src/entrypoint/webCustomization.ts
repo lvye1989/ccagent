@@ -17,7 +17,7 @@ import { getActiveTeam } from "../state/teamContext.js";
 import { splitFrontmatter } from "../services/skills/parseFrontmatter.js";
 import { stringify as yamlStringify } from "yaml";
 import { isAgentTeamsEnabled } from "../utils/agentTeamsEnabled.js";
-import { forgetOfficialKey, officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
+import { connectOfficialServices, forgetOfficialKey, officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
 import { importLegacyData, previewLegacyData } from "../platform/legacyData.js";
 import { getPlatformHome } from "../platform/account.js";
 
@@ -239,6 +239,7 @@ export async function handleCustomization(resource: string, method: string, body
   if (resource === "legacy-preview") return previewLegacyData(body.source);
   if (resource === "legacy-import") return importLegacyData(body);
   if (resource === "official-services") {
+    if (body.op === "connect") return connectOfficialServices();
     if (body.op === "forget") await forgetOfficialKey();
     else await saveOfficialServices(body);
     if (body.makeDefault === true && typeof (body.roles as Record<string, unknown> | undefined)?.main === "string") {

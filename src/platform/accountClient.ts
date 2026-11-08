@@ -6,6 +6,13 @@ import { platformRequest } from "./transport.js";
 export interface AccountUser { id: string; email: string; name: string }
 export interface AccountSession { user: AccountUser; expiresAt: string }
 export interface StoredAccountSession extends AccountSession { origin: string; cookie: string }
+export interface AccountBridgeTicket { ticket: string; expiresAt: string }
+/** Native-only capability. Its captured session and newly issued secret never enter browser responses. */
+export interface ApplicationKeySession {
+  assertCurrent(): Promise<void>;
+  create(): Promise<{ id: string; secret: string }>;
+  revoke(id: string): Promise<void>;
+}
 
 export class AccountError extends Error {
   constructor(message: string, readonly code: string, readonly status = 0) { super(message); this.name = "AccountError"; }
@@ -74,13 +81,13 @@ const safeAccountErrors = new Map<string, readonly [string, string, number]>([
 ]);
 
 /** Dedicated HTTPS transport always verifies TLS, even with an insecure inherited Node environment. */
-function requestJson(origin: string, route: string, body?: Record<string, unknown>, cookie?: string): Promise<JsonReply> {
+function requestJson(origin: string, route: string, body?: Record<string, unknown>, cookie?: string, method?: "POST" | "DELETE"): Promise<JsonReply> {
   const url = new URL(route, origin);
   const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   return new Promise((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http;
     const request = transport.request(url, {
-      method: bytes ? "POST" : "GET", rejectUnauthorized: true,
+      method: method ?? (bytes ? "POST" : "GET"), rejectUnauthorized: true,
       ...(url.hostname === "localhost" && url.protocol === "http:" ? { hostname: "127.0.0.1" } : {}),
       headers: { accept: "application/json", origin, "cache-control": "no-store", ...(cookie ? { cookie } : {}),
         ...(bytes ? { "content-type": "application/json", "content-length": bytes.length } : {}) },
@@ -145,6 +152,62 @@ export class PlatformAccountClient {
   readonly origin: string;
   constructor(origin: string, private readonly store: SecureCredentialStore<StoredAccountSession>) {
     this.origin = normalizePlatformOrigin(origin);
+  }
+
+  /** Fixed-purpose device Key management; never widens the generic service route allowlist. */
+  async applicationKeySession(expectedUserId: string): Promise<ApplicationKeySession> {
+    const stored = await this.store.read();
+    const valid = (value: StoredAccountSession | null): value is StoredAccountSession => Boolean(value && value.user?.id === expectedUserId
+      && value.origin === this.origin && validCookie(value.cookie) && Number.isFinite(Date.parse(value.expiresAt)) && Date.parse(value.expiresAt) > Date.now());
+    if (!valid(stored)) throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    const assertCurrent = async () => {
+      const current = await this.store.read();
+      if (!valid(current) || current.cookie !== stored.cookie) throw new AccountError("当前账户已改变，请重新连接官方服务。", "account_changed", 401);
+    };
+    const revoke = async (id: string) => {
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new AccountError("应用 Key 标识无效。", "invalid_response", 502);
+      // Compensation deliberately uses the original account, even if the local session changed.
+      checked(await requestJson(this.origin, "/api/account/keys", { id }, stored.cookie, "DELETE"));
+    };
+    return { assertCurrent, revoke, create: async () => {
+      await assertCurrent();
+      let reply: JsonReply;
+      try { reply = await requestJson(this.origin, "/api/account/keys", { name: "CCAGENT 应用专用 Key" }, stored.cookie, "POST"); }
+      catch { throw new AccountError("应用 Key 创建结果尚未确认，请先在用户中心核对，勿重复创建；也可手动关联已有 Key。", "application_key_result_unknown", 503); }
+      if (reply.status >= 500) throw new AccountError("应用 Key 创建结果尚未确认，请先在用户中心核对，勿重复创建；也可手动关联已有 Key。", "application_key_result_unknown", 503);
+      const result = checked(reply) as { key?: { id?: unknown; prefix?: unknown }; secret?: unknown } | null;
+      const id = typeof result?.key?.id === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(result.key.id) ? result.key.id : null;
+      if (!id || typeof result?.secret !== "string" || !/^ccagent_[A-Za-z0-9_-]{43}$/.test(result.secret) || result.key?.prefix !== result.secret.slice(0, 16)) {
+        if (id) await revoke(id).catch(() => {});
+        throw new AccountError("应用 Key 创建响应未能确认，请先在用户中心核对，再手动关联。", "application_key_result_unknown", 502);
+      }
+      return { id, secret: result.secret };
+    } };
+  }
+
+  /** Exchange a browser-bound state using the native credential, never expose that credential. */
+  async issueAccountBridge(state: string, expectedUserId: string): Promise<AccountBridgeTicket> {
+    if (typeof state !== "string" || state.length > 8192 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state)) {
+      throw new AccountError("账户中心授权请求无效，请重新点击入口。", "invalid_input", 400);
+    }
+    const stored = await this.store.read();
+    if (!stored || stored.user.id !== expectedUserId || stored.origin !== this.origin || !validCookie(stored.cookie)
+      || !Number.isFinite(Date.parse(stored.expiresAt)) || Date.parse(stored.expiresAt) <= Date.now()) {
+      throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    }
+    const value = checked(await requestJson(this.origin, "/api/account/bridge/issue", { state }, stored.cookie));
+    const reply = value as Partial<AccountBridgeTicket> | null;
+    const expires = typeof reply?.expiresAt === "string" ? Date.parse(reply.expiresAt) : NaN;
+    if (typeof reply?.ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(reply.ticket)
+      || !Number.isFinite(expires) || expires <= Date.now() || expires > Date.now() + 120_000) {
+      throw new AccountError("账户中心授权响应无效，请重新点击入口。", "invalid_response", 502);
+    }
+    // Logout or account switching while the exchange is in flight must discard the ticket.
+    const current = await this.store.read();
+    if (current?.origin !== stored.origin || current.user.id !== expectedUserId || current.cookie !== stored.cookie) {
+      throw new AccountError("当前账户已改变，请重新点击入口。", "account_changed", 401);
+    }
+    return { ticket: reply.ticket, expiresAt: reply.expiresAt! };
   }
 
   /** Server-side only: a platform Key is always accompanied by this verified email session. */

@@ -1,3 +1,5 @@
+import { openAccountCenter } from './account-center.js';
+
 const $ = (id) => document.getElementById(id);
 function el(tag, cls = "", value = "") { const n = document.createElement(tag); n.className = cls; n.textContent = value; return n; }
 function button(label, action, cls = "") { const n = el("button", cls, label); n.type = "button"; n.addEventListener("click", action); return n; }
@@ -111,7 +113,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   }
 
   async function modelEditor(profile) {
-    const body = openDialog(profile ? `编辑 ${profile.id}` : "接入 LLM", "保存后模型会出现在首页与对话的模型列表。密钥不会回显到浏览器。");
+    const body = openDialog(profile ? `编辑 ${profile.id}` : "接入大模型", "保存后模型会出现在首页与对话的模型列表。密钥不会回显到浏览器。");
     const grid = el("div", "editor-grid"); body.append(grid);
     const id = field(grid, "配置名称", "edit-model-id", profile?.id, { disabled: Boolean(profile), placeholder: "my-model" });
     const protocol = field(grid, "API 协议", "edit-model-protocol", profile?.protocol || "openai-chat", { choices: [["openai-chat", "OpenAI 兼容 Chat Completions"], ["openai-responses", "OpenAI 兼容 Responses"], ["anthropic", "Anthropic 兼容 Messages"], ["gemini", "Gemini"]] });
@@ -148,47 +150,48 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       if (selectedSettings === "official") {
         const service = await request("official-services");
         const form = el("form", "settings-form");
-        form.append(el("p", "editor-hint", `账户服务：${service.origin}`));
         const money = value => { try { const amount = BigInt(value); return `${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, "0").slice(0, 4)}`; } catch { return "—"; } };
         if (service.wallet) form.append(el("p", "editor-hint", `余额 ¥${money(service.wallet.available ?? service.wallet.balance)} · 冻结 ¥${money(service.wallet.frozen)}`));
         const links = el("div", "settings-row-actions");
-        for (const [label, route] of [["余额与充值", "/account/billing"], ["创建或管理平台 Key", "/account/keys"], ["调用与费用明细", "/account/usage"]]) {
+        for (const [label, route] of [["余额与充值", "/account/billing"], ["创建管理平台APIkey", "/account/keys"]]) {
           const link = el("a", "settings-secondary", label); link.href = new URL(route, service.origin).href; link.target = "_blank"; link.rel = "noopener noreferrer"; links.append(link);
+          const open = event => {
+            if (event.type === 'auxclick' && event.button !== 1) return;
+            event.preventDefault();
+            void openAccountCenter({ origin: service.origin, target: route }).catch(error => toast(error.message));
+          };
+          link.addEventListener('click', open); link.addEventListener('auxclick', open);
         }
         form.append(links);
-        const key = field(form, "个人 CCAGENT API Key", "official-api-key", "", { type: "password", placeholder: service.configured ? `${service.keyPrefix}… 已验证，留空保留` : "从用户中心创建后粘贴；不填写上游供应商 Key" });
-        form.append(el("p", "editor-hint", "验证 Key 和刷新目录不会调用收费模型。平台 Key 在 Windows 按当前账户加密保存。"));
+        if (!service.configured) form.append(el("p", "editor-hint", "首次连接会创建应用专用 API Key。"));
+        const keyOptions = el("details", "editor-advanced");
+        keyOptions.append(el("summary", "", "使用已有 API Key"));
+        const key = field(keyOptions, "平台 API Key", "official-api-key", "", { type: "password", placeholder: service.configured ? "已连接，留空保留" : "粘贴已有的平台 API Key" });
+        form.append(keyOptions);
         const selections = {};
         if (service.routes.length) {
           for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"]]) {
             selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`])] });
           }
-        } else form.append(el("p", "editor-hint", service.configured ? "暂无已开放且价格配置完整的服务，请联系管理员。" : "请先验证平台 Key，再选择官方服务。"));
+        } else if (service.configured) form.append(el("p", "editor-hint", "暂无已开放且价格配置完整的服务，请联系管理员。"));
         const auxiliary = field(form, "读图、决策、搜索和语音使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
         const makeDefault = field(form, "将所选官方主模型设为新对话的默认模型", "official-default", false, { type: "checkbox" });
-        const fallback = field(form, "允许使用已确认价格的管理员备用路由", "official-fallback", service.fallbackEnabled, { type: "checkbox" });
-        auxiliary.disabled = makeDefault.disabled = fallback.disabled = !service.configured;
-        form.append(el('p', 'editor-hint', '开启前请核对下方主、备用价格。备用按自身实际用量与公开成本 × 1.3 结算，冻结额度取两者较高上限；目录变化后须重新确认。设置影响新调用，已发出调用继续按原授权核对。'));
-        form.append(el("p", "editor-hint", "收费按公开成本 × 实际用量 × 1.3 计算；美元成本按平台结算汇率换算。完整价格及生效版本见下方服务目录。"));
-        const save = el("button", "settings-primary", service.configured ? "保存选择并刷新目录" : "验证平台 Key"); save.type = "submit"; form.append(save);
+        auxiliary.disabled = makeDefault.disabled = !service.configured;
+        const save = el("button", "settings-primary", service.configured ? "保存选择并刷新目录" : "连接官方服务"); save.type = "submit"; form.append(save);
         form.addEventListener("submit", async event => {
           event.preventDefault(); save.disabled = true;
           try {
             const roles = Object.fromEntries(Object.entries(selections).filter(([, input]) => input.value).map(([role, input]) => [role, input.value]));
-            await request("official-services", { apiKey: key.value, ...(service.configured ? { roles, auxiliaryEnabled: auxiliary.checked, makeDefault: makeDefault.checked,
-              fallbackEnabled: fallback.checked, catalogRevision: service.catalogRevision } : {}) });
+            await request("official-services", { ...(!service.configured && !key.value.trim() ? { op: "connect" } : { apiKey: key.value }), ...(service.configured ? { roles, auxiliaryEnabled: auxiliary.checked, makeDefault: makeDefault.checked,
+              fallbackEnabled: false, catalogRevision: service.catalogRevision } : { fallbackEnabled: false }) });
             key.value = ""; await changed("models"); await renderSettings(); toast("官方服务配置已保存");
           } catch (error) { toast(error.message); } finally { save.disabled = false; }
         });
-        if (service.configured) form.append(button("刷新服务目录", async () => { await request("official-services", {}); await changed("models"); await renderSettings(); toast("目录已刷新，停止提供的服务已取消选择"); }, "settings-secondary"), button("移除 Key 并停用官方辅助服务", async () => { await request("official-services", { op: "forget" }); key.value = ""; await changed("models"); await renderSettings(); toast("本机 Key 已移除，云端 Key 可在用户中心撤销"); }, "settings-secondary"));
+        if (service.configured) form.append(button("刷新服务目录", async () => { await request("official-services", { fallbackEnabled: false }); await changed("models"); await renderSettings(); toast("目录已刷新，停止提供的服务已取消选择"); }, "settings-secondary"), button("移除 Key 并停用官方辅助服务", async () => { await request("official-services", { op: "forget" }); key.value = ""; await changed("models"); await renderSettings(); toast("本机 Key 已移除，云端 Key 可在用户中心撤销"); }, "settings-secondary"));
         root.append(form);
         for (const route of service.routes) {
           const row = el("article", "settings-row"), copy = el("div");
           copy.append(el("strong", "", route.name), el("p", "", `${route.id} · 价格 v${route.pricing.version}`));
-          if (route.limits?.fallbackEnabled) {
-            const backup = service.routes.find(item => item.id === route.limits.fallbackRouteId && item.service === route.service && item.protocol === route.protocol);
-            copy.append(el('p', 'editor-hint', backup ? `管理员备用：${backup.name}（${backup.id}），价格 v${backup.pricing.version}，完整价格见该服务条目。需单独开启备用授权。` : '管理员配置的备用当前不可用，请刷新目录核对。'));
-          }
           const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", search_credits: "搜索 credit" };
           const policy = route.pricing.definition.tariff;
           if (policy.kind === "qwen-input-tiers") copy.append(el("p", "editor-hint", `按整次输入总量（含缓存）选择档位；默认${policy.defaultThinking ? "开启" : "关闭"}思考；预算计入最大思考长度 ${policy.maxThinkingTokens} Token。`));
@@ -204,8 +207,8 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       }
       if (selectedSettings === "models") {
         const models = await request("models");
-        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。连接测试会发送简短消息；官方模型按实际用量计费。"), button("＋ 接入 LLM", () => modelEditor(), "settings-primary"));
-        if (!models.models.length) root.append(el("p", "settings-empty", "还没有模型，点击接入 LLM 开始。"));
+        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。"), button("＋ 接入大模型", () => modelEditor(), "settings-primary"));
+        if (!models.models.length) root.append(el("p", "settings-empty", "还没有模型，点击接入大模型开始。"));
         for (const item of models.models) {
           const row = el("article", "settings-row");
           const copy = el("div"); copy.append(el("strong", "", item.id + (item.id === data.defaultModel ? " · 默认" : "")), el("p", "", `${item.model} · ${item.protocol}`), el("small", "", `${item.baseURL || "协议默认地址"} · ${item.hasKey ? "密钥已配置" : "未配置密钥"}`));

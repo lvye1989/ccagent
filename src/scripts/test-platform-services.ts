@@ -375,3 +375,5 @@ try {
   assert.equal(path.dirname(directory), temporaryRoot); assert(path.basename(directory).startsWith("ccagent-official-client-"));
   await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
+
+await import("./test-official-service-connect.js");
