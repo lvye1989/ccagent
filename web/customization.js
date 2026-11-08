@@ -33,6 +33,24 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   const initialSetting = new URLSearchParams(location.search).get("setting");
   let selectedSettings = ["general", "official", "models", "execution", "import"].includes(initialSetting) ? initialSetting : "general", modalRequest = 0, modalBusy = false, teamsData = { teams: [], enabled: true };
   const request = (resource, body) => api(`/api/customize/${resource}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+  const adminEntry = $("settings-admin-entry");
+  let adminAccess = null, adminAccessRevision = 0;
+  function clearAdminAccess() { adminAccessRevision++; adminAccess = null; adminEntry.hidden = true; }
+  async function refreshAdminAccess() {
+    clearAdminAccess();
+    const revision = adminAccessRevision;
+    try {
+      const access = await api('/api/account/access');
+      if (revision !== adminAccessRevision || !access?.user?.id || typeof access.origin !== 'string' || !Array.isArray(access.permissions) || !access.permissions.includes('admin.read')) return;
+      adminAccess = access; adminEntry.hidden = false;
+    } catch { /* An unavailable or unauthenticated permission lookup never enables this entry. */ }
+  }
+  window.addEventListener('ccagent:account-changing', clearAdminAccess);
+  window.addEventListener('pagehide', clearAdminAccess);
+  adminEntry.addEventListener('click', () => {
+    if (!adminAccess) { toast('当前账户没有管理员权限。'); return; }
+    void openAccountCenter({ origin: adminAccess.origin, target: '/admin' }).catch(error => toast(error.message));
+  });
   function close() { if (!modalBusy) { modalRequest++; $("editor-overlay").classList.add("hidden"); } }
   function openDialog(title, subtitle) {
     modalRequest++; modalBusy = false;
@@ -141,11 +159,11 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     const url = new URL(location.href); url.searchParams.set("setting", selectedSettings); history.replaceState({}, "", url);
     const root = $("settings-content"); root.replaceChildren(el("p", "editor-hint", "正在读取设置…"));
     try {
-      const data = await request("settings");
+      const [data] = await Promise.all([request("settings"), refreshAdminAccess()]);
       root.replaceChildren();
       const head = el("header", "settings-head"); head.append(el("div", "page-eyebrow", "PREFERENCES"), el("h1", "", selectedSettings === "import" ? "导入原有数据" : selectedSettings === "official" ? "CCAGENT 官方服务" : selectedSettings === "models" ? "模型接入" : selectedSettings === "execution" ? "权限与执行" : "通用设置"));
       root.append(head);
-      $("settings-nav").querySelectorAll("button").forEach((b) => b.classList.toggle("selected", b.dataset.setting === selectedSettings));
+      $("settings-nav").querySelectorAll("[data-setting]").forEach((b) => b.classList.toggle("selected", b.dataset.setting === selectedSettings));
       if (selectedSettings === "import") { await renderLegacyImport(root); return; }
       if (selectedSettings === "official") {
         const service = await request("official-services");
@@ -390,7 +408,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   $("teams-create").addEventListener("click", () => teamEditor().catch((e) => toast(e.message)));
   $("teams-global").addEventListener("click", async () => { try { await request("teams", { op: "global", enabled: !teamsData.enabled }); await refreshTeams(); } catch (error) { toast(error.message); } });
   $("library-rag").addEventListener("click", () => ragManager().catch((e) => toast(e.message)));
-  $("settings-nav").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { selectedSettings = b.dataset.setting; void renderSettings(); }));
+  $("settings-nav").querySelectorAll("[data-setting]").forEach((b) => b.addEventListener("click", () => { selectedSettings = b.dataset.setting; void renderSettings(); }));
   $("thread-team").addEventListener("change", async (event) => {
     if (getBusy() || !getSessionId()) return;
     try { await api(`/api/sessions/${getSessionId()}/team`, { method: "POST", body: JSON.stringify({ team: event.target.value }) }); toast("当前对话的团队设置已更新"); }

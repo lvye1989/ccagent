@@ -42,8 +42,9 @@ export async function configuration(reader: DatabaseReader = database().db): Pro
   const rows = await reader.select().from(settings);
   return (Object.keys(definitions) as ConfigurationKey[]).map(key => {
     const definition = definitions[key], stored = rows.find(row => row.key === key), override = process.env[definition.env];
-    const value = definition.validate.parse(override === undefined ? stored ? storedValue(key, stored.value) : definition.default : environmentValue(key, override));
-    return { key, value, version: stored?.version ?? 0, source: override !== undefined ? 'environment' : stored ? 'database' : 'default', readonly: override !== undefined };
+    const databaseFirst = key === 'settlement_usd_cny' && stored !== undefined;
+    const value = definition.validate.parse(databaseFirst ? storedValue(key, stored.value) : override === undefined ? stored ? storedValue(key, stored.value) : definition.default : environmentValue(key, override));
+    return { key, value, version: stored?.version ?? 0, source: databaseFirst ? 'database' : override !== undefined ? 'environment' : stored ? 'database' : 'default', readonly: key !== 'settlement_usd_cny' && override !== undefined };
   });
 }
 export async function configurationValues(reader: DatabaseReader = database().db) {
@@ -72,7 +73,8 @@ export async function saveConfiguration(actorId: string, input: z.infer<typeof c
     const values = Object.fromEntries((Object.keys(definitions) as ConfigurationKey[]).map(key => {
       const definition = definitions[key], override = process.env[definition.env];
       const stored = latest.find(row => row.key === key);
-      return [key, override !== undefined ? environmentValue(key, override) : input.changes.find(change => change.key === key)?.value ?? (stored ? storedValue(key, stored.value) : definition.default)];
+      return [key, key === 'settlement_usd_cny' ? input.changes.find(change => change.key === key)?.value ?? (stored ? storedValue(key, stored.value) : override !== undefined ? environmentValue(key, override) : definition.default)
+        : override !== undefined ? environmentValue(key, override) : input.changes.find(change => change.key === key)?.value ?? (stored ? storedValue(key, stored.value) : definition.default)];
     }));
     if (Number(values.recharge_min_fen) > Number(values.recharge_max_fen)) throw new HttpError(400, 'INVALID_RECHARGE_RANGE', '最低充值额不能高于最高充值额。');
     for (const change of input.changes) {

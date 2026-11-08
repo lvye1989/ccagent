@@ -28,14 +28,21 @@ test('real database configuration persistence, concurrency, safe admin projectio
       await saveConfiguration(actor, { changes: [{ key: 'settlement_usd_cny', value: '7.200000', version: 1 }] });
       assert.equal((await configurationValues()).settlement_usd_cny, '7.200000');
     });
-    await t.test('environment overrides are read-only and never copied back into database settings', async () => {
-      const original = process.env.SETTLEMENT_USD_CNY;
-      process.env.SETTLEMENT_USD_CNY = '7.3';
+    await t.test('non-FX environment overrides remain read-only while database FX overrides the legacy environment', async () => {
+      const original = process.env.SETTLEMENT_USD_CNY, oldPayment = process.env.PAYMENT_ENABLED;
+      process.env.SETTLEMENT_USD_CNY = '7.3'; process.env.PAYMENT_ENABLED = 'false';
       try {
         const entry = (await configuration()).find(item => item.key === 'settlement_usd_cny');
-        assert.equal(entry?.source, 'environment'); assert.equal(entry?.readonly, true); assert.equal(entry.value, '7.3');
-        await assert.rejects(() => saveConfiguration(actor, { changes: [{ key: 'settlement_usd_cny', value: '7.4', version: 2 }] }), { status: 409 });
-      } finally { if (original === undefined) delete process.env.SETTLEMENT_USD_CNY; else process.env.SETTLEMENT_USD_CNY = original; }
+        assert.equal(entry?.source, 'database'); assert.equal(entry?.readonly, false); assert.equal(entry.value, '7.200000');
+        await saveConfiguration(actor, { changes: [{ key: 'settlement_usd_cny', value: '7.4', version: 2 }] });
+        assert.equal((await configurationValues()).settlement_usd_cny, '7.4');
+        await saveConfiguration(actor, { changes: [{ key: 'settlement_usd_cny', value: '7.200000', version: 3 }] });
+        assert.equal((await configuration()).find(item => item.key === 'payment_enabled')?.readonly, true);
+        await assert.rejects(() => saveConfiguration(actor, { changes: [{ key: 'payment_enabled', value: true, version: 1 }] }), { status: 409 });
+      } finally {
+        if (original === undefined) delete process.env.SETTLEMENT_USD_CNY; else process.env.SETTLEMENT_USD_CNY = original;
+        if (oldPayment === undefined) delete process.env.PAYMENT_ENABLED; else process.env.PAYMENT_ENABLED = oldPayment;
+      }
       assert.equal((await configurationValues()).settlement_usd_cny, '7.200000');
     });
     await t.test('strict whitelist and optimistic version checks reject secret fields and stale edits', async () => {

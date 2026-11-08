@@ -10,6 +10,8 @@ import { audit, prices, routes } from './db/schema';
 import { configurationValues } from './configuration';
 import { HttpError } from './http';
 import { lockAdministration } from './database-locks';
+import { resolveRouteCredential, routeCredentialStatus, saveRouteCredential } from './provider-credentials';
+import { assertUpstreamHost, validateTrustedUpstreamHost } from './upstream-hosts';
 
 const httpsUrl = z.string().max(500).url().refine(value => {
   const url = new URL(value);
@@ -31,7 +33,7 @@ export function validateServicePrice(route: { service: string; protocol: string;
 export const routeInput = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/), name: z.string().trim().min(1).max(100),
   service: z.enum(['chat', 'vision', 'decision', 'search', 'voice']), protocol: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'jev-decisions', 'tavily', 'bocha', 'dashscope-tts']),
   provider: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,49}$/), baseUrl: httpsUrl, upstreamModel: z.string().min(1).max(200).regex(/^[^\s\r\n\0]+$/),
-  credentialEnv: z.string().regex(/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/), enabled: z.boolean().default(false),
+  credentialEnv: z.string().regex(/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/).default('CCAGENT_PROVIDER_MANAGED'), enabled: z.boolean().default(false),
   timeoutMs: z.number().int().min(1000).max(180000).default(120000), retries: z.number().int().min(0).max(2).default(0),
   options: z.object({ contextWindow: z.number().int().min(128).max(4000000).default(131072), maxOutputTokens: z.number().int().min(1).max(1000000).default(8192),
     maxImages: z.number().int().min(0).max(600).default(20), fallbackRouteId: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/).nullable().default(null), fallbackEnabled: z.boolean().default(false),
@@ -44,16 +46,13 @@ export const routeInput = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._:-]
   if (value.options.maxOutputTokens > value.options.contextWindow) context.addIssue({ code: 'custom', message: 'Output limit exceeds context window' });
 });
 export const priceInput = z.object({ routeId: z.string().min(1).max(80), currency: z.enum(['CNY', 'USD']), definition: priceDefinition,
-  sourceUrl: httpsUrl, effectiveAt: z.iso.datetime({ offset: true }) }).strict();
+  sourceUrl: httpsUrl, effectiveAt: z.iso.datetime({ offset: true }), expectedRouteFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 
 export function routeFingerprint(route: Pick<typeof routes.$inferSelect, 'provider' | 'protocol' | 'upstreamModel' | 'service' | 'baseUrl'>): string {
   return createHash('sha256').update(JSON.stringify([route.provider, route.protocol, route.upstreamModel, route.service, route.baseUrl])).digest('hex');
 }
 export function validateUpstreamHost(value: string): void {
-  const url = new URL(value);
-  const allowed = new Set(['api.deepseek.com', 'openrouter.ai', 'api.tavily.com', 'api.bochaai.com', 'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com',
-    ...(process.env.CCAGENT_ALLOWED_UPSTREAM_HOSTS || '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean)]);
-  if (!allowed.has(url.hostname.toLowerCase()) || (url.port && url.port !== '443')) throw new HttpError(400, 'UPSTREAM_HOST_NOT_ALLOWED', '该上游主机尚未加入服务器允许列表。');
+  validateTrustedUpstreamHost(value);
 }
 export function selectedTariff(definition: PriceDefinition, at: Date, upperBound = false): 'peak' | 'off-peak' | 'constant' | 'qwen-input-tiers' {
   if (definition.tariff.kind === 'qwen-input-tiers') return 'qwen-input-tiers';
@@ -111,9 +110,9 @@ export async function testableRoute(id: string, reader: DatabaseReader = databas
 async function selectRoute(id: string, service: string | undefined, reader: DatabaseReader, allowPaused: boolean) {
   const [route] = await reader.select().from(routes).where(eq(routes.id, id));
   if (!route || (!allowPaused && !route.enabled) || (service && route.service !== service)) throw new HttpError(404, 'SERVICE_UNAVAILABLE', '该服务尚未开放。');
-  validateUpstreamHost(route.baseUrl);
+  await assertUpstreamHost(route.baseUrl, reader);
   if (!/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/.test(route.credentialEnv)) throw new HttpError(503, 'INVALID_CREDENTIAL_REFERENCE', '服务凭据配置需要更新。');
-  if (!process.env[route.credentialEnv]) throw new HttpError(503, 'UPSTREAM_NOT_CONFIGURED', '服务供应商尚未配置。');
+  await resolveRouteCredential(route, reader);
   const price = await latestPrice(id, new Date(), reader), config = await configurationValues(reader);
   const stored = price?.components as { routeFingerprint?: unknown; definition?: unknown } | undefined;
   if (!price || stored?.routeFingerprint !== routeFingerprint(route)) throw new HttpError(503, 'PRICE_NOT_CONFIGURED', '该服务尚未配置有效价格。');
@@ -132,15 +131,17 @@ export function publicPricing(selection: Awaited<ReturnType<typeof publishedRout
     { contextWindow: options.contextWindow, maxOutputTokens: options.maxOutputTokens, maxImages: options.maxImages }])).digest('hex');
   return { ...pricing, fingerprint };
 }
-export async function saveRoute(actorId: string, input: z.infer<typeof routeInput>) {
-  validateUpstreamHost(input.baseUrl);
-  const fx = input.enabled ? (await configurationValues()).settlement_usd_cny : '';
+export async function saveRoute(actorId: string, input: z.infer<typeof routeInput>, credential: { apiKey?: string; remove?: boolean } = {}) {
+  await assertUpstreamHost(input.baseUrl);
   return database().db.transaction(async tx => {
     await lockAdministration(tx, 804714033);
     const [existing] = await tx.select().from(routes).where(eq(routes.id, input.id)).for('update');
     const changed = existing && routeFingerprint(existing) !== routeFingerprint(input);
+    const destinationChanged = !!existing && (existing.provider !== input.provider || new URL(existing.baseUrl).href.replace(/\/$/, '') !== new URL(input.baseUrl).href.replace(/\/$/, ''));
+    const hasNewKey = Boolean(credential.apiKey?.trim());
+    await saveRouteCredential(actorId, input, { ...credential, ...(destinationChanged && !hasNewKey ? { remove: true } : {}) }, tx);
     // A changed provider/model/protocol never reuses the previous supplier price.
-    const enabled = changed ? false : input.enabled;
+    const enabled = changed || credential.remove || destinationChanged && !hasNewKey ? false : input.enabled;
     if (input.options.fallbackEnabled) {
       const [target] = await tx.select().from(routes).where(eq(routes.id, input.options.fallbackRouteId!));
       if (!target || target.service !== input.service || target.protocol !== input.protocol) throw new HttpError(409, 'INCOMPATIBLE_FALLBACK', '备用须为另一条同服务类型、同协议的路由。');
@@ -159,7 +160,8 @@ export async function saveRoute(actorId: string, input: z.infer<typeof routeInpu
     if (enabled) {
       const [price] = await tx.select().from(prices).where(and(eq(prices.routeId, input.id), lte(prices.effectiveAt, new Date()))).orderBy(desc(prices.version)).limit(1);
       const stored = price?.components as { routeFingerprint?: unknown; definition?: unknown } | undefined;
-      if (!price || stored?.routeFingerprint !== routeFingerprint(input) || !process.env[input.credentialEnv]) throw new HttpError(409, 'SERVICE_NOT_READY', '启用前请配置对应的供应商凭据和有效价格。');
+      if (!price || stored?.routeFingerprint !== routeFingerprint(input) || !(await routeCredentialStatus(input, tx)).configured) throw new HttpError(409, 'SERVICE_NOT_READY', '启用前请配置对应的供应商凭据和有效价格。');
+      const fx = (await configurationValues(tx)).settlement_usd_cny;
       if (price.currency === 'USD' && !fx) throw new HttpError(409, 'FX_NOT_CONFIGURED', '启用美元服务前请配置结算汇率。');
       const definition = priceDefinition.parse(stored.definition);
       validateServicePrice(input, definition);
@@ -178,6 +180,9 @@ export async function createPriceVersion(actorId: string, input: z.infer<typeof 
     await lockAdministration(tx, 804714033);
     const [route] = await tx.select().from(routes).where(eq(routes.id, input.routeId)).for('update');
     if (!route) throw new HttpError(404, 'ROUTE_NOT_FOUND', '服务路由不存在。');
+    if (input.expectedRouteFingerprint !== undefined && input.expectedRouteFingerprint !== routeFingerprint(route)) {
+      throw new HttpError(409, 'ROUTE_CONFIGURATION_CHANGED', '路由已被其他管理员修改，请重新载入后配置成本。');
+    }
     if (input.definition.tariff.kind === 'deepseek' && route.provider !== 'deepseek') throw new HttpError(400, 'TARIFF_MISMATCH', '峰谷价格策略与供应商不符。');
     if (input.definition.tariff.kind === 'qwen-input-tiers') validateServicePrice(route, input.definition);
     const [latest] = await tx.select({ version: prices.version }).from(prices).where(eq(prices.routeId, input.routeId)).orderBy(desc(prices.version)).limit(1);

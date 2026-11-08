@@ -12,6 +12,8 @@ import { upstreamTransportFailure, type UpstreamTransportFailure } from './upstr
 import { authorizeUsage, finishUsage } from './wallet';
 import { availableServiceDefaults, readServiceDefaults } from './service-defaults';
 import { callIdentifierPattern } from './call-identifiers';
+import { resolveRouteCredential } from './provider-credentials';
+import { requestUpstream } from './upstream-hosts';
 
 const id = z.string().regex(callIdentifierPattern);
 const maximumResult = 64 * 1024 * 1024;
@@ -152,8 +154,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
       const { createdAt: _created, updatedAt: _updated, ...value } = selected.route;
       const parsed = routeInput.parse(value), prepared = prepareUpstream(endpoint, input, parsed);
       prepared.body = applyRequestPricing(selected.definition, prepared.body);
-      const secret = process.env[selected.route.credentialEnv];
-      if (!secret) throw new HttpError(503, 'UPSTREAM_NOT_CONFIGURED', '服务供应商尚未配置。');
+      const secret = await resolveRouteCredential(selected.route);
       if (endpoint === 'responses') prepared.body.prompt_cache_key = `ccagent:${createHash('sha256').update(current.user.id).digest('hex').slice(0, 32)}:${typeof input.prompt_cache_key === 'string' ? input.prompt_cache_key.slice(0, 100) : 'default'}`;
       plans.push({ selection: selected, prepared, body: await resolveImages(prepared.body, current.user.id, parsed.options.maxImages, imageFiles), secret });
     }
@@ -208,8 +209,8 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
           attempted = plan; attemptedAt = startedAt;
           attempts++; phaseAttempts++;
           try {
-            const result = await fetcher(plan.prepared.url, { method: 'POST', headers: { authorization: `Bearer ${plan.secret}`, 'content-type': 'application/json' },
-              body: JSON.stringify(plan.body), signal: controller.signal, redirect: 'error' });
+            const result = await requestUpstream(plan.prepared.url, { method: 'POST', headers: { authorization: `Bearer ${plan.secret}`, 'content-type': 'application/json' },
+              body: JSON.stringify(plan.body), signal: controller.signal, redirect: 'error' }, fetcher);
             transportFailure = undefined;
             if ((result.status === 429 || result.status >= 500) && !controller.signal.aborted) {
               if (phaseAttempts <= plan.selection.route.retries) { await result.body?.cancel(); continue; }

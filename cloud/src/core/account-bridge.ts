@@ -3,7 +3,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import { z } from 'zod';
 import { createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
-import { database } from './db';
+import { database, type DatabaseReader } from './db';
 import * as tables from './db/schema';
 import { authEnvironment } from './env';
 import { HttpError } from './http';
@@ -20,7 +20,16 @@ type SourceSession = { user: { id: string }; session: { id: string; expiresAt: D
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const invalid = () => new HttpError(400, 'ACCOUNT_BRIDGE_INVALID', '账户连接无效或已过期，请从应用重新打开。');
 const sourceInvalid = () => new HttpError(401, 'ACCOUNT_BRIDGE_SESSION_EXPIRED', '应用登录已失效，请重新登录后打开账户中心。');
+const adminDenied = () => new HttpError(403, 'PERMISSION_DENIED', '当前账户没有管理员访问权限。');
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+async function canReadAdmin(userId: string, reader: DatabaseReader = database().db): Promise<boolean> {
+  const [permission] = await reader.select({ id: tables.permissions.id }).from(tables.userRoles)
+    .innerJoin(tables.rolePermissions, eq(tables.userRoles.roleId, tables.rolePermissions.roleId))
+    .innerJoin(tables.permissions, eq(tables.rolePermissions.permissionId, tables.permissions.id))
+    .where(and(eq(tables.userRoles.userId, userId), eq(tables.permissions.id, 'admin.read'))).limit(1);
+  return Boolean(permission);
+}
 
 export function accountBridgeClientOrigin(value: string): string {
   const match = /^http:\/\/(127\.0\.0\.1|localhost):([1-9][0-9]{0,4})$/.exec(value);
@@ -95,6 +104,7 @@ try{const response=await fetch('/api/account/bridge/consume',{method:'POST',cred
 
 export async function issueAccountBridge(stateInput: unknown, source: SourceSession) {
   const state = readAccountBridgeState(stateInput);
+  if (state.target === '/admin' && !(await canReadAdmin(source.user.id))) throw adminDenied();
   const ticket = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Math.min(Date.now() + 60000, state.expiresAt, source.session.expiresAt.getTime()));
   if (expiresAt.getTime() <= Date.now()) throw sourceInvalid();
@@ -122,10 +132,14 @@ export async function consumeAccountBridge(stateInput: unknown, ticket: unknown,
       .innerJoin(tables.user, eq(tables.session.userId, tables.user.id)).where(and(
         eq(tables.session.id, saved.data.sessionId), eq(tables.session.userId, saved.data.userId),
         gt(tables.session.expiresAt, new Date()), eq(tables.user.emailVerified, true), eq(tables.user.banned, false))).for('share');
+    // Commit the single-use deletion even if access was revoked after issue.
+    // The live user row remains shared-locked during this transactional check.
+    if (live && state.target === '/admin' && !(await canReadAdmin(live.user.id, tx))) return { forbidden: true } as const;
     return live ? { sessionId: live.session.id, userId: live.user.id, target: state.target,
       clearFallbackCookie: `${fallbackCookie(state.channel)}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` } : null;
   });
   if (!result) throw sourceInvalid();
+  if ('forbidden' in result) throw adminDenied();
   return result;
 }
 

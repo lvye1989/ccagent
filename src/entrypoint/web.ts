@@ -242,6 +242,19 @@ export async function runWebServer(args: string[]): Promise<void> {
           } finally { loginBusy.delete(lockKey); if (action === "login" && !signedIn && !native) locals.delete(local.id); }
         }
         const local = await localClient(req);
+        if (req.method === "GET" && route === "/api/account/access") {
+          const revision = local.revision;
+          const unchanged = () => !stopping && !local.closing && !local.loggingOut && !loginBusy.has(local.id)
+            && local.revision === revision && (!locals.has(local.id) || locals.get(local.id) === local);
+          if (!unchanged()) throw new AccountError("当前登录状态已改变，请重新登录。", "account_changed", 401);
+          // Register a retained browser before awaiting cloud permissions so logout/relogin can invalidate it.
+          if (native || browserId(req) === local.id) locals.set(local.id, local);
+          const access = await local.client.accountAccess();
+          if (!unchanged() || (await accountClient()).origin !== local.client.origin || !unchanged()) {
+            throw new AccountError("当前账户或服务地址已改变，请重新打开设置。", "account_changed", 401);
+          }
+          return json(res, 200, access);
+        }
         if (req.method === "POST" && route === "/api/account/bridge") {
           const revision = local.revision;
           const unchanged = () => !local.closing && !local.loggingOut && !loginBusy.has(local.id)

@@ -9,6 +9,8 @@ import { lockAdministration } from './database-locks';
 import { maximumQuantities } from './gateway';
 import { errorResponse, HttpError, json, readJson, requireSameOrigin } from './http';
 import { measuredUsage, object, prepareUpstream, voiceDownloadUrl, type GatewayEndpoint } from './upstream';
+import { resolveRouteCredential } from './provider-credentials';
+import { requestUpstream } from './upstream-hosts';
 
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/), fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 const submission = z.object({ routeId, testId: z.string().uuid(), confirmationFingerprint: fingerprint, confirmPlatformCost: z.literal(true) }).strict();
@@ -98,7 +100,7 @@ export function createRouteTests(options: { fetch?: typeof fetch; keepAlive?: (w
     const startedAt = now(); let sent = false, status: number | undefined, result: RouteTestResult = initial;
     try {
       selectedTariff(plan.selection.definition, startedAt); sent = true;
-      const response = await fetcher(plan.prepared.url, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(plan.prepared.body), redirect: 'error', signal: controller.signal });
+      const response = await requestUpstream(plan.prepared.url, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(plan.prepared.body), redirect: 'error', signal: controller.signal }, fetcher);
       status = response.status;
       let payload: unknown; try { payload = JSON.parse((await boundedBytes(response, 2 * 1024 * 1024)).toString('utf8')); } catch { if (!response.ok) payload = {}; else throw new Error('INVALID_RESPONSE'); }
       if (!response.ok) result = { ...initial, status: 'failed', ...rejection(response.status, payload) };
@@ -148,7 +150,7 @@ export function createRouteTests(options: { fetch?: typeof fetch; keepAlive?: (w
         if (active.length) throw new HttpError(409, 'TEST_IN_PROGRESS', '该路由已有检测正在执行或等待确认，请先查询原检测记录。');
         const plan = planFor(await testableRoute(input.routeId, tx), now());
         if (input.confirmationFingerprint !== plan.confirmationFingerprint) throw new HttpError(409, 'TEST_CONFIGURATION_CHANGED', '已保存配置或价格已改变，请重新准备检测并确认费用。');
-        const secret = process.env[plan.route.credentialEnv]; if (!secret) throw new HttpError(503, 'UPSTREAM_NOT_CONFIGURED', '服务供应商尚未配置。');
+        const secret = await resolveRouteCredential(plan.route, tx);
         const result: RouteTestResult = { id: input.testId, routeId: input.routeId, status: 'running', startedAt: now().toISOString(), service: plan.route.service, protocol: plan.route.protocol,
           priceVersion: plan.selection.price.version, confirmationFingerprint: plan.confirmationFingerprint, estimatedPublicCostMicro: plan.estimatedPublicCostMicro, publicCostMicro: null,
           provider: plan.route.provider, upstreamModel: plan.route.upstreamModel, pricing: publicPricing(plan.selection), requestSent: null,

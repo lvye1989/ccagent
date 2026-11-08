@@ -41,6 +41,7 @@ const files = [
   { path: "other.bin", name: "other.bin", size: 20, format: "binary" },
 ];
 let officialConfigured = false, selectedOfficialRoles = {}, officialFallback = false;
+let adminPermissions = [], failAccess = false, pendingAccess = null;
 const catalogRevision = '11111111-1111-4111-8111-111111111111';
 const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }], tariff: { kind: 'constant' } } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
 const backupOfficialRoute = { ...defaultOfficialRoute, id: 'fixture-backup', name: '备用服务测试', limits: { fallbackEnabled: false, fallbackRouteId: null } };
@@ -82,6 +83,11 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === "/api/plugins") data = { installed: [], available: [], marketplaces: [] };
   else if (route === "/api/apps") data = { apps: [] };
   else if (route === "/api/account/status") data = { user: { id: "offline-ui-user" } };
+  else if (route === '/api/account/access') {
+    if (failAccess) throw new Error('Fixture permission lookup unavailable');
+    if (pendingAccess) return pendingAccess;
+    data = { origin: 'https://ccagent.example.invalid', user: { id: 'offline-ui-user' }, permissions: [...adminPermissions] };
+  }
   else if (route === '/api/account/bridge') data = { ticket: 'T'.repeat(43), expiresAt: new Date(Date.now() + 30000).toISOString(), userId: 'offline-ui-user', origin: 'https://ccagent.example.invalid' };
   else if (route === "/api/agents") data = { agents: [agent] };
   else if (route === "/api/skills") data = { globallyEnabled: true, skills: [skill] };
@@ -272,6 +278,36 @@ try {
   assert(!$('settings-content').textContent.includes('CNY undefined'));
   backupOfficialRoute.pricing = originalBackupPricing;
   console.log('Official service DOM: all Qwen tiers thinking prices and reasoning allowance are visible.');
+
+  const adminEntry = $('settings-admin-entry');
+  assert.equal(adminEntry.previousElementSibling.dataset.setting, 'import');
+  assert.equal(adminEntry.hidden, true, 'Ordinary users have no administrator entry');
+  const beforeDenied = accountPopups.length;
+  await click(adminEntry);
+  assert.equal(accountPopups.length, beforeDenied, 'A forged click cannot open the admin bridge without permissions');
+  adminPermissions = ['admin.read']; await click('[data-setting="official"]');
+  assert.equal(adminEntry.hidden, false, 'Business admin permission enables the entry without requiring a platform Key');
+  accountGesture = true; adminEntry.click(); accountGesture = false; await settle();
+  const adminPopup = accountPopups.at(-1), adminChannel = new URL(adminPopup.url).searchParams.get('channel');
+  assert.equal(adminPopup.inGesture, true, 'Admin popup opens synchronously in the user gesture');
+  assert.equal(new URL(adminPopup.url).searchParams.get('target'), '/admin');
+  assert.equal(document.querySelector('.settings-nav .selected').dataset.setting, 'official', 'Admin action preserves the settings category');
+  window.dispatchEvent(new window.MessageEvent('message', { origin: 'https://ccagent.example.invalid', source: adminPopup, data: { type: 'ccagent:account-bridge-ready', channel: adminChannel, state: 'offline.payload.signature' } })); await settle();
+  assert.equal(adminPopup.sent.length, 1);
+  window.dispatchEvent(new window.MessageEvent('message', { origin: 'https://ccagent.example.invalid', source: adminPopup, data: { type: 'ccagent:account-bridge-complete', channel: adminChannel } })); await settle();
+  adminPermissions = []; await click('[data-setting="official"]');
+  assert.equal(adminEntry.hidden, true, 'A refreshed lookup removes revoked access');
+  adminPermissions = ['admin.read']; await click('[data-setting="official"]');
+  failAccess = true; await click('[data-setting="official"]');
+  assert.equal(adminEntry.hidden, true, 'A failed lookup cannot retain earlier admin visibility'); failAccess = false;
+  let resolveAccess;
+  pendingAccess = new Promise(resolve => { resolveAccess = resolve; });
+  document.querySelector('[data-setting="official"]').click(); await settle();
+  window.dispatchEvent(new window.Event('ccagent:account-changing'));
+  resolveAccess({ ok: true, json: async () => ({ origin: 'https://ccagent.example.invalid', user: { id: 'offline-ui-user' }, permissions: ['admin.read'] }) }); await settle(); pendingAccess = null;
+  assert.equal(adminEntry.hidden, true, 'An in-flight result cannot re-enable admin access after logout/account switching');
+  adminPermissions = [];
+  console.log('Admin entry DOM: ordering, ordinary-user denial, authenticated bridge, refreshed revocation, lookup failure and account-switch race passed.');
 
   await click('[data-customize-view="teams"]'); assert(!$("teams-view").classList.contains("hidden"));
   await click("#teams-create"); assert($("edit-team-name"));

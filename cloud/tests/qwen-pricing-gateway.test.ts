@@ -33,11 +33,13 @@ test('Qwen tiered gateway persists exact charges streams fallback snapshots and 
   const record = async (id: string) => (await database().db.select().from(tables.reservations).where(eq(tables.reservations.idempotencyKey, id)))[0]!;
   const route = routeInput.parse({ id: 'qwen-tiers', name: 'Synthetic Qwen tiers', provider: 'qwen', protocol: 'openai-chat', service: 'chat', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', upstreamModel: 'synthetic-qwen-fixture', credentialEnv, options: { contextWindow: 1024, maxOutputTokens: 64 } });
   const publish = async (id: string, price: PriceDefinition) => createPriceVersion(userId, { routeId: id, currency: 'CNY', definition: price, sourceUrl: 'https://example.invalid/synthetic-prices', effectiveAt: new Date(Date.now() - 1000).toISOString() });
+  let baselineAuditIds: string[] = [];
   const fingerprint = async () => {
     const result: Record<string, string> = {};
     for (const table of [tables.user, tables.session, tables.account, tables.userRoles, tables.wallets, tables.ledger, tables.apiKeys, tables.routes, tables.prices, tables.orders, tables.reservations, tables.audit, tables.blobs]) {
       const name = getTableConfig(table).name;
-      const [row] = await fixture.owner.unsafe<{ digest: string }[]>(`select md5(coalesce(jsonb_agg(to_jsonb(t) order by to_jsonb(t)::text)::text,'[]')) as digest from "${originalSchema}"."${name}" t`);
+      const [row] = await fixture.owner.unsafe<{ digest: string }[]>(`select md5(coalesce(jsonb_agg(to_jsonb(t) order by to_jsonb(t)::text)::text,'[]')) as digest from "${originalSchema}"."${name}" t${name === 'audit' ? ' where t.id = ANY($1::text[])' : ''}`,
+        name === 'audit' ? [fixture.owner.array(baselineAuditIds, 25)] : []);
       result[name] = row!.digest;
     }
     return result;
@@ -46,6 +48,7 @@ test('Qwen tiered gateway persists exact charges streams fallback snapshots and 
   try {
     assert.match(originalSchema, /^[a-z_][a-z0-9_]{0,62}$/);
     assert.equal(tables.namespace.schemaName, fixture.schema, 'Application tables must bind to the exact disposable schema');
+    baselineAuditIds = (await fixture.owner.unsafe<{ id: string }[]>(`select id from "${originalSchema}"."audit"`)).map(row => row.id);
     originalFingerprint = await fingerprint();
     const [identity] = await database().db.execute(sql`select current_user as role`); assert.equal(identity.role, 'ccagent_runtime');
     console.log(JSON.stringify({ fixtureSchema: fixture.schema, tableSchema: tables.namespace.schemaName, actualProviders: false, actualMoney: false }));
@@ -126,7 +129,13 @@ test('Qwen tiered gateway persists exact charges streams fallback snapshots and 
       if (tables.namespace.schemaName === fixture.schema) for (const file of await database().db.select({ pathname: tables.blobs.pathname }).from(tables.blobs).where(eq(tables.blobs.userId, userId))) await del(file.pathname);
       if (originalFingerprint) {
         assert.deepEqual(await fingerprint(), originalFingerprint, 'The complete development rows must remain unchanged');
-        console.log(JSON.stringify({ fixtureSchema: fixture.schema, developmentTablesChecked: Object.keys(originalFingerprint).length, developmentRowsUnchanged: true }));
+        const [added] = await fixture.owner.unsafe<{ total: string; scheduled: string; unexpected: string }[]>(`select count(*)::text as total,
+          count(*) filter (where action='system.maintenance' and object_id='scheduled' and result='success')::text as scheduled,
+          count(*) filter (where not (action='system.maintenance' and object_id='scheduled' and result='success'))::text as unexpected
+          from "${originalSchema}"."audit" where not (id = ANY($1::text[]))`, [fixture.owner.array(baselineAuditIds, 25)]);
+        assert.equal(added!.unexpected, '0', 'Only successful scheduled maintenance may append development audit rows during this isolated test');
+        console.log(JSON.stringify({ developmentTablesChecked: Object.keys(originalFingerprint).length, developmentRowsUnchanged: true,
+          baselineAuditRows: baselineAuditIds.length, newAuditRows: Number(added!.total), newScheduledMaintenanceRows: Number(added!.scheduled), unexpectedNewAuditRows: Number(added!.unexpected) }));
       }
     } finally { await closeDatabase(); await fixture.cleanup(); delete process.env[credentialEnv]; }
   }

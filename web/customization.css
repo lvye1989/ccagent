@@ -18,6 +18,7 @@
 .settings-nav h2 { font-size: 19px; margin: 0 0 26px; }
 .settings-nav button { display: block; width: 100%; text-align: left; border: 0; padding: 11px 14px; background: transparent; border-radius: 8px; font-size: 13px; color: #72737d; margin: 3px 0; cursor: pointer; }
 .settings-nav button.selected { background: #f0f1f5; color: #31343f; font-weight: 600; }
+.settings-nav [hidden] { display: none !important; }
 .settings-head { margin-bottom: 26px; }
 .settings-head h1 { font-size: 25px; font-weight: 600; margin: 7px 0 20px; letter-spacing: -.5px; }
 .settings-form { max-width: 640px; }

@@ -7,7 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { hashPassword } from 'better-auth/crypto';
 
-// Actual Next.js + local app + isolated DB. No production user, email, key or auth bypass.
+// Actual Next.js + local app + isolated DB: ordinary user A and business admin B.
+// No production user, email, key or auth bypass.
 const fixture = await isolatedDatabase();
 const cloudOrigin = 'http://127.0.0.1:4311', localOrigin = 'http://127.0.0.1:4312';
 process.env.AUTH_URL = cloudOrigin;
@@ -47,7 +48,8 @@ async function start(args: string[], cwd: string, env: NodeJS.ProcessEnv, origin
 try {
   const password = randomBytes(32).toString('base64url'), hashed = await hashPassword(password);
   const users = [{ id: randomUUID(), name: '应用账户 A', email: 'bridge-a@ccagent.example.invalid' }, { id: randomUUID(), name: '原云端账户 B', email: 'bridge-b@ccagent.example.invalid' }];
-  await database().db.insert(tables.user).values(users.map(user => ({ ...user, emailVerified: true })));
+  await database().db.insert(tables.user).values(users.map((user, index) => ({ ...user, emailVerified: true, role: index === 1 ? 'admin' : 'user' })));
+  await database().db.insert(tables.userRoles).values({ userId: users[1].id, roleId: 'admin' });
   await database().db.insert(tables.account).values(users.map(user => ({ id: randomUUID(), accountId: user.id, providerId: 'credential', userId: user.id, password: hashed })));
   const cloudEnv: NodeJS.ProcessEnv = { ...process.env, RESEND_API_KEY: '', ZPAY_KEY: '', ZPAY_PID: '', PAYMENT_ENABLED: 'false' };
   await start([path.resolve('node_modules/next/dist/bin/next'), 'start', '--hostname', '127.0.0.1', '--port', '4311'], process.cwd(), cloudEnv, cloudOrigin);

@@ -7,6 +7,7 @@ export interface AccountUser { id: string; email: string; name: string }
 export interface AccountSession { user: AccountUser; expiresAt: string }
 export interface StoredAccountSession extends AccountSession { origin: string; cookie: string }
 export interface AccountBridgeTicket { ticket: string; expiresAt: string }
+export interface AccountAccess { origin: string; user: AccountUser; permissions: string[] }
 /** Native-only capability. Its captured session and newly issued secret never enter browser responses. */
 export interface ApplicationKeySession {
   assertCurrent(): Promise<void>;
@@ -152,6 +153,28 @@ export class PlatformAccountClient {
   readonly origin: string;
   constructor(origin: string, private readonly store: SecureCredentialStore<StoredAccountSession>) {
     this.origin = normalizePlatformOrigin(origin);
+  }
+
+  /** Live account permissions need only this browser's native session, never a model Key or worker. */
+  async accountAccess(): Promise<AccountAccess> {
+    const stored = await this.store.read();
+    const valid = (value: StoredAccountSession | null): value is StoredAccountSession => Boolean(value && value.user?.id
+      && value.origin === this.origin && validCookie(value.cookie) && Number.isFinite(Date.parse(value.expiresAt)) && Date.parse(value.expiresAt) > Date.now());
+    if (!valid(stored)) throw new AccountError("请先使用邮箱和密码登录 CCAGENT。", "unauthorized", 401);
+    const result = checked(await requestJson(this.origin, "/api/account/me", undefined, stored.cookie));
+    if (!result || typeof result !== "object") throw new AccountError("账户权限响应无效，请重新打开设置。", "invalid_response", 502);
+    const value = result as { user?: unknown; permissions?: unknown };
+    let user: AccountUser;
+    try { user = userIdentity(value.user); }
+    catch { throw new AccountError("账户权限响应无效，请重新打开设置。", "invalid_response", 502); }
+    if (user.id !== stored.user.id) throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    if (!Array.isArray(value.permissions) || value.permissions.length > 256 || value.permissions.some(permission => typeof permission !== "string" || !/^[a-z][a-z0-9._:-]{0,79}$/.test(permission))) {
+      throw new AccountError("账户权限响应无效，请重新打开设置。", "invalid_response", 502);
+    }
+    // Discard a response that raced logout, login replacement, or session rotation.
+    const current = await this.store.read();
+    if (!valid(current) || current.user.id !== stored.user.id || current.cookie !== stored.cookie) throw new AccountError("当前账户已改变，请重新打开设置。", "account_changed", 401);
+    return { origin: this.origin, user, permissions: [...new Set(value.permissions as string[])].sort() };
   }
 
   /** Fixed-purpose device Key management; never widens the generic service route allowlist. */

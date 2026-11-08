@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { and, eq } from 'drizzle-orm';
 import { isolatedDatabase } from './database-fixture';
@@ -98,6 +98,55 @@ test('isolated database and real Better Auth: browser-bound account bridge and s
       assert.equal((await issuePost(request('/api/account/bridge/issue', { state: opened.state }))).status, 401);
       assert.equal((await issuePost(request('/api/account/bridge/issue', { state: opened.state }, alice.cookie, 'https://evil.invalid'))).status, 403);
       assert.equal((await database().db.select().from(tables.verification).where(eq(tables.verification.identifier, 'account-bridge:' + '0'.repeat(64)))).length, 0);
+    });
+    await t.test('ordinary users receive no admin ticket even if the Better Auth role field says admin', async () => {
+      const opened = await page('/admin');
+      await database().db.update(tables.user).set({ role: 'admin' }).where(eq(tables.user.id, bob.id));
+      try {
+        const response = await issuePost(request('/api/account/bridge/issue', { state: opened.state }, bob.cookie));
+        assert.equal(response.status, 403); assert.equal(response.headers.get('set-cookie'), null);
+        const body = await response.json() as Record<string, unknown>;
+        assert.equal(body.code, 'PERMISSION_DENIED'); assert.equal(Object.hasOwn(body, 'ticket'), false);
+        const records = await database().db.select().from(tables.verification).where(eq(tables.verification.identifier,
+          'account-bridge:' + createHash('sha256').update(opened.state).digest('hex')));
+        assert.equal(records.length, 0);
+        const account = await page('/account'); const ticket = await issue(account.state, bob.cookie);
+        assert.equal((await consume(account.state, ticket, account.cookie)).status, 200);
+      } finally { await database().db.update(tables.user).set({ role: 'user' }).where(eq(tables.user.id, bob.id)); }
+    });
+    await t.test('business admin permission permits the admin bridge and source-session Cookie remains SDK-valid', async () => {
+      await database().db.insert(tables.userRoles).values({ userId: alice.id, roleId: 'admin' });
+      await database().db.update(tables.user).set({ role: 'admin' }).where(eq(tables.user.id, alice.id));
+      try {
+        const opened = await page('/admin'); const ticket = await issue(opened.state, alice.cookie);
+        const response = await consume(opened.state, ticket, opened.cookie);
+        assert.equal(response.status, 200); assert.deepEqual(await response.json(), { target: '/admin' });
+        const cookie = signedCookie(response); assert.ok(cookie);
+        assert.equal((await requireSession(new Headers({ cookie }))).session.id, alice.sessionId);
+      } finally {
+        await database().db.delete(tables.userRoles).where(and(eq(tables.userRoles.userId, alice.id), eq(tables.userRoles.roleId, 'admin')));
+        await database().db.update(tables.user).set({ role: 'user' }).where(eq(tables.user.id, alice.id));
+      }
+    });
+    await t.test('revoking admin permission after issue denies consume and consumes the ticket once without affecting account access', async () => {
+      const grant = () => database().db.insert(tables.userRoles).values({ userId: alice.id, roleId: 'admin' });
+      const revoke = () => database().db.delete(tables.userRoles).where(and(eq(tables.userRoles.userId, alice.id), eq(tables.userRoles.roleId, 'admin')));
+      await grant();
+      try {
+        const opened = await page('/admin'); const ticket = await issue(opened.state, alice.cookie);
+        await revoke();
+        const otherBrowser = await page('/admin');
+        assert.equal((await consume(opened.state, ticket, otherBrowser.cookie)).status, 400);
+        const response = await consume(opened.state, ticket, opened.cookie);
+        assert.equal(response.status, 403); assert.equal(response.headers.get('set-cookie'), null);
+        assert.equal((await response.json() as { code: string }).code, 'PERMISSION_DENIED');
+        assert.equal((await issuePost(request('/api/account/bridge/issue', { state: opened.state }, alice.cookie))).status, 403);
+        await grant();
+        assert.equal((await consume(opened.state, ticket, opened.cookie)).status, 401);
+        await revoke();
+        const account = await page('/account/billing'); const ordinaryTicket = await issue(account.state, alice.cookie);
+        assert.equal((await consume(account.state, ordinaryTicket, account.cookie)).status, 200);
+      } finally { await revoke(); }
     });
     await t.test('tickets are stored hashed and cannot be consumed in another browser or without its HttpOnly nonce', async () => {
       const opened = await page('/account/keys');

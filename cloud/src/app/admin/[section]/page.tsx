@@ -6,6 +6,7 @@ import { SettingsPanel } from '@/components/settings-panel';
 import { AdminActions } from '@/components/admin-actions';
 import { GatewayPanel } from '@/components/gateway-panel';
 import { GatewayDefaultsPanel } from '@/components/gateway-defaults-panel';
+import { GatewayConfigPanel } from '@/components/gateway-config-panel';
 import { adminServiceDefaults } from '@/core/service-defaults';
 import { AdminFilters, AdminSummary } from '@/components/admin-filters';
 import { webAccount } from '@/core/web-account';
@@ -47,6 +48,6 @@ export default async function AdminSection({ params, searchParams }: { params: P
     const safeRows = result ? JSON.parse(JSON.stringify(result.rows)) as Record<string, unknown>[] : [];
     content = <><section className="panel">{filterError && <div className="notice error" role="alert">{filterError}</div>}<AdminFilters section={section} values={result?.filters || adminFilterInputs(section, url)} pageSize={result?.pageSize} exportHref={result && current.permissions.includes('data.export') ? `/api/admin/data/${section}?${exportQuery}` : undefined} />{result && <><AdminSummary values={result.summary} /><DataTable rows={result.rows} /><Pager path={`/admin/${section}`} page={result.page} pageSize={result.pageSize} total={result.total} filters={result.filters} />{result.total > 10000 && <p className="small-text muted">每次导出最多 10,000 条，请继续缩小筛选范围；汇总金额包含全部匹配记录。</p>}</>}</section>{result && <><AdminActions key={`${section}-${result.page}-${exportQuery}`} section={section} rows={safeRows} permissions={current.permissions} />{(section === 'routes' || section === 'prices') && current.permissions.includes('routes.write') && <GatewayPanel mode={section} rows={safeRows} />}</>}</>;
   }
-  if (section === 'routes' && current.permissions.includes('routes.write')) content = <><GatewayDefaultsPanel initial={await adminServiceDefaults()} />{content}</>;
+  if (section === 'routes' && current.permissions.includes('routes.write')) content = <><GatewayDefaultsPanel initial={await adminServiceDefaults()} />{content}<GatewayConfigPanel /></>;
   return <Shell user={current.user} title={title} path={`/admin/${active}`} admin><PageHeader title={title} description={section === 'settings' ? '管理通用、认证、支付与计费配置，查看服务凭据配置状态。' : '查询平台业务数据，按权限执行管理操作。'} />{groups[section] && <nav className="tabs">{groups[section].map(([key, label]) => <Link className={section === key ? 'active' : ''} key={key} href={`/admin/${key}${taskQuery && ['usage', 'tasks'].includes(key) ? `?${taskQuery}` : ''}`}>{label}</Link>)}</nav>}{content}</Shell>;
 }
