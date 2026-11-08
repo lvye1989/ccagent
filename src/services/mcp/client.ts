@@ -33,18 +33,11 @@ import type {
 } from "../../types/mcp.js";
 import { debugLog, logWarn } from "../../utils/log.js";
 import { CLIENT_NAME, USER_AGENT, VERSION } from "../../version.js";
+import { resolveMcpEnvironment } from "./environment.js";
 import { GoogleWorkspaceOAuthProvider } from "./googleOAuth.js";
 import { isMcpServerEnabled, loadMcpPreferences } from "./preferences.js";
 import { abortable } from "./cancellation.js";
-
-// ─── Connect timeout ─────────────────────────────────────────────────
-
-const CONNECT_TIMEOUT_MS = 30_000;
-
-function getConnectTimeoutMs(): number {
-  const env = parseInt(process.env.MCP_CONNECT_TIMEOUT || "", 10);
-  return Number.isFinite(env) && env > 0 ? env : CONNECT_TIMEOUT_MS;
-}
+import { resolveMcpConnectTimeoutMs } from "./connectTimeout.js";
 
 // ─── Connection cache ────────────────────────────────────────────────
 
@@ -66,6 +59,7 @@ function getCacheKey(name: string, config: ScopedMcpServerConfig): string {
       url: config.url,
       headers: config.headers,
       oauth: config.type === "http" ? config.oauth : undefined,
+      connectTimeoutMs: config.connectTimeoutMs,
       toolTimeoutMs: config.toolTimeoutMs,
     })}`;
   }
@@ -74,6 +68,7 @@ function getCacheKey(name: string, config: ScopedMcpServerConfig): string {
     command: config.command,
     args: config.args,
     env: config.env,
+    connectTimeoutMs: config.connectTimeoutMs,
     toolTimeoutMs: config.toolTimeoutMs,
   })}`;
 }
@@ -215,7 +210,7 @@ function createStdioTransport(
     env: {
       // Inherit parent env first, then layer per-server overrides.
       ...(process.env as Record<string, string>),
-      ...(config.env ?? {}),
+      ...(resolveMcpEnvironment(config.env) ?? {}),
     },
     stderr: "pipe", // keep server stderr off our terminal UI
   });
@@ -255,7 +250,7 @@ function createHttpTransport(config: McpHTTPServerConfig & { scope: string }, op
     requestInit: {
       headers: {
         "User-Agent": USER_AGENT,
-        ...(config.headers ?? {}),
+        ...(resolveMcpEnvironment(config.headers) ?? {}),
       },
     },
   });
@@ -293,7 +288,7 @@ function createSseTransport(config: McpSSEServerConfig & { scope: string }): Tra
   // just ensure both header sets are present.
   const headers = {
     "User-Agent": USER_AGENT,
-    ...(config.headers ?? {}),
+    ...(resolveMcpEnvironment(config.headers) ?? {}),
   };
   const transport = new SSEClientTransport(new URL(config.url), {
     requestInit: { headers },
@@ -372,8 +367,7 @@ async function doConnect(
   };
   const onAbort = (): void => { void cleanup().catch(() => undefined); };
   controller.signal.addEventListener("abort", onAbort, { once: true });
-  const timeoutMs = options.interactive && config.type === "http" && config.oauth
-    ? 5 * 60_000 + getConnectTimeoutMs() : getConnectTimeoutMs();
+  const timeoutMs = resolveMcpConnectTimeoutMs(config, process.env.MCP_CONNECT_TIMEOUT, options.interactive);
   const connectPromise = client.connect(bundle.transport, { timeout: timeoutMs, signal: controller.signal });
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;

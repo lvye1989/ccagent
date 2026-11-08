@@ -18,7 +18,17 @@ if (button) {
   const services = document.createElement('button'); services.type = 'button'; services.textContent = '官方服务设置'; services.addEventListener('click', () => { menu.close(); document.dispatchEvent(new CustomEvent('ccagent:official-services')); });
   const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = '退出登录 / 切换账户';
   const close = document.createElement('button'); close.type = 'button'; close.textContent = '关闭'; close.addEventListener('click', () => menu.close());
-  logout.addEventListener('click', async () => { if (busy) return; busy = true; logout.disabled = true; message.textContent = '正在停止任务并退出…'; try { await request('logout', {}); window.location.replace('/login'); } catch (error) { message.textContent = error.message; } finally { busy = false; logout.disabled = false; } });
+  logout.addEventListener('click', async () => {
+    if (busy) return;
+    busy = true; logout.disabled = true; message.textContent = '正在保存画布并退出…';
+    try {
+      if (typeof window.ccagentBeforeAccountChange === 'function' && !await window.ccagentBeforeAccountChange()) {
+        throw new Error('画布尚未保存，请关闭此窗口后重试保存或导出备份。');
+      }
+      await request('logout', {}); window.location.replace('/login');
+    } catch (error) { message.textContent = error.message; }
+    finally { busy = false; logout.disabled = false; }
+  });
   menu.append(title, email, balance, center, services, admin, logout, close, message); document.body.append(menu);
   button.addEventListener('click', async () => {
     menu.showModal(); message.textContent = '正在读取账户信息…'; admin.hidden = true;

@@ -34,3 +34,22 @@ export function resolveWebSecret(value: unknown): string | undefined {
   const match = /^\$\{([A-Z_][A-Z0-9_]*)\}$/.exec(value);
   return match ? process.env[match[1]!] : undefined;
 }
+
+/** Removes only a generated Web credential, never an arbitrary environment variable. */
+export async function removeWebSecret(reference: string): Promise<void> {
+  const variable = /^\$\{(CCAGENT_WEB_KEY_[A-F0-9]{24})\}$/.exec(reference)?.[1];
+  if (!variable) return;
+  const file = getCCAgentPath(WEB_SECRET_FILE);
+  await withFileTransaction(file, async () => {
+    const info = await lstat(file).catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return null; throw e; });
+    if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("Secret store must be a regular file.");
+    const values = dotenv.parse(info ? await readFile(file) : Buffer.alloc(0));
+    delete values[variable];
+    const temporary = file + "." + randomUUID() + ".tmp";
+    try {
+      await writeFile(temporary, Object.entries(values).map(([key, secret]) => `${key}=${JSON.stringify(secret)}`).join("\n") + "\n", { mode: 0o600, flag: "wx" });
+      await rename(temporary, file);
+    } finally { await rm(temporary, { force: true }); }
+    delete process.env[variable];
+  });
+}

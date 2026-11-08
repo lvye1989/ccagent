@@ -1,4 +1,5 @@
 import { createPluginUI } from "./plugins.js";
+import { createHomePromotion } from "./promotion.js";
 import { createVoiceUI } from "./voice.js";
 import { createBrowserPanel } from "./browser-panel.js";
 import { createLibraryUI } from "./library.js";
@@ -10,6 +11,7 @@ import { createWorkspaceFiles } from "./workspace-files.js";
 import { createComposerTools } from "./composer-tools.js";
 import { createVisualizationUI } from "./visualization.js";
 import { createCloudTVUI } from "./cloudtv.js";
+import { createWhiteboardUI } from "./whiteboard.js";
 
 const $ = (id) => document.getElementById(id);
 const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), storageWarningShown: false };
@@ -30,7 +32,12 @@ async function api(route, options = {}) {
   });
   const body = await response.json();
   if (response.status === 401) { state.source?.close(); window.location.replace('/login'); }
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(body.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = body.code;
+    throw error;
+  }
   return body;
 }
 
@@ -156,7 +163,12 @@ async function showDiff(file) {
   } catch (error) { $("diff-content").textContent = error.message; }
 }
 
-function setView(view) {
+let viewRequest = 0;
+async function setView(view) {
+  const request = ++viewRequest;
+  if (state.view === "whiteboard" && view !== "whiteboard") {
+    if (!await whiteboardUI.beforeLeave() || request !== viewRequest) return false;
+  }
   if (view !== state.view) voiceUI.stopDictation();
   state.view = view;
   workspaceFiles.setView(view);
@@ -164,9 +176,10 @@ function setView(view) {
   const customizing = ["plugins", "skills", "agents", "mcp", "teams"].includes(view);
   const feature = ["schedules", "library", "memory"].includes(view);
   document.querySelector(".main-area").classList.toggle("home-active", view === "tasks");
-  $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings" || view === "visualization");
+  $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings" || view === "visualization" || view === "whiteboard");
   document.querySelector(".main-area").classList.toggle("visualization-active", view === "visualization");
   document.querySelector(".main-area").classList.toggle("cloudtv-active", view === "cloudtv");
+  document.querySelector(".main-area").classList.toggle("whiteboard-active", view === "whiteboard");
   $("cloudtv-entry").classList.toggle("selected", view === "cloudtv");
   if (view === "cloudtv") $("cloudtv-entry").setAttribute("aria-current", "page");
   else $("cloudtv-entry").removeAttribute("aria-current");
@@ -193,6 +206,7 @@ function setView(view) {
   $("teams-view").classList.toggle("hidden", view !== "teams");
   $("visualization-view").classList.toggle("hidden", view !== "visualization");
   $("cloudtv-view").classList.toggle("hidden", view !== "cloudtv");
+  $("whiteboard-view").classList.toggle("hidden", view !== "whiteboard");
   $("header-title").textContent = view === "thread" ? $("thread-title").textContent : ({ tasks: "任务", changes: "代码更改", about: "关于工作区", library: "资料空间", memory: "记忆管理", schedules: "定时任务", plugins: "Plugins", skills: "Skills", agents: "Agents", mcp: "MCP 服务", teams: "Agent Teams", settings: "设置" })[view];
   document.querySelectorAll(".rail-button[data-view]").forEach((item) => item.classList.toggle("selected", item.dataset.view === (view === "thread" ? "tasks" : ["skills", "agents", "mcp", "teams"].includes(view) ? "plugins" : view)));
   $("customize-search").classList.toggle("hidden", view === "teams");
@@ -209,6 +223,8 @@ function setView(view) {
   if (view === "schedules") void schedulesUI.open();
   if (view === "visualization") { $("header-title").textContent = "数据可视化"; void visualizationUI.open(); }
   if (view === "cloudtv") { $("header-title").textContent = "cloudTV"; cloudTVUI.open(); }
+  if (view === "whiteboard") { $("header-title").textContent = "画布 · Excalidraw"; void whiteboardUI.open(); }
+  return true;
 }
 
 function setComposeMode(mode) {
@@ -721,6 +737,7 @@ function handleEvent(event) {
 
 async function openSession(id) {
   try {
+    if (state.view === "whiteboard" && !await whiteboardUI.beforeLeave()) return false;
     if (state.sessionId !== id) voiceUI.stop();
     state.source?.close();
     state.source = null;
@@ -728,7 +745,6 @@ async function openSession(id) {
     state.sessionId = id;
     state.temporary = data.temporary === true;
     $("thread-view").classList.toggle("temporary-thread", state.temporary);
-    history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
     const entry = state.sessions.find((item) => item.sessionId === id);
     const firstUser = data.messages.find((message) => message.role === "user" && typeof message.content === "string");
     const title = entry ? taskTitle(entry) : (firstUser?.content || "新任务").slice(0, 80);
@@ -747,7 +763,8 @@ async function openSession(id) {
     state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || (block.type === "tool_result" && block.is_error)) ? "incomplete" : null);
     setBusy(data.busy);
     if (data.pending) showInteraction(data.pending);
-    setView("thread");
+    if (!await setView("thread")) return false;
+    history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
     renderSessions();
     state.source = new EventSource(`/api/sessions/${id}/events?lastEventId=${data.lastEventId || 0}`);
     state.source.onmessage = (message) => {
@@ -798,6 +815,8 @@ async function refreshSessions() {
     state.sessions = data.sessions;
     if (state.workspace && state.workspace !== data.workspace) composerTools.workspaceChanged();
     state.workspace = data.workspace;
+    const whiteboardWorkspaceChanged = await whiteboardUI.workspaceChanged(state.workspace);
+    if (whiteboardWorkspaceChanged && state.view === "whiteboard") void whiteboardUI.open();
     const visualizationWorkspaceChanged = visualizationUI.workspaceChanged(state.workspace);
     if (visualizationWorkspaceChanged && state.view === "visualization") void visualizationUI.open();
     await workspaceFiles.workspaceChanged(state.workspace);
@@ -828,7 +847,8 @@ async function refreshChanges() {
   catch (error) { toast(error.message); }
 }
 
-function newTask() {
+async function newTask() {
+  if (state.view === "whiteboard" && !await setView("tasks")) return false;
   composerTools.clear("thread-input");
   voiceUI.stop();
   browserUI.restore(null);
@@ -842,14 +862,16 @@ function newTask() {
   renderSessions();
   setView("tasks");
   $("home-input").focus();
+  return true;
 }
 
 async function selectWorkspace(folder) {
     state.switchingWorkspace = true;
     try {
+    if (!await whiteboardUI.beforeLeave()) throw new Error("画布尚未保存，请先重试保存或导出备份。");
     const result = await api("/api/workspaces/select", { method: "POST", body: JSON.stringify({ path: folder.trim() }) });
     if (result.workspace !== state.workspace) {
-      newTask();
+      await newTask();
       state.workspace = result.workspace;
       composerTools.workspaceChanged();
       state.selectedModel = "";
@@ -928,13 +950,21 @@ function installHandlers() {
     if (event.key === "Escape" && !$("interaction-overlay").classList.contains("hidden")) answerInteraction(false);
     if (event.key === "Escape") workspacePicker.close();
   });
-  $("refresh-all").addEventListener("click", () => { if (state.view === "cloudtv") cloudTVUI.refresh(); else if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
+  $("refresh-all").addEventListener("click", () => { if (state.view === "whiteboard") void whiteboardUI.open(); else if (state.view === "cloudtv") cloudTVUI.refresh(); else if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
   $("activity-refresh").addEventListener("click", refreshChanges);
   $("close-diff").addEventListener("click", () => $("diff-view").classList.add("hidden"));
   $("stop-button").addEventListener("click", async () => {
     if (!state.sessionId) return;
-    try { await api(`/api/sessions/${state.sessionId}/interrupt`, { method: "POST", body: "{}" }); }
+    const sessionId = state.sessionId;
+    $("stop-button").disabled = true;
+    try {
+      const result = await api(`/api/sessions/${sessionId}/interrupt`, { method: "POST", body: "{}" });
+      if (state.sessionId === sessionId && result.interrupted && state.model?.startsWith("ccagent:")) {
+        addNotice("已请求停止。已发出的官方服务调用仍会按可核实用量结算。请在“官方服务设置 → 调用与费用明细”核对原请求状态；查询不会新增消费。");
+      }
+    }
     catch (error) { toast(error.message); }
+    finally { $("stop-button").disabled = false; }
   });
   $("interaction-deny").addEventListener("click", () => answerInteraction(false));
   $("interaction-allow").addEventListener("click", () => answerInteraction(true));
@@ -962,6 +992,8 @@ const cloudTVUI = createCloudTVUI({ onBack: () => {
   if (state.sessionId) history.replaceState(null, "", `/?session=${encodeURIComponent(state.sessionId)}`);
   $(state.sessionId ? "thread-input" : "home-input").focus();
 } });
+const whiteboardUI = createWhiteboardUI({ api, toast, getWorkspace: () => state.workspace });
+window.ccagentBeforeAccountChange = () => whiteboardUI.beforeLeave();
 const visualizationUI = createVisualizationUI({ api, toast, getWorkspace: () => state.workspace, onAnalyze: ({ dataset, analysis }) => {
   newTask(); $("home-input").value = `请使用 AnalyzeData 分析当前工作文件夹的数据集 ${dataset.id}（${dataset.name} / ${dataset.sheet}）。字段映射：${JSON.stringify(analysis.config)}。筛选条件：${JSON.stringify(analysis.filters)}。请核对数据质量、解释图表趋势与异常，并给出有数据依据的建议。保留原文件，标注数据口径和源行。`; $("home-input").dispatchEvent(new Event("input", { bubbles: true })); toast("已填写分析请求，发送即可继续");
 } });
@@ -971,5 +1003,7 @@ await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customi
 const params = new URLSearchParams(location.search);
 const savedSession = params.get("session");
 if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
-else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv"].includes(params.get("view"))) setView(params.get("view"));
+else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv", "whiteboard"].includes(params.get("view"))) await setView(params.get("view"));
 else setView("tasks");
+const homePromotion = createHomePromotion({ api, isIdle: () => state.view === "tasks" && !state.busy && !state.pending && !$("home-input").value.trim() });
+void homePromotion.start();

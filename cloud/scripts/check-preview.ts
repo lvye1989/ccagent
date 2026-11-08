@@ -1,11 +1,11 @@
 import './load-env';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { previewAccessToken } from './lib/preview-access';
 
 const target = process.argv[2];
 if (!target || !/^https:\/\/ccagent-cloud-[a-z0-9]+-lvye-1989s-projects\.vercel\.app$/.test(target)) throw new Error('EXACT_CCAGENT_PREVIEW_URL_REQUIRED');
-const token = process.env.VERCEL_OIDC_TOKEN;
-if (!token) throw new Error('PULL_DEVELOPMENT_OIDC_TOKEN_FIRST');
+const token = await previewAccessToken();
 const headers = { 'x-vercel-trusted-oidc-idp-token': token };
 const external = await fetch(`${target}/login`, { redirect: 'manual', signal: AbortSignal.timeout(20000) });
 const protectionRedirect = external.status === 302 && new URL(external.headers.get('location') || '/', target).hostname === 'vercel.com';

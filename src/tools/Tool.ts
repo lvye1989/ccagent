@@ -52,6 +52,8 @@ export interface UserQuestionResponse {
 export interface ToolContext {
   /** Current working directory */
   cwd: string;
+  /** Runtime-only closed tool scope. An empty scope enables no tools; never fall back to the global registry. */
+  scopedTools?: readonly Tool[];
   /** Abort signal for cancellation */
   abortSignal?: AbortSignal;
   /** Callback to switch permission mode at runtime (set by QueryEngine). */

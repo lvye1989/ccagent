@@ -5,8 +5,9 @@ import os from "node:os";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import net from "node:net";
+import { createHash } from "node:crypto";
 import { startAccountFixture } from "./helpers/accountFixture.js";
-import { accountHome, enterPlatformAccount } from "../platform/account.js";
+import { accountHome, enterPlatformAccount, OFFICIAL_ACCOUNT_ORIGIN } from "../platform/account.js";
 import { QueryEngine } from "../core/queryEngine.js";
 import { query, runTools } from "../core/agenticLoop.js";
 import { AccountError } from "../platform/accountClient.js";
@@ -18,7 +19,7 @@ await mkdir(base); await mkdir(workspace);
 const fixture = await startAccountFixture(base);
 const previous = Object.fromEntries(["CCAGENT_HOME", "CCAGENT_PLATFORM_HOME", "CCAGENT_ACCOUNT_ID", "CCAGENT_AUTH_SESSION_FILE"].map(key => [key, process.env[key]]));
 process.env.CCAGENT_HOME = base; process.env.CCAGENT_PLATFORM_HOME = base; delete process.env.CCAGENT_ACCOUNT_ID; delete process.env.CCAGENT_AUTH_SESSION_FILE;
-const env = { ...process.env, CCAGENT_HOME: base, CCAGENT_PLATFORM_HOME: base, ANTHROPIC_API_KEY: "fixture-personal-key", DEEPSEEK_API_KEY: "fixture-custom-key" };
+const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_HOME: base, CCAGENT_PLATFORM_HOME: base, ANTHROPIC_API_KEY: "fixture-personal-key", DEEPSEEK_API_KEY: "fixture-custom-key" };
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let child: ReturnType<typeof spawn> | undefined, passed = 0;
 async function test(label: string, run: () => Promise<void>) { await run(); console.log(`PASS ${++passed} ${label}`); }
@@ -60,30 +61,88 @@ try {
   });
   await fixture.nativeClient.signIn(fixture.users[0]!.email, fixture.password);
   await writeFile(path.join(base, "legacy-sentinel.txt"), "legacy data remains untouched");
+  // A disabled, loopback-only installation exercises the real app catalog
+  // without reaching a third-party service or starting a desktop application.
+  const catalogSecret = "fixture-app-secret-not-for-other-accounts";
+  const catalogReference = "${CCAGENT_WEB_KEY_" + "A".repeat(24) + "}";
+  const catalogServer = { type: "http", url: "http://127.0.0.1:1/mcp", enabled: false, headers: { Authorization: `Bearer ${catalogReference}` } };
+  const catalogHome = accountHome(base, fixture.users[0]!.id);
+  const catalogSettingsFile = path.join(catalogHome, "settings.json");
+  const catalogSettings = JSON.parse(await readFile(catalogSettingsFile, "utf8").catch(error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
+    throw error;
+  }));
+  await writeFile(catalogSettingsFile, JSON.stringify({ ...catalogSettings,
+    mcpServers: { ...catalogSettings.mcpServers, "app-github": catalogServer },
+    webAppConnections: { ...catalogSettings.webAppConnections, github: {
+      serverName: "app-github", fingerprint: createHash("sha256").update(JSON.stringify(catalogServer)).digest("hex"), secrets: [catalogReference],
+    } },
+  }));
+  await writeFile(path.join(catalogHome, "web-secrets.env"), `${catalogReference.slice(2, -1)}=${JSON.stringify(catalogSecret)}\n`);
   const port = await new Promise<number>((resolve, reject) => { const probe = net.createServer(); probe.once("error", reject); probe.listen(0, "127.0.0.1", () => { const address = probe.address(); probe.close(() => address && typeof address !== "string" ? resolve(address.port) : reject(new Error("port"))); }); });
   const origin = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [entry, "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let logs = ""; child.stdout?.on("data", chunk => { logs += String(chunk); }); child.stderr?.on("data", chunk => { logs += String(chunk); });
   for (let i = 0; i < 100; i++) { if (await fetch(origin + "/api/health").then(response => response.ok, () => false)) break; if (child.exitCode !== null) throw new Error(logs); await delay(100); }
   const post = (route: string, body: unknown, cookie?: string, extra: Record<string, string> = {}) => fetch(origin + route, { method: "POST", headers: { origin, "x-ccagent-web": "1", "content-type": "application/json", ...(cookie ? { cookie } : {}), ...extra }, body: JSON.stringify(body) });
+  const appMutations = ["/api/apps/action", "/api/apps/comfyui/test", "/api/apps/photoshop/test", "/api/apps/sketchup/test"];
   async function login(index: number) { const response = await post("/api/account/login", { email: fixture.users[index]!.email, password: fixture.password }); assert.equal(response.status, 200, await response.text()); const cookie = response.headers.get("set-cookie")?.split(";")[0]; assert.ok(cookie); return cookie; }
   await test("fresh browsers cannot inherit the desktop/CLI login; login assets are public", async () => {
     assert.equal((await fetch(origin, { redirect: "manual" })).status, 303);
-    for (const route of ["/api/bootstrap", "/api/sessions", "/app.js"]) assert.equal((await fetch(origin + route)).status, 401, route);
+    for (const route of ["/api/bootstrap", "/api/sessions", "/api/apps", "/app.js", "/app-catalog.js", "/promotion.js"]) assert.equal((await fetch(origin + route)).status, 401, route);
+    for (const route of appMutations) assert.equal((await post(route, {})).status, 401, route);
     assert.equal((await fetch(origin + "/login")).status, 200);
     assert.equal((await post("/api/account/login", { email: fixture.users[0]!.email, password: fixture.password }, undefined, { origin: "https://evil.example" })).status, 403);
   });
-  await test("a first launch without a configured cloud service opens the login/setup page", async () => {
+  await test("a first launch opens login with the preset official account service", async () => {
     const configuration = path.join(base, "platform", "configuration.json"), saved = configuration + ".fixture-saved";
     await rename(configuration, saved);
     try {
       assert.equal((await fetch(origin, { redirect: "manual" })).status, 303);
       assert.equal((await fetch(origin + "/login")).status, 200);
-      assert.equal((await (await fetch(origin + "/api/account/config")).json() as { configured: boolean }).configured, false);
+      const config = await (await fetch(origin + "/api/account/config")).json() as { configured: boolean; origin: string };
+      assert.equal(config.configured, true);
+      assert.equal(config.origin, env.CCAGENT_CLOUD_URL?.trim() || OFFICIAL_ACCOUNT_ORIGIN);
     } finally { await rename(saved, configuration); }
+  });
+  await test("advanced connection settings reject every alias of this local Web origin", async () => {
+    for (const selectedOrigin of [origin, `http://localhost:${port}`, `http://[::1]:${port}`]) {
+      const response = await post("/api/account/setup", { origin: selectedOrigin });
+      assert.equal(response.status, 400);
+      assert.match((await response.json() as { error: string }).error, /本机应用地址/);
+    }
+    assert.equal((await (await fetch(origin + "/api/account/config")).json() as { origin: string }).origin, fixture.origin);
   });
   const cookieA = await login(0), cookieB = await login(1);
   const get = (route: string, cookie: string) => fetch(origin + route, { headers: { cookie } });
+  await test("verification resend validates email and enforces the same local request origin", async () => {
+    assert.equal((await post("/api/account/resend-verification", { email: "invalid" })).status, 400);
+    assert.equal((await post("/api/account/resend-verification", { email: fixture.users[0]!.email }, undefined, { origin: "https://evil.example" })).status, 403);
+    const reply = await post("/api/account/resend-verification", { email: fixture.users[0]!.email });
+    assert.equal(reply.status, 200);
+    assert.match((await reply.json() as { message: string }).message, /如果该邮箱已注册且尚未验证/);
+  });
+  await test("app catalog installations stay account-scoped and never expose credentials", async () => {
+    const responseA = await get("/api/apps", cookieA), responseB = await get("/api/apps", cookieB);
+    assert.equal(responseA.status, 200); assert.equal(responseB.status, 200);
+    const textA = await responseA.text(), textB = await responseB.text();
+    for (const text of [textA, textB]) {
+      assert.ok(!text.includes(catalogSecret)); assert.ok(!text.includes(catalogReference));
+      assert.ok(!text.includes(catalogServer.url));
+    }
+    type Catalog = { apps: Array<{ id: string; installed: boolean; state: string }> };
+    const appA = (JSON.parse(textA) as Catalog).apps.find(app => app.id === "github");
+    const appB = (JSON.parse(textB) as Catalog).apps.find(app => app.id === "github");
+    assert.ok(appA); assert.ok(appB);
+    assert.equal(appA.installed, true); assert.equal(appA.state, "disabled");
+    assert.equal(appB.installed, false); assert.equal(appB.state, "available");
+    const beforeOtherUninstall = await readFile(catalogSettingsFile, "utf8");
+    const otherUninstall = await post("/api/apps/action", { id: "github", op: "uninstall" }, cookieB);
+    assert.equal(otherUninstall.status, 400);
+    assert.equal(await readFile(catalogSettingsFile, "utf8"), beforeOtherUninstall);
+    const stillOwned = await (await get("/api/apps", cookieA)).json() as Catalog;
+    assert.equal(stillOwned.apps.find(app => app.id === "github")?.installed, true);
+  });
   await test("different browser logins run the real engine with isolated sessions", async () => {
     assert.equal((await get("/api/bootstrap", cookieA)).status, 200);
     const createdResponse = await post("/api/sessions", {}, cookieA); assert.equal(createdResponse.status, 201, await createdResponse.clone().text());
@@ -91,22 +150,35 @@ try {
     assert.equal((await get(`/api/sessions/${created.sessionId}`, cookieA)).status, 200);
     const crossAccount = await get(`/api/sessions/${created.sessionId}`, cookieB);
     assert.equal(crossAccount.status, 404, await crossAccount.text());
+    assert.equal((await post("/api/account/resend-verification", { email: fixture.users[0]!.email }, cookieA)).status, 200);
+    assert.equal((await get(`/api/sessions/${created.sessionId}`, cookieA)).status, 200, "Resending verification must preserve the existing local worker and session");
     assert.notEqual(accountHome(base, fixture.users[0]!.id), accountHome(base, fixture.users[1]!.id));
     assert.equal(await readFile(path.join(base, "legacy-sentinel.txt"), "utf8"), "legacy data remains untouched");
   });
   await test("an authentication outage blocks work and a fresh online session check recovers access", async () => {
     fixture.setUnavailable(true);
-    try { assert.equal((await get("/api/bootstrap", cookieA)).status, 503); }
+    try {
+      assert.equal((await get("/api/apps", cookieA)).status, 503);
+      // The first failed verification closes the worker. Further business
+      // requests stay blocked until an online account/status check recovers it.
+      assert.equal((await get("/api/bootstrap", cookieA)).status, 401);
+      for (const route of appMutations) assert.equal((await post(route, {}, cookieA)).status, 401, route);
+    }
     finally { fixture.setUnavailable(false); }
     assert.equal((await get("/api/account/status", cookieA)).status, 200);
     assert.equal((await get("/api/bootstrap", cookieA)).status, 200);
+    assert.equal((await get("/api/apps", cookieA)).status, 200);
   });
   await test("logout and account disable immediately block business APIs without affecting the other login", async () => {
     assert.equal((await post("/api/account/logout", {}, cookieA)).status, 200);
     assert.equal((await get("/api/bootstrap", cookieA)).status, 401);
+    assert.equal((await get("/api/apps", cookieA)).status, 401);
+    for (const route of appMutations) assert.equal((await post(route, {}, cookieA)).status, 401, route);
     assert.equal((await get("/api/bootstrap", cookieB)).status, 200);
     fixture.disable(fixture.users[1]!.id);
-    assert.equal((await get("/api/bootstrap", cookieB)).status, 403);
+    assert.equal((await get("/api/apps", cookieB)).status, 403);
+    assert.equal((await get("/api/bootstrap", cookieB)).status, 401);
+    for (const route of appMutations) assert.equal((await post(route, {}, cookieB)).status, 401, route);
   });
   // Exercise the exact private-header path used by Electron, with a real login.
   if (child.connected) { const closed = new Promise<void>(resolve => child!.once("exit", () => resolve())); child.send("ccagent:shutdown", () => {}); await closed; }

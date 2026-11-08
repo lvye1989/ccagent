@@ -41,6 +41,8 @@ export async function nativeHttpFixture(options: { schema: string; fetch?: typeo
           else if (method === 'DELETE') { requireSameOrigin(request); await deleteOwnedFile(user.id, id); response = json({ deleted: true }); }
           else { const file = await readOwnedFile(user.id, id); response = new Response(file.stream, { headers: { 'content-type': file.record.contentType, 'content-length': String(file.record.size) } }); }
         } else if (pathname === '/v1/responses') response = await gateway.execute(request, 'responses');
+        else if (pathname === '/v1/decisions') response = await gateway.execute(request, 'decisions');
+        else if (pathname === '/v1/search') response = await gateway.execute(request, 'search');
         else if (pathname === '/v1/voice') response = await gateway.execute(request, 'voice');
         else response = json({ code: 'NOT_FOUND' }, 404);
       } catch (error) { response = errorResponse(error); }

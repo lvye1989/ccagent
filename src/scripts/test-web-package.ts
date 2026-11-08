@@ -34,6 +34,18 @@ async function stopServer() {
   const closed = new Promise<void>(resolve => server!.once("close", () => resolve()));
   server.send?.("ccagent:shutdown", () => {}); const timeout = setTimeout(() => server?.kill(), 6000); await closed; clearTimeout(timeout);
 }
+async function checkPackagedApps(origin: string) {
+  for (const asset of ["/app-catalog.js", "/app-icons.js", "/promotion.js", "/promotion.css"]) {
+    const response = await authorizedFetch(origin + asset);
+    assert.equal(response.status, 200, asset);
+    assert.match(response.headers.get("content-type") ?? "", asset.endsWith(".css") ? /text\/css/ : /(?:text|application)\/javascript/, asset);
+    assert.ok((await response.text()).length > 0, asset);
+  }
+  const response = await authorizedFetch(origin + "/api/apps");
+  assert.equal(response.status, 200, "The packaged app catalog works without node_modules");
+  const catalog = await response.json() as { apps: Array<{ id: string; installed: boolean }> };
+  for (const id of ["photoshop", "comfyui", "sketchup"]) assert.ok(catalog.apps.some(app => app.id === id && !app.installed), id);
+}
 try {
   const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
   const packed = JSON.parse(execFileSync(process.execPath, [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", output], { cwd: root, encoding: "utf8" }))[0];
@@ -43,7 +55,8 @@ try {
   const reserve = createServer(); await new Promise<void>((r) => reserve.listen(0, "127.0.0.1", r)); const port = (reserve.address() as { port: number }).port; await new Promise<void>((r) => reserve.close(() => r())); const base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, [entry, "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] }); server.stdout!.on("data", (b) => { logs += b; }); server.stderr!.on("data", (b) => { logs += b; });
   let ready = false; for (let n = 0; n < 100; n++) { try { ready = (await authorizedFetch(base + "/api/health")).ok; if (ready) break; } catch {} if (server.exitCode !== null) throw new Error(logs); await delay(50); } assert(ready, "Packed server starts without node_modules");
-  for (const file of ["/charts.js", "/visualization.js", "/visualization-model.js", "/visualization.css"]) assert.equal((await authorizedFetch(base + file)).status, 200, file);
+  for (const file of ["/charts.js", "/visualization.js", "/visualization-model.js", "/visualization.css", "/whiteboard.js", "/whiteboard.css", "/whiteboard-ai.js", "/whiteboard-ai.css", "/whiteboard-editor.html", "/whiteboard-editor-shell.css", "/whiteboard-assets/whiteboard-editor.js", "/whiteboard-assets/whiteboard-editor.css", "/whiteboard-assets/licenses/Excalidraw.txt", "/whiteboard-assets/licenses/Excalidraw-fonts.txt"]) assert.equal((await authorizedFetch(base + file)).status, 200, file);
+  await checkPackagedApps(base);
   assert.match(await (await authorizedFetch(base + "/")).text(), /data-view="visualization"/);
   async function post(action: string, body: object) { const response = await authorizedFetch(base + action, { method: "POST", headers: { "content-type": "application/json", "x-ccagent-web": "1" }, body: JSON.stringify({ workspace, ...body }) }); const result = await response.json() as any; assert(response.ok, JSON.stringify(result)); return result; }
   const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([["项目", "区域", "投资"], ["甲", "华东", 11], ["乙", "华南", 22]]), "明细"); const bytes = XLSX.write(book, { type: "buffer", bookType: "xlsx" }) as Buffer;
@@ -55,7 +68,9 @@ try {
   server = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), path.join(root, "src/entrypoint/cli.ts"), "web", "--workspace", workspace, "--port", String(port)], { cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] }); server.stdout!.on("data", (b) => { logs += b; }); server.stderr!.on("data", (b) => { logs += b; });
   let sourceReady = false; for (let n = 0; n < 100; n++) { try { sourceReady = (await authorizedFetch(base + "/api/health")).ok; if (sourceReady) break; } catch {} if (server.exitCode !== null) throw new Error(logs); await delay(50); } assert(sourceReady, "Source-mode Web starts from a different working folder");
   assert.equal((await authorizedFetch(base + "/charts.js")).status, 200, "Source-mode entrypoint resolves built browser charts"); assert.equal((await post("/api/visualization/query", { id: datasetId })).analysis.primary.sum, 33);
-  console.log(`Packed/source Web/CLI: no node_modules in package, local chart assets in both entrypoints, real XLSX upload/statistics and shared CLI dataset evidence passed. Tarball: ${tarball}`);
+  assert.equal((await authorizedFetch(base + "/whiteboard-assets/whiteboard-editor.js")).status, 200, "Source-mode entrypoint resolves the bundled Excalidraw editor");
+  await checkPackagedApps(base);
+  console.log(`Packed/source Web/CLI: no node_modules in package, chart/app catalog/promotion assets and real app API in both entrypoints, real XLSX upload/statistics and shared CLI dataset evidence passed. Tarball: ${tarball}`);
 } finally {
   await stopServer(); await accountFixture.close();
   mock.closeAllConnections(); await new Promise<void>((r) => mock.close(() => r()));

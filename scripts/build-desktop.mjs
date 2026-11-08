@@ -51,6 +51,7 @@ await resetStage(stage); await resetStage(backend);
 // Use the npm package's explicit resource list, never recursively copy the repo.
 const payload = ['dist/ccagent.js', 'dist/charts.js', ...pkg.files.filter(name => name.startsWith('web/') || name.startsWith('rhino/')), 'LICENSE', '.env.example'];
 for (const relative of payload) await copy(relative);
+await fs.cp(path.join(root, 'dist', 'whiteboard'), path.join(backend, 'dist', 'whiteboard'), { recursive: true });
 await fs.cp(nodeFolder, path.join(backend, 'runtime'), { recursive: true, filter: source => !['install_tools.bat', 'node_etw_provider.man'].includes(path.basename(source)) });
 const runtimeVersion = execFileSync(path.join(backend, 'runtime', 'node.exe'), ['--version'], { windowsHide: true, encoding: 'utf8' }).trim();
 if (runtimeVersion !== 'v' + nodeVersion) throw new Error('Unexpected bundled runtime');

@@ -5,17 +5,19 @@ import { and, eq, gt } from 'drizzle-orm';
 import { database } from './db';
 import * as schema from './db/schema';
 import { authEnvironment } from './env';
-import { deliverAccountMail, type MailTransport } from './mail';
+import { accountMailDelivery, deliverAccountMail, requireAccountMailConfiguration, type MailTransport } from './mail';
 import { HttpError } from './http';
 
 export function createAuthentication(options: { db: ReturnType<typeof database>['db']; origin: string; secret: string; deliverMail: MailTransport }) {
-  return betterAuth({ appName: 'CCAGENT', baseURL: options.origin, secret: options.secret,
+  const mail = accountMailDelivery(options.deliverMail,
+    options.deliverMail === deliverAccountMail ? requireAccountMailConfiguration : undefined);
+  const auth = betterAuth({ appName: 'CCAGENT', baseURL: options.origin, secret: options.secret,
     trustedOrigins: [options.origin], database: drizzleAdapter(options.db, { provider: 'pg', schema, transaction: true }),
     emailAndPassword: { enabled: true, minPasswordLength: 8, maxPasswordLength: 128, requireEmailVerification: true, autoSignIn: false,
       revokeSessionsOnPasswordReset: true, resetPasswordTokenExpiresIn: 3600,
-      sendResetPassword: async ({ user, url }) => options.deliverMail({ to: user.email, url, kind: 'reset' }) },
+      sendResetPassword: async ({ user, url }) => mail.deliver({ to: user.email, url, kind: 'reset' }) },
     emailVerification: { sendOnSignUp: true, sendOnSignIn: true, autoSignInAfterVerification: false, expiresIn: 3600,
-      sendVerificationEmail: async ({ user, url }) => options.deliverMail({ to: user.email, url, kind: 'verification' }) },
+      sendVerificationEmail: async ({ user, url }) => mail.deliver({ to: user.email, url, kind: 'verification' }) },
     session: { expiresIn: 7 * 86400, updateAge: 86400, cookieCache: { enabled: false } },
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 100,
       customRules: { '/sign-in/email': { window: 60, max: 10 }, '/sign-up/email': { window: 60, max: 5 },
@@ -26,6 +28,8 @@ export function createAuthentication(options: { db: ReturnType<typeof database>[
     // Query errors may contain password hashes or session tokens; never log raw adapter errors.
     logger: { log: level => { if (level === 'error') console.error('AUTH_REQUEST_FAILED'); } },
   });
+  const handler = mail.wrapHandler(auth.handler);
+  return { ...auth, handler, fetch: handler };
 }
 type Authentication = ReturnType<typeof createAuthentication>;
 let instance: Authentication | undefined;

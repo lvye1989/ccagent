@@ -59,7 +59,8 @@ import { getAllAgents } from "../agents/registry.js";
 import { isAgentEnabled, setAgentState } from "../agents/preferences.js";
 import { bootstrapMcp, startMcpServer, refreshGlobalToolRegistry, requestMcpReconnect, setMcpServerOpen } from "../services/mcp/bootstrap.js";
 import { deleteMcpRegistryEntry, getMcpRegistry, getMcpRegistryEntry } from "../services/mcp/registry.js";
-import { isMcpServerEnabled, loadMcpPreferences } from "../services/mcp/preferences.js";
+import { isMcpServerEnabled, loadMcpPreferences, saveMcpServerState } from "../services/mcp/preferences.js";
+import { GoogleWorkspaceOAuthProvider } from "../services/mcp/googleOAuth.js";
 import { loadMcpConfigs } from "../services/mcp/config.js";
 import { clearServerCache, getActiveMcpConnections } from "../services/mcp/client.js";
 import { VERSION } from "../version.js";
@@ -78,6 +79,13 @@ import { getAllUserCommands } from "../commands/userCommands/registry.js";
 import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
 import { requirePlatformScope } from "../platform/account.js";
 import { AccountError } from "../platform/accountClient.js";
+import { changeWebApp, webAppsView } from "./webApps.js";
+import { runPhotoshopWebTest } from "./webPhotoshop.js";
+import { runComfyuiWebTest } from "./webComfyui.js";
+import { runSketchupWebTest } from "./webSketchup.js";
+import { handleWhiteboard, WhiteboardError } from "./webWhiteboards.js";
+import { serveWhiteboardAsset, WHITEBOARD_EDITOR_CSP } from "./webWhiteboardAssets.js";
+import { createWhiteboardAIManager, WhiteboardAIError } from "./webWhiteboardAI.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -87,6 +95,10 @@ const MIME: Record<string, string> = {
   "/app.js": "text/javascript; charset=utf-8",
   "/account-menu.js": "text/javascript; charset=utf-8",
   "/plugins.js": "text/javascript; charset=utf-8",
+  "/app-catalog.js": "text/javascript; charset=utf-8",
+  "/app-icons.js": "text/javascript; charset=utf-8",
+  "/promotion.js": "text/javascript; charset=utf-8",
+  "/promotion.css": "text/css; charset=utf-8",
   "/voice.js": "text/javascript; charset=utf-8",
   "/browser-panel.js": "text/javascript; charset=utf-8",
   "/cloudtv.js": "text/javascript; charset=utf-8",
@@ -103,6 +115,12 @@ const MIME: Record<string, string> = {
   "/visualization.js": "text/javascript; charset=utf-8",
   "/visualization-model.js": "text/javascript; charset=utf-8",
   "/visualization.css": "text/css; charset=utf-8",
+  "/whiteboard.js": "text/javascript; charset=utf-8",
+  "/whiteboard.css": "text/css; charset=utf-8",
+  "/whiteboard-ai.js": "text/javascript; charset=utf-8",
+  "/whiteboard-ai.css": "text/css; charset=utf-8",
+  "/whiteboard-editor.html": "text/html; charset=utf-8",
+  "/whiteboard-editor-shell.css": "text/css; charset=utf-8",
   "/charts.js": "text/javascript; charset=utf-8",
   "/workbench.css": "text/css; charset=utf-8",
   "/styles.css": "text/css; charset=utf-8",
@@ -460,6 +478,18 @@ export async function runWebWorker(args: string[]): Promise<void> {
     return (await webModels()).some((item) => item.id === id && item.available);
   }
 
+  const whiteboardAI = createWhiteboardAIManager({
+    getWorkspace: () => workspace,
+    getDefaultModel: () => model,
+    validateModel: validateWebModel,
+    isBusy: () => Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || teamOwner || getActiveTeam() || getRunningAsyncAgents().length),
+    onBusy: (runId) => {
+      if (activeTurn || scheduleDispatching || pluginMutationBusy || teamOwner || getActiveTeam() || getRunningAsyncAgents().length) throw new WhiteboardAIError("请先结束当前任务，再开始 AI 绘图。", 409, "busy");
+      activeTurn = runId;
+    },
+    onIdle: (runId) => { if (activeTurn === runId) activeTurn = null; },
+  });
+
   async function mcpView() {
     const configs = await loadMcpConfigs(workspace);
     return {
@@ -658,6 +688,29 @@ export async function runWebWorker(args: string[]): Promise<void> {
         try { return json(res, action === "import" ? 201 : 200, await handleVisualization(action, body, selected)); }
         finally { if (mutating) pluginMutationBusy = false; }
       }
+      if (req.method === "GET" && route.startsWith("/whiteboard-assets/")) return await serveWhiteboardAsset(res, route, webRoot);
+      if (route.startsWith("/api/whiteboards/ai/")) {
+        const body = req.method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req);
+        if (body.workspace !== workspace) return json(res, 409, { error: "工作文件夹已切换，请重新打开画布。", code: "workspace_changed" });
+        if (req.method === "POST" && route === "/api/whiteboards/ai/start") return json(res, 202, await whiteboardAI.start(body));
+        if ((req.method === "GET" && route === "/api/whiteboards/ai/run") || (req.method === "POST" && route === "/api/whiteboards/ai/stop")) {
+          if (typeof body.runId !== "string") return json(res, 400, { error: "Invalid drawing run id" });
+          return json(res, 200, route.endsWith("/stop") ? await whiteboardAI.stop(body.runId, workspace) : await whiteboardAI.status(body.runId, workspace));
+        }
+        return json(res, 404, { error: "Unknown whiteboard AI action" });
+      }
+      if (route === "/api/whiteboards" || route.startsWith("/api/whiteboards/")) {
+        const body = req.method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req, 12 * 1024 * 1024);
+        if (body.workspace !== workspace) return json(res, 409, { error: "工作文件夹已切换，请重新打开画布。", code: "workspace_changed" });
+        if (req.method === "GET" && route === "/api/whiteboards") return json(res, 200, await handleWhiteboard("list", body, workspace));
+        const action = route.slice("/api/whiteboards/".length);
+        if (req.method !== "POST" || !["create", "open", "save"].includes(action)) return json(res, 404, { error: "Unknown whiteboard action" });
+        const mutating = action !== "open";
+        if (mutating && pluginMutationBusy) return json(res, 409, { error: "当前配置或画布正在保存，请稍后重试。", code: "busy" });
+        if (mutating) pluginMutationBusy = true;
+        try { return json(res, action === "create" ? 201 : 200, await handleWhiteboard(action, body, workspace)); }
+        finally { if (mutating) pluginMutationBusy = false; }
+      }
       if (req.method === "GET" && route === "/api/models") return json(res, 200, { defaultModel: model, models: await webModels() });
       if (req.method === "GET" && route === "/api/composer-tools") {
         const commands = [
@@ -850,6 +903,76 @@ export async function runWebWorker(args: string[]): Promise<void> {
               .map((entry) => entry.scope),
           })),
         });
+      }
+      if (req.method === "GET" && route === "/api/apps") return json(res, 200, await webAppsView(workspace));
+      if (req.method === "POST" && route === "/api/apps/sketchup/test") {
+        if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再测试 SketchUp。" });
+        pluginMutationBusy = true;
+        try {
+          const body = await readJson(req);
+          if (Object.keys(body).length) throw new Error("SketchUp 连接测试不接受 Ruby、脚本或模型修改参数。");
+          const app = (await webAppsView(workspace)).apps.find((item) => item.id === "sketchup");
+          if (!app?.installed || app.state !== "connected") throw new Error("请先安装并连接 SketchUp MCP；配置变更或断开后需要重新连接。");
+          const entry = getMcpRegistryEntry(app.serverName!);
+          if (!entry || entry.connection.type !== "connected") throw new Error("SketchUp MCP 尚未连接。");
+          return json(res, 200, await runSketchupWebTest(workspace, entry.tools));
+        } finally { pluginMutationBusy = false; }
+      }
+      if (req.method === "POST" && route === "/api/apps/comfyui/test") {
+        if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再测试 ComfyUI。" });
+        pluginMutationBusy = true;
+        try {
+          const body = await readJson(req);
+          if (Object.keys(body).length) throw new Error("ComfyUI 连接测试不接受脚本、工作流或其他参数。");
+          const app = (await webAppsView(workspace)).apps.find((item) => item.id === "comfyui");
+          if (!app?.installed || app.state !== "connected") throw new Error("请先安装并连接 ComfyUI MCP；配置变更或断开后需要重新连接。");
+          const entry = getMcpRegistryEntry(app.serverName!);
+          if (!entry || entry.connection.type !== "connected") throw new Error("ComfyUI MCP 尚未连接。");
+          return json(res, 200, await runComfyuiWebTest(workspace, entry.tools));
+        } finally { pluginMutationBusy = false; }
+      }
+      if (req.method === "POST" && route === "/api/apps/photoshop/test") {
+        if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再测试 Photoshop。" });
+        pluginMutationBusy = true;
+        try {
+          const body = await readJson(req);
+          if (body.mode !== "connection" && body.mode !== "sample") throw new Error("请选择连接测试或样例导出测试。");
+          const app = (await webAppsView(workspace)).apps.find((item) => item.id === "photoshop");
+          if (!app?.installed || app.state !== "connected") throw new Error("请先安装并连接 Photoshop MCP；配置变更或断开后需要重新连接。");
+          const entry = getMcpRegistryEntry(app.serverName!);
+          if (!entry || entry.connection.type !== "connected") throw new Error("Photoshop MCP 尚未连接。");
+          return json(res, 200, await runPhotoshopWebTest(workspace, body.mode, entry.tools));
+        } finally { pluginMutationBusy = false; }
+      }
+      if (req.method === "POST" && route === "/api/apps/action") {
+        if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再修改应用连接。" });
+        pluginMutationBusy = true;
+        try {
+          const result = await changeWebApp(workspace, await readJson(req));
+          if (result.removed) {
+            const entry = getMcpRegistryEntry(result.serverName);
+            deleteMcpRegistryEntry(result.serverName);
+            refreshGlobalToolRegistry();
+            if (entry) await clearServerCache(result.serverName, entry.connection.config);
+            configuredMcpNames.delete(result.serverName);
+            const oldConfig = entry?.connection.config;
+            if (oldConfig?.type === "http" && oldConfig.oauth) {
+              const host = new URL(oldConfig.url).hostname;
+              const others = Object.values((await loadMcpConfigs(workspace)).servers);
+              if (!others.some((item) => item.type === "http" && item.oauth && new URL(item.url).hostname === host)) {
+                await new GoogleWorkspaceOAuthProvider(host, oldConfig.oauth).invalidateCredentials("tokens");
+              }
+            }
+          } else {
+            const config = (await loadMcpConfigs(workspace)).servers[result.serverName];
+            if (config) {
+              await saveMcpServerState(result.serverName, "open");
+              configuredMcpNames.add(result.serverName);
+              void startMcpServer(result.serverName, config).catch(() => {});
+            }
+          }
+          return json(res, 200, await webAppsView(workspace));
+        } finally { pluginMutationBusy = false; }
       }
       if (req.method === "GET" && route === "/api/skills") {
         return json(res, 200, {
@@ -1185,7 +1308,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         const bytes = await readFile(route === "/charts.js" ? chartsPath : path.join(webRoot, file));
         res.writeHead(200, {
           "content-type": MIME[route], "cache-control": "no-store",
-          "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src https: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'",
+          "content-security-policy": route === "/whiteboard-editor.html" ? WHITEBOARD_EDITOR_CSP : "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src 'self' https: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'",
           "x-content-type-options": "nosniff",
           "referrer-policy": "no-referrer",
         });
@@ -1193,6 +1316,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
       }
       return json(res, 404, { error: "Not found" });
     } catch (error) {
+      if (error instanceof WhiteboardAIError) return json(res, error.status, { error: error.message, code: error.code });
+      if (error instanceof WhiteboardError) return json(res, error.status, { error: error.message, code: error.code });
       if (error instanceof AccountError) return json(res, error.status || 503, { error: error.message, code: error.code });
       const message = error instanceof Error ? error.message : String(error);
       return json(res, message.includes("Session ") ? 404 : 400, { error: message });
@@ -1210,6 +1335,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       if (stopping) return;
       stopping = true;
       server.close();
+      whiteboardAI.dispose();
       for (const session of sessions.values()) {
         session.engine.interrupt();
         for (const client of session.clients) client.end();

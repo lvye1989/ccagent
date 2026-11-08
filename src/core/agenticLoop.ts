@@ -19,8 +19,9 @@ import { streamMessage } from "../services/api/streaming.js";
 import { ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
 import type { QuerySource } from "../services/api/withRetry.js";
 import { compactMessages } from "../context/compaction.js";
-import { findEnabledToolByName, getEnabledToolManifest } from "../tools/index.js";
-import { truncateToolResult, type ToolContext, type ToolResult } from "../tools/Tool.js";
+import { findEnabledToolByName, getEnabledToolManifest, type EnabledToolManifest } from "../tools/index.js";
+import { truncateToolResult, type Tool, type ToolContext, type ToolResult } from "../tools/Tool.js";
+import { resolveToolDecisionPolicy } from "../tools/decisionPolicy.js";
 import { appendTextToContent, prependTextToContent } from "../tools/contentBlocks.js";
 import {
   preflightComputerActionGroupWithJev,
@@ -320,10 +321,25 @@ interface ToolBatch {
  * order the model's tool_use blocks appeared in the assistant message
  * (the API also requires tool_results to follow that order).
  */
-function partitionToolCalls(blocks: ToolUseBlock[]): ToolBatch[] {
+/** Runtime scopes are capabilities, not suggestions from a model's tool schema. */
+function findContextTool(context: ToolContext, name: string): Tool | undefined {
+  if (context.scopedTools === undefined) return findEnabledToolByName(name);
+  if (context.abortSignal?.aborted) return undefined;
+  const matches = context.scopedTools.filter((tool) => tool.name === name);
+  return matches.length === 1 && matches[0]!.isEnabled() ? matches[0] : undefined;
+}
+
+function contextToolManifest(context: ToolContext): EnabledToolManifest {
+  if (context.scopedTools === undefined) return getEnabledToolManifest();
+  return { revision: 1, tools: context.scopedTools.filter((tool) => findContextTool(context, tool.name) === tool).map((tool) => ({
+    name: tool.name, description: tool.description, inputSchema: tool.inputSchema, decisionPolicy: resolveToolDecisionPolicy(tool),
+  })) };
+}
+
+function partitionToolCalls(blocks: ToolUseBlock[], context: ToolContext): ToolBatch[] {
   const batches: ToolBatch[] = [];
   for (const block of blocks) {
-    const tool = findEnabledToolByName(block.name);
+    const tool = findContextTool(context, block.name);
     const safe = !!tool?.isConcurrencySafe?.(
       (block.input as Record<string, unknown>) ?? {},
     );
@@ -364,7 +380,7 @@ async function runOneToolBlock(
   await requirePlatformScope();
   let toolDispatched = false;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
-  const tool = findEnabledToolByName(block.name);
+  const tool = findContextTool(context, block.name);
   if (!tool || (context.agentTeamsAllowed === false && (["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(block.name) || (block.name === "Agent" && Boolean(toolInput.team_name || toolInput.name))))) {
     const result: ToolResult = {
       content: `Error: Tool "${block.name}" is unknown or was disabled after the model selected it. Refresh the enabled tools list before retrying.`,
@@ -625,7 +641,7 @@ async function runOneToolBlock(
       toolInput = { ...toolInput, risk_category: jevDecision.effectiveRisk };
     }
     const rhinoToolManifest = block.name === "RhinoAction" || (options.rhinoFastLane && block.name === "RhinoInspect")
-      ? getEnabledToolManifest()
+      ? contextToolManifest(context)
       : undefined;
     const rhinoCapabilitiesStep = options.rhinoFastLane && block.name === "RhinoInspect" && toolInput.operation === "capabilities";
     const rhinoJevDecision = block.name === "RhinoAction"
@@ -678,7 +694,7 @@ async function runOneToolBlock(
       setToolStatus(block.id, "classifier");
     }
     const toolManifest = effectiveMode === "auto" && shouldUseJevToolClassifier(tool)
-      ? getEnabledToolManifest()
+      ? contextToolManifest(context)
       : undefined;
     const toolJevDecision = effectiveMode === "auto" && !jevDecision && block.name !== "RhinoAction" && block.name !== "RhinoSequence" && !options.rhinoFastLane && shouldUseJevToolClassifier(tool)
       ? await decideToolUseWithJev(
@@ -963,7 +979,7 @@ async function runOneToolBlock(
           const observation = getCachedRhinoObservation(observationId);
           if (!observation || observation.objectsTruncated) throw new Error("Rhino batch preflight needs a fresh complete observation");
           if (steps.some(step => !(RHINO_FAST_ACTIONS as readonly string[]).includes(step.action))) throw new Error("Rhino batch contains an unsupported action");
-          return decideRhinoSequenceBatchWithJev(steps as RhinoJevBatchStep[], observation, options.conversationMessages, context.abortSignal, getEnabledToolManifest());
+          return decideRhinoSequenceBatchWithJev(steps as RhinoJevBatchStep[], observation, options.conversationMessages, context.abortSignal, contextToolManifest(context));
         },
         runRhinoFastTool: async (name: "RhinoObserve" | "RhinoInspect" | "RhinoAction", input: Record<string, unknown>, preapproval?: {
           action: string; parameters: Record<string, unknown>; observationId: string; intent?: string; decision: unknown;
@@ -1005,7 +1021,7 @@ async function runOneToolBlock(
     // in flight (for example `/mcp close`). Never dispatch the stale object
     // that was resolved before those awaits; require the same tool instance to
     // still be enabled at the final execution boundary.
-    const dispatchTool = findEnabledToolByName(block.name);
+    const dispatchTool = findContextTool(context, block.name);
     if (!dispatchTool || dispatchTool !== tool || (context.agentTeamsAllowed === false && (["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(block.name) || (block.name === "Agent" && Boolean(toolInput.team_name || toolInput.name))))) {
       if (block.name === "BrowserSearch") revokeBrowserSearchExecution(block.id, context.sessionId);
       const result: ToolResult = {
@@ -1195,7 +1211,7 @@ export async function runTools(
   const executions: ToolExecutionResult[] = [];
   const permissionRequests: PermissionRequest[] = [];
 
-  for (const batch of partitionToolCalls(toolUseBlocks)) {
+  for (const batch of partitionToolCalls(toolUseBlocks, context)) {
     const results = batch.isConcurrencySafe && batch.blocks.length > 1
       ? await runBlocksConcurrently(batch.blocks, context, options)
       : await runBlocksSerially(batch.blocks, context, options);

@@ -1,3 +1,5 @@
+import { appIcon } from "./app-icons.js";
+import { createAppCatalog } from "./app-catalog.js";
 const $ = (id) => document.getElementById(id);
 
 function node(tag, className = "", value = "") {
@@ -41,11 +43,21 @@ function iconFor(name, compact = false) {
 }
 
 export function createPluginUI({ api, toast, navigate, editAgent }) {
-  const state = { view: "plugins", tab: "public", data: null, skills: [], skillsEnabled: true, agents: [], mcp: null, query: "", loading: false };
+  const state = { view: "plugins", tab: "public", data: null, apps: [], skills: [], skillsEnabled: true, agents: [], mcp: null, query: "", loading: false };
+  const apps = createAppCatalog({ api, toast, dialog, closeDialog, state, render: () => { renderSidebar(); renderCatalog(); } });
 
-  function closeDialog() { $("plugin-dialog-overlay").classList.add("hidden"); }
+  let dialogFocus;
+  function closeDialog() {
+    const overlay = $("plugin-dialog-overlay");
+    if (overlay.classList.contains("hidden")) return;
+    overlay.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
+    overlay.classList.add("hidden");
+    if (dialogFocus?.isConnected) dialogFocus.focus();
+    else if (state.view === "plugins") $("plugin-search-input").focus();
+  }
 
   function dialog(title, eyebrow, fillBody, actions = []) {
+    if ($("plugin-dialog-overlay").classList.contains("hidden")) dialogFocus = document.activeElement;
     $("plugin-dialog-title").textContent = title;
     $("plugin-dialog-eyebrow").textContent = eyebrow;
     const body = $("plugin-dialog-body");
@@ -55,6 +67,7 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
     fillBody(body);
     for (const item of actions) footer.append(actionButton(item.label, item.onClick, item.className || ""));
     $("plugin-dialog-overlay").classList.remove("hidden");
+    $("plugin-dialog-close").focus();
   }
 
   function detail(body, label, value) {
@@ -79,7 +92,8 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
 
   async function refreshPlugins() {
     try {
-      state.data = await api("/api/plugins");
+      const [plugins, appData] = await Promise.all([api("/api/plugins"), api("/api/apps")]);
+      state.data = plugins; state.apps = appData.apps;
       renderSidebar();
       if (state.view === "plugins") renderCatalog();
     } catch (error) { toast(`插件列表读取失败：${error.message}`); }
@@ -113,8 +127,9 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
     state.loading = true;
     try {
       await api("/api/integrations/sync", { method: "POST", body: "{}" });
-      const [plugins, skills, agents, mcp] = await Promise.all([api("/api/plugins"), api("/api/skills"), api("/api/agents"), api("/api/mcp")]);
+      const [plugins, skills, agents, mcp, appData] = await Promise.all([api("/api/plugins"), api("/api/skills"), api("/api/agents"), api("/api/mcp"), api("/api/apps")]);
       state.data = plugins;
+      state.apps = appData.apps;
       state.skills = skills.skills;
       state.agents = agents.agents;
       state.mcp = mcp;
@@ -141,7 +156,7 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
 
   function matches(row) {
     if (!state.query) return true;
-    return [row.name, row.pluginId, row.description, row.marketplace].some((value) =>
+    return [row.name, row.pluginId, row.description, row.marketplace, row.category].some((value) =>
       typeof value === "string" && value.toLocaleLowerCase().includes(state.query));
   }
 
@@ -149,10 +164,17 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
     const list = $("installed-sidebar-list");
     list.replaceChildren();
     const installed = state.data?.installed || [];
-    $("plugin-installed-count").textContent = installed.length ? String(installed.length) : "";
-    if (!installed.length) {
-      list.append(node("div", "installed-sidebar-empty", "还没有安装的插件。可从已注册的市场发现插件。"));
+    const installedApps = state.apps.filter((app) => app.installed);
+    const count = installed.length + installedApps.length;
+    $("plugin-installed-count").textContent = count ? String(count) : "";
+    if (!count) {
+      list.append(node("div", "installed-sidebar-empty", "在‘发现’中连接常用应用，或从插件市场安装扩展。"));
       return;
+    }
+    for (const app of installedApps) {
+      const button = actionButton("", () => { navigate("plugins"); apps.show(app); }, "installed-sidebar-item");
+      button.append(appIcon(app.id, true), node("span", "", app.name));
+      list.append(button);
     }
     for (const item of installed) {
       const button = actionButton("", () => { navigate("plugins"); showInstalled(item); }, "installed-sidebar-item");
@@ -169,7 +191,7 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
     const title = node("strong", "", item.name);
     const description = node("small", "", item.description || (installed ? `${item.version} · ${item.enabled ? "已启用" : "已停用"}` : `来自 ${item.marketplace}`));
     copy.append(title, description);
-    const control = actionButton(installed ? "···" : "+", () => installed ? showInstalled(item) : previewInstall(item, "install"), "plugin-card-action");
+    const control = actionButton(installed ? "管理" : "安装", () => installed ? showInstalled(item) : previewInstall(item, "install"), "plugin-card-action plugin-text-action");
     control.setAttribute("aria-label", installed ? `管理 ${item.name}` : `安装 ${item.name}`);
     row.append(copy, control);
     return row;
@@ -199,17 +221,20 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
     if (!data) return empty(content, "正在载入插件…");
     const installed = data.installed.filter(matches);
     const available = data.available.filter(matches);
+    const appItems = state.apps.filter(matches).filter((app) => state.tab !== "personal" || app.installed);
     document.querySelectorAll(".plugin-tab").forEach((tab) => {
       const active = tab.dataset.pluginTab === state.tab;
       tab.classList.toggle("selected", active);
       tab.setAttribute("aria-selected", String(active));
     });
     if (state.tab === "personal") {
+      apps.render(content, appItems, "我的应用");
       section(content, "已安装", installed, true);
-      if (!installed.length) empty(content, state.query ? "没有匹配的已安装插件。" : "当前没有已安装插件。", !state.query);
+      if (!installed.length && !appItems.length) empty(content, state.query ? "没有匹配的已安装插件。" : "当前没有已安装插件，可在‘发现’中安装常用应用。", !state.query);
       renderMarketplaces(content, data.marketplaces);
       return;
     }
+    apps.render(content, appItems, "常用应用");
     section(content, "已安装", installed, true);
     const groups = new Map();
     for (const item of available) {
@@ -217,7 +242,7 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
       groups.get(item.marketplace).push(item);
     }
     for (const [marketplace, entries] of groups) section(content, marketplace, entries, false);
-    if (!installed.length && !available.length) {
+    if (!installed.length && !available.length && !appItems.length) {
       empty(content, state.query ? "没有找到匹配的插件。" :
         data.marketplaces.length ? "已注册市场中暂无可安装插件。" : "尚未添加插件市场。添加本地目录或 Git 市场后即可发现插件。", !state.query);
     }
@@ -553,7 +578,16 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
 
   $("plugin-dialog-close").addEventListener("click", closeDialog);
   $("plugin-dialog-overlay").addEventListener("click", (event) => { if (event.target === $("plugin-dialog-overlay")) closeDialog(); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDialog(); });
+  document.addEventListener("keydown", (event) => {
+    if ($("plugin-dialog-overlay").classList.contains("hidden")) return;
+    if (event.key === "Escape") { event.preventDefault(); closeDialog(); }
+    if (event.key === "Tab") {
+      const controls = [...$("plugin-dialog-overlay").querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)')];
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+  });
   $("plugin-search-input").addEventListener("input", (event) => { state.query = event.target.value.trim().toLocaleLowerCase(); renderCatalog(); });
   $("skill-search-input").addEventListener("input", renderSkills);
   $("agent-search-input").addEventListener("input", renderAgents);
@@ -574,7 +608,11 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
   $("plugin-add").addEventListener("click", showAddMenu);
   $("customize-search").addEventListener("click", () => $(state.view === "skills" ? "skill-search-input" : state.view === "agents" ? "agent-search-input" : state.view === "mcp" ? "mcp-search-input" : "plugin-search-input").focus());
 
-  setInterval(() => { if (!$('mcp-view').classList.contains("hidden") && !document.hidden && !state.loading) void refreshMcp(); }, 5000);
+  setInterval(() => {
+    if (document.hidden || state.loading) return;
+    if (!$('mcp-view').classList.contains("hidden")) void refreshMcp();
+    if (!$('plugins-view').classList.contains("hidden")) void apps.refresh();
+  }, 5000);
 
   return { open, refresh: syncAll };
 }

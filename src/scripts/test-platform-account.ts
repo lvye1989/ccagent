@@ -6,7 +6,7 @@ import { AccountError, normalizePlatformOrigin, PlatformAccountClient, type Stor
 import { SecureCredentialStore } from "../platform/secureStore.js";
 import { runAccountCommand } from "../entrypoint/account.js";
 import { Writable } from "node:stream";
-import { accountHome, configurePlatform, enterPlatformAccount, getPlatformAccountClient, getPlatformSessionFile, requirePlatformScope } from "../platform/account.js";
+import { accountHome, configurePlatform, enterPlatformAccount, getPlatformAccountClient, getPlatformSessionFile, OFFICIAL_ACCOUNT_ORIGIN, requirePlatformScope } from "../platform/account.js";
 
 const temporaryParent = path.resolve(".tmp");
 const { mkdir } = await import("node:fs/promises");
@@ -18,13 +18,20 @@ const identity = { id: "user-one", email: "first@example.invalid", name: "测试
 let revoked = false;
 let disabled = false;
 let outage = false;
+let missingDeployment = false;
+let disconnected = false;
+let failureReply: { status: number; headers?: Record<string, string | undefined>; value?: unknown; raw?: string } | undefined;
 let user = { ...identity };
 let passwordRequests = 0;
+const verificationRequests: { body: Record<string, unknown>; cookie?: string }[] = [];
 let requests = 0;
 const server = createServer(async (req, res) => {
   requests++;
   res.setHeader("content-type", "application/json");
   assert.equal(req.headers.origin, origin);
+  if (disconnected) { req.socket.destroy(); return; }
+  if (failureReply) { res.writeHead(failureReply.status, failureReply.headers); res.end(failureReply.raw ?? JSON.stringify(failureReply.value)); return; }
+  if (missingDeployment) { res.writeHead(404, { "content-type": "text/plain" }); res.end("DEPLOYMENT_NOT_FOUND"); return; }
   if (outage) { res.writeHead(503); res.end(JSON.stringify({ error: password })); return; }
   if (req.url === "/api/auth/sign-in/email") {
     const parts: Buffer[] = [];
@@ -51,6 +58,11 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.url === "/api/auth/request-password-reset") { res.end("{}"); return; }
+  if (req.url === "/api/auth/send-verification-email") {
+    const parts: Buffer[] = []; for await (const part of req) parts.push(Buffer.from(part));
+    verificationRequests.push({ body: JSON.parse(Buffer.concat(parts).toString()) as Record<string, unknown>, cookie: req.headers.cookie });
+    res.end(JSON.stringify({ status: true })); return;
+  }
   res.writeHead(404); res.end("{}");
 });
 await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -62,12 +74,26 @@ const store = new SecureCredentialStore<StoredAccountSession>(file);
 const client = new PlatformAccountClient(origin, store);
 const previousHome = process.env.CCAGENT_HOME;
 const previousPlatformHome = process.env.CCAGENT_PLATFORM_HOME, previousAccountId = process.env.CCAGENT_ACCOUNT_ID, previousSessionFile = process.env.CCAGENT_AUTH_SESSION_FILE;
+const previousCloudUrl = process.env.CCAGENT_CLOUD_URL;
 delete process.env.CCAGENT_PLATFORM_HOME; delete process.env.CCAGENT_ACCOUNT_ID; delete process.env.CCAGENT_AUTH_SESSION_FILE;
+delete process.env.CCAGENT_CLOUD_URL;
 process.env.CCAGENT_HOME = path.join(directory, "user-home");
 let passed = 0;
 async function test(name: string, run: () => Promise<void> | void): Promise<void> { await run(); passed++; console.log(`PASS ${name}`); }
 
 try {
+  await test("a fresh account uses the bundled official origin without setup or network access", async () => {
+    assert.equal((await getPlatformAccountClient()).origin, OFFICIAL_ACCOUNT_ORIGIN);
+    assert.equal(requests, 0);
+    assert.equal(await stat(path.join(process.env.CCAGENT_HOME!, "platform", "configuration.json")).catch(() => null), null);
+  });
+  await test("an explicit environment origin overrides the bundled default without being persisted", async () => {
+    process.env.CCAGENT_CLOUD_URL = origin;
+    try { assert.equal((await getPlatformAccountClient()).origin, origin); }
+    finally { delete process.env.CCAGENT_CLOUD_URL; }
+    assert.equal((await getPlatformAccountClient()).origin, OFFICIAL_ACCOUNT_ORIGIN);
+    assert.equal(requests, 0);
+  });
   await test("platform address validates HTTPS, credentials, origin and local development boundary", () => {
     assert.equal(normalizePlatformOrigin("https://service.example/"), "https://service.example");
     assert.equal(normalizePlatformOrigin(origin), origin);
@@ -98,6 +124,19 @@ try {
     await assert.rejects(() => other.requireSession(), (error: unknown) => error instanceof AccountError && error.code === "origin_changed");
     assert.equal(requests, before);
   });
+  await test("explicit verification resend uses only email and a fixed callback without forwarding session credentials", async () => {
+    const before = await readFile(file);
+    for (const email of [identity.email, "unknown@example.invalid"]) {
+      await client.resendVerification(email);
+      assert.deepEqual(verificationRequests.at(-1), { body: { email, callbackURL: origin + "/login?verified=1" }, cookie: undefined });
+    }
+    assert.equal(verificationRequests.length, 2);
+    assert.deepEqual(await readFile(file), before, "Resend cannot change the signed-in identity or credentials");
+    const beforeRequests = requests;
+    for (const invalid of ["", "not-an-email", "a".repeat(321) + "@example.invalid"]) await assert.rejects(() => client.resendVerification(invalid),
+      (error: unknown) => error instanceof AccountError && error.code === "invalid_input");
+    assert.equal(requests, beforeRequests, "Invalid resend emails never reach the service");
+  });
   await test("service outage blocks access but preserves encrypted credentials and hides response secrets", async () => {
     outage = true;
     try { await client.requireSession(); assert.fail("Expected outage"); } catch (error) {
@@ -107,6 +146,73 @@ try {
     }
     assert.ok(await store.read());
     outage = false;
+  });
+  await test("a missing account route is reported as a deployment/address problem rather than an account restriction", async () => {
+    missingDeployment = true;
+    try {
+      await assert.rejects(() => client.signIn(identity.email, password), (error: unknown) => error instanceof AccountError
+        && error.code === "service_not_found" && error.status === 503 && /接口不存在/.test(error.message));
+      assert.ok(await store.read());
+    } finally { missingDeployment = false; }
+  });
+  await test("missing deployment headers and known JSON codes are preserved without exposing upstream details", async () => {
+    const before = await readFile(file);
+    try {
+      for (const reply of [
+        { status: 404, headers: { "x-vercel-error": "DEPLOYMENT_NOT_FOUND" }, value: { error: { code: "404", message: password } } },
+        { status: 404, value: { code: "DEPLOYMENT_NOT_FOUND", message: password } },
+        { status: 404, headers: { "x-vercel-error": "DEPLOYMENT_NOT_FOUND", "content-type": "text/plain" }, raw: password },
+      ]) {
+        failureReply = reply;
+        await assert.rejects(() => client.requireSession(), (error: unknown) => error instanceof AccountError && error.code === "deployment_not_found"
+          && error.status === 503 && /部署不存在/.test(error.message) && !error.message.includes(password));
+      }
+      assert.deepEqual(await readFile(file), before, "Infrastructure failures must preserve the saved session");
+    } finally { failureReply = undefined; }
+  });
+  await test("protected Preview redirects and Vercel authentication pages are distinguished and never followed", async () => {
+    const before = await readFile(file), beforeRequests = requests;
+    try {
+      for (const reply of [
+        { status: 302, headers: { location: "https://vercel.com/sso-api?secret=" + password }, value: {} },
+        { status: 401, headers: { "x-vercel-id": "test-protection", "content-type": "text/html" }, raw: "<title>Authentication Required</title>" + password },
+      ]) {
+        failureReply = reply;
+        await assert.rejects(() => client.requireSession(), (error: unknown) => error instanceof AccountError && error.code === "deployment_protected"
+          && error.status === 503 && /受访问保护.*正式账户服务地址/.test(error.message) && !error.message.includes(password));
+      }
+      assert.equal(requests, beforeRequests + 2, "Deployment protection redirects cannot trigger another request");
+      assert.deepEqual(await readFile(file), before, "Deployment protection cannot revoke an account session");
+    } finally { failureReply = undefined; }
+  });
+  await test("known registration and verification codes have safe actionable messages", async () => {
+    try {
+      for (const [upstreamCode, status, code, description] of [
+        ["USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL", 422, "account_exists", /已注册/],
+        ["USER_ALREADY_EXISTS", 400, "account_exists", /已注册/],
+        ["INVALID_EMAIL", 400, "invalid_input", /邮箱/],
+        ["PASSWORD_TOO_SHORT", 400, "invalid_input", /至少.*8/],
+        ["EMAIL_NOT_VERIFIED", 403, "email_not_verified", /邮箱验证/],
+        ["INVALID_ORIGIN", 403, "configuration", /地址.*配置不一致/],
+        ["MAIL_NOT_CONFIGURED", 503, "mail_unavailable", /邮件服务尚未配置/],
+        ["MAIL_DELIVERY_UNAVAILABLE", 503, "mail_unavailable", /邮件服务暂不可用/],
+      ] as const) {
+        failureReply = { status, headers: { "x-vercel-id": "real-api-response" }, value: { code: upstreamCode, message: password } };
+        await assert.rejects(() => client.signUp(identity.email, password, identity.name), (error: unknown) => error instanceof AccountError
+          && error.code === code && description.test(error.message) && !error.message.includes(password));
+      }
+      failureReply = { status: 400, value: { code: "UNKNOWN_ERROR", message: password } };
+      await assert.rejects(() => client.signUp(identity.email, password, identity.name), (error: unknown) => error instanceof AccountError
+        && error.code === "service_unavailable" && !error.message.includes(password));
+    } finally { failureReply = undefined; }
+  });
+  await test("connection failures remain distinct from registration errors and preserve saved credentials", async () => {
+    const before = await readFile(file); disconnected = true;
+    try {
+      await assert.rejects(() => client.requireSession(), (error: unknown) => error instanceof AccountError
+        && error.code === "network" && /无法连接账户服务/.test(error.message) && !error.message.includes(password));
+      assert.deepEqual(await readFile(file), before);
+    } finally { disconnected = false; }
   });
   await test("disabled accounts lose their saved session", async () => {
     disabled = true;
@@ -156,6 +262,9 @@ try {
     let closed = false;
     const prompter = { ask: async () => identity.email, secret: async () => password, close() { closed = true; } };
     assert.equal(await runAccountCommand(["setup", "--server", origin], { output }), 0);
+    process.env.CCAGENT_CLOUD_URL = "https://other.example";
+    try { assert.equal((await getPlatformAccountClient()).origin, origin); }
+    finally { delete process.env.CCAGENT_CLOUD_URL; }
     assert.equal(await runAccountCommand(["login"], { output, prompter }), 0);
     assert.equal(closed, true);
     assert.equal(await runAccountCommand(["status"], { output }), 0);
@@ -201,6 +310,8 @@ try {
 } finally {
   if (previousHome === undefined) delete process.env.CCAGENT_HOME;
   else process.env.CCAGENT_HOME = previousHome;
+  if (previousCloudUrl === undefined) delete process.env.CCAGENT_CLOUD_URL;
+  else process.env.CCAGENT_CLOUD_URL = previousCloudUrl;
   for (const [key, value] of [["CCAGENT_PLATFORM_HOME", previousPlatformHome], ["CCAGENT_ACCOUNT_ID", previousAccountId], ["CCAGENT_AUTH_SESSION_FILE", previousSessionFile]] as const) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   // Recursive cleanup is restricted to the newly created child of the known workspace temp directory.

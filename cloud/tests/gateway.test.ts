@@ -114,6 +114,23 @@ test('authenticated gateway executes native protocols with real isolated ledger 
       await result.body!.cancel(); finish(); await Promise.all(work);
       const stored = await record('cancelled'); assert.equal(stored.status, 'settled'); assert.equal(object(stored.usage).interrupted, true);
     });
+    await t.test('transport faults retain only safe diagnostics and never redispatch a pending paid operation', async () => {
+      for (const [code, expected] of [['ENOTFOUND', 'dns'], ['UND_ERR_CONNECT_TIMEOUT', 'timeout'], ['CERT_HAS_EXPIRED', 'tls']]) {
+        const id = `transport-${expected}`;
+        const fail = () => { throw new TypeError('fetch failed with private provider details', { cause: Object.assign(new Error(process.env[credentialEnv]), { code }) }); };
+        // This existing fixture explicitly permits one internal retry. Both failures are platform attempts under one user call.
+        queued.push(fail, fail);
+        const result = await gateway.execute(request(id, payload), 'responses');
+        assert.equal(result.status, 502); assert.equal((await result.text()).includes(process.env[credentialEnv]!), false);
+        const stored = await record(id), information = object(stored.usage);
+        assert.equal(stored.status, 'pending'); assert.equal(stored.charged, 0n);
+        assert.equal(information.attempts, 2); assert.equal(information.platformRetryCosts, 1); assert.equal(information.transportFailure, expected);
+        assert.equal(JSON.stringify(information).includes(process.env[credentialEnv]!), false);
+        const before = calls, wallet = await walletFor(userId);
+        assert.equal((await gateway.execute(request(id, payload), 'responses')).status, 409);
+        assert.equal(calls, before); assert.deepEqual(await walletFor(userId), wallet);
+      }
+    });
     await t.test('missing usage stays pending with frozen funds; repeated request never reruns the supplier', async () => {
       queued.push(() => Response.json({ output: [], usage: { input_tokens: 100 } }));
       const result = await gateway.execute(request('unmeasured', payload), 'responses');

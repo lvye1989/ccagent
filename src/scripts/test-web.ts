@@ -124,6 +124,10 @@ try {
   assert.equal((await webFetch(`${base}/plugins.css`)).status, 200);
   assert.equal((await webFetch(`${base}/chatgpt-web.css`)).status, 200);
   assert.equal((await webFetch(`${base}/plugins.js`)).status, 200);
+  for (const asset of ["app-catalog.js", "app-icons.js", "promotion.js", "promotion.css"]) assert.equal((await webFetch(`${base}/${asset}`)).status, 200);
+  const appCatalog = await (await webFetch(`${base}/api/apps`)).json() as { apps: { id: string; installed: boolean }[] };
+  assert.equal(appCatalog.apps.length, 12);
+  assert.ok(appCatalog.apps.every((app) => !app.installed));
   assert.equal((await webFetch(`${base}/voice.js`)).status, 200);
   assert.equal((await webFetch(`${base}/voice.css`)).status, 200);
   assert.equal((await webFetch(`${base}/browser-panel.js`)).status, 200);

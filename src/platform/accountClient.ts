@@ -46,6 +46,33 @@ function extractCookie(headers: IncomingHttpHeaders): string {
 
 type JsonReply = { status: number; headers: IncomingHttpHeaders; value: unknown };
 
+function responseCode(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return;
+  const body = value as { code?: unknown; error?: { code?: unknown } };
+  return typeof body.code === "string" ? body.code : typeof body.error?.code === "string" ? body.error.code : undefined;
+}
+
+function protectedDeployment(): AccountError {
+  return new AccountError("当前账户服务是受访问保护的测试部署，请联系管理员设置公开的正式账户服务地址。", "deployment_protected", 503);
+}
+
+// Never display an arbitrary upstream message: authentication responses may contain secrets.
+const safeAccountErrors = new Map<string, readonly [string, string, number]>([
+  ["INVALID_EMAIL", ["请输入有效的邮箱地址。", "invalid_input", 400]],
+  ["INVALID_PASSWORD", ["请检查密码是否符合要求。", "invalid_input", 400]],
+  ["PASSWORD_TOO_SHORT", ["密码至少需要 8 位。", "invalid_input", 400]],
+  ["PASSWORD_TOO_LONG", ["密码不能超过 128 位。", "invalid_input", 400]],
+  ["USER_ALREADY_EXISTS", ["该邮箱已注册，请直接登录或找回密码。", "account_exists", 422]],
+  ["USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL", ["该邮箱已注册，请直接登录或找回密码。", "account_exists", 422]],
+  ["EMAIL_NOT_VERIFIED", ["请先完成邮箱验证，再登录。", "email_not_verified", 403]],
+  ["BANNED_USER", ["账户已被禁用，请联系管理员。", "forbidden", 403]],
+  ["ACCOUNT_DISABLED", ["账户已被禁用，请联系管理员。", "forbidden", 403]],
+  ["INVALID_ORIGIN", ["账户服务地址与正式服务配置不一致，请联系管理员检查连接设置。", "configuration", 503]],
+  ["EMAIL_PASSWORD_SIGN_UP_DISABLED", ["当前账户服务暂未开放注册，请联系管理员。", "registration_disabled", 503]],
+  ["MAIL_NOT_CONFIGURED", ["账户邮件服务尚未配置，请联系管理员。", "mail_unavailable", 503]],
+  ["MAIL_DELIVERY_UNAVAILABLE", ["账户邮件服务暂不可用，请稍后重试或联系管理员。", "mail_unavailable", 503]],
+]);
+
 /** Dedicated HTTPS transport always verifies TLS, even with an insecure inherited Node environment. */
 function requestJson(origin: string, route: string, body?: Record<string, unknown>, cookie?: string): Promise<JsonReply> {
   const url = new URL(route, origin);
@@ -68,9 +95,27 @@ function requestJson(origin: string, route: string, body?: Record<string, unknow
       response.on("error", () => reject(new AccountError("账户服务响应中断，请重试。", "network")));
       response.on("end", () => {
         const status = response.statusCode ?? 503;
-        if (status >= 300 && status < 400) { reject(new AccountError("账户服务返回了不允许的跳转。", "invalid_response", status)); return; }
-        try { resolve({ status, headers: response.headers, value: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
-        catch { reject(new AccountError("账户服务返回格式错误。", "invalid_response", status)); }
+        if (status >= 300 && status < 400) {
+          let target: URL | undefined;
+          try { if (response.headers.location) target = new URL(response.headers.location, origin); } catch { /* Invalid redirects remain rejected. */ }
+          const protectedPreview = target && ["vercel.com", "www.vercel.com"].includes(target.hostname) && /^\/sso-api(?:\/|$)/.test(target.pathname);
+          reject(protectedPreview ? protectedDeployment() : new AccountError("账户服务返回了不允许的跳转。", "invalid_response", status)); return;
+        }
+        const raw = Buffer.concat(chunks).toString("utf8");
+        let value: unknown;
+        try { value = JSON.parse(raw); } catch { /* Classify known deployment errors before rejecting non-JSON responses. */ }
+        if (status >= 400 && (response.headers["x-vercel-error"] === "DEPLOYMENT_NOT_FOUND" || responseCode(value) === "DEPLOYMENT_NOT_FOUND")) {
+          reject(new AccountError("账户服务部署不存在，请联系管理员恢复公开的正式账户服务。", "deployment_not_found", 503)); return;
+        }
+        if ([401, 403].includes(status) && (response.headers["x-vercel-id"] || response.headers.server === "Vercel") && /<title[^>]*>\s*(?:Authentication Required|Vercel Authentication)\s*<\/title>/i.test(raw)) {
+          reject(protectedDeployment()); return;
+        }
+        if (status === 404) { reject(new AccountError("账户服务接口不存在，请联系管理员检查正式服务的部署和地址。", "service_not_found", 503)); return; }
+        if (value === undefined) {
+          const unavailable = status >= 500;
+          reject(new AccountError(unavailable ? "账户服务暂不可用，请稍后重试或联系管理员。" : "账户服务返回格式错误。", unavailable ? "service_unavailable" : "invalid_response", status)); return;
+        }
+        resolve({ status, headers: response.headers, value });
       });
     });
     request.setTimeout(15_000, () => request.destroy(new Error("timeout")));
@@ -81,6 +126,8 @@ function requestJson(origin: string, route: string, body?: Record<string, unknow
 
 function checked(reply: JsonReply): unknown {
   if (reply.status >= 200 && reply.status < 300) return reply.value;
+  const safeError = safeAccountErrors.get(responseCode(reply.value) ?? "");
+  if (safeError) throw new AccountError(...safeError);
   if (reply.status === 401) throw new AccountError("邮箱密码不正确或登录已失效，请重新登录。", "unauthorized", 401);
   if (reply.status === 403) throw new AccountError("账户尚未验证、已被禁用或没有访问权限。", "forbidden", 403);
   if (reply.status === 429) throw new AccountError("操作过于频繁，请稍后重试。", "rate_limited", 429);
@@ -149,6 +196,12 @@ export class PlatformAccountClient {
   async requestPasswordReset(email: string): Promise<void> {
     if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AccountError("请输入有效邮箱。", "invalid_input");
     checked(await requestJson(this.origin, "/api/auth/request-password-reset", { email, redirectTo: this.origin + "/reset-password" }));
+  }
+
+  async resendVerification(email: string): Promise<void> {
+    if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AccountError("请输入有效邮箱。", "invalid_input");
+    // Anonymous delivery preserves the platform's generic response for unknown/already verified emails.
+    checked(await requestJson(this.origin, "/api/auth/send-verification-email", { email, callbackURL: this.origin + "/login?verified=1" }));
   }
 
   async requireSession(): Promise<AccountSession> {

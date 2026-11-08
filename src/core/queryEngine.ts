@@ -22,7 +22,7 @@ import { formatProjectSessionHistory } from "../session/history.js";
 import { fileHistoryMakeSnapshot } from "../session/fileHistory.js";
 import { getToolsApiParams } from "../tools/index.js";
 import { buildUserMessageContent } from "./attachImages.js";
-import type { ToolContext } from "../tools/Tool.js";
+import { toolToApiParam, type ToolContext } from "../tools/Tool.js";
 import type { Usage } from "../types/message.js";
 import { resolveModelRole, resolveProfile, type ModelProfile } from "../services/api/providers/profile.js";
 import { getPlanFilePath, planExists as checkPlanExists } from "../context/plans.js";
@@ -164,6 +164,7 @@ export class QueryEngine {
   private permissionSettings?: PermissionSettings;
   private readonly sessionPermissionRules: PermissionRuleSet;
   private readonly onPermissionRequest?: (request: PermissionRequest) => Promise<PermissionDecision>;
+  private readonly maxTurns?: number;
   private abortController: AbortController | null = null;
   private usageAnchorIndex: number = -1;
   private lastCallUsage: Usage = { input_tokens: 0, output_tokens: 0 };
@@ -198,6 +199,8 @@ export class QueryEngine {
     this.permissionSettings = options.permissionSettings;
     this.sessionPermissionRules = options.sessionPermissionRules ?? { allow: [], deny: [] };
     this.onPermissionRequest = options.onPermissionRequest;
+    if (options.maxTurns !== undefined && (!Number.isInteger(options.maxTurns) || options.maxTurns < 1 || options.maxTurns > 100)) throw new Error("maxTurns must be an integer from 1 to 100");
+    this.maxTurns = options.maxTurns;
   }
 
   getPermissionMode(): PermissionMode {
@@ -556,6 +559,7 @@ export class QueryEngine {
     trimmed: string,
     rawDirectUserText?: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
+    if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
 
     // ─── Stage 26: open the file-history snapshot for this turn ─────
     // Fire at turn start (before any edit) so the snapshot bound to this
@@ -630,6 +634,7 @@ export class QueryEngine {
       }
     }
 
+    if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
     const previewSystemParts = await buildSystemPrompt({
       cwd: this.toolContext.cwd,
       userQuery: promptToSubmit,
@@ -639,6 +644,7 @@ export class QueryEngine {
     });
     const previewSystemPrompt = renderSystemPrompt(previewSystemParts);
     const activeContextWindow = await this.getActiveContextWindow();
+    if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
 
     // Only run compaction when there's meaningful conversation history
     if (this.messages.length > 0) {
@@ -792,13 +798,16 @@ export class QueryEngine {
 
     const abortController = new AbortController();
     this.abortController = abortController;
+    const abortSignal = this.toolContext.abortSignal
+      ? AbortSignal.any([abortController.signal, this.toolContext.abortSignal])
+      : abortController.signal;
 
     try {
       const systemParts = previewSystemParts;
       const systemPrompt = renderSystemPrompt(systemParts);
       const enrichedToolContext: ToolContext = {
         ...this.toolContext,
-        abortSignal: abortController.signal,
+        abortSignal,
         setPermissionMode: (mode: string) => this.setPermissionMode(mode as PermissionMode),
         getPermissionMode: () => this.currentPermissionMode,
         addSessionAllowRules: (rules: string[]) => this.addSessionAllowRules(rules),
@@ -819,15 +828,20 @@ export class QueryEngine {
         messages: [...this.messages],
         ...(rawDirectUserText ? { directUserTurnText: rawDirectUserText } : {}),
         systemPrompt,
-        getTools: () => getToolsApiParams(this.currentPermissionMode).filter((tool) => this.toolContext.agentTeamsAllowed !== false || !["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(tool.name)),
+        getTools: () => (this.toolContext.scopedTools === undefined
+          ? getToolsApiParams(this.currentPermissionMode)
+          : this.toolContext.scopedTools.filter((tool, index, scoped) => tool.isEnabled() && scoped.findIndex((candidate) => candidate.name === tool.name) === index
+            && scoped.filter((candidate) => candidate.name === tool.name).length === 1).map(toolToApiParam))
+          .filter((tool) => this.toolContext.agentTeamsAllowed !== false || !["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(tool.name)),
         model: this.getActiveModel(),
         contextWindow: activeContextWindow,
-        abortSignal: abortController.signal,
+        abortSignal,
         toolContext: enrichedToolContext,
         permissionMode: this.currentPermissionMode,
         permissionSettings: this.permissionSettings,
         sessionPermissionRules: this.sessionPermissionRules,
         onPermissionRequest: this.onPermissionRequest,
+        ...(this.maxTurns === undefined ? {} : { maxTurns: this.maxTurns }),
       });
 
       while (true) {

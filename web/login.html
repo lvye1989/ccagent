@@ -8,11 +8,12 @@
   <main class="login-shell">
     <section class="intro"><a class="brand" href="/login"><img src="/favicon.svg" alt="" width="36" height="36">CCAGENT</a><div class="intro-body"><span class="eyebrow">你的 AI 工作空间</span><h1>让想法<br>成为成果。</h1><p>连接模型、文件和工具，<br>在熟悉的工作空间完成任务。</p><div class="intro-tags"><span>代码与文档</span><span>专业工具</span><span>自动化任务</span></div></div><p class="privacy">工作文件与完整会话默认保存在本机。<br>账户管理与计费由平台统一提供。</p></section>
     <section class="form-side"><div class="form-card">
-      <div id="setup-panel" hidden><span class="eyebrow">首次连接</span><h2>连接账户服务</h2><p class="subtitle">输入管理员提供的 CCAGENT 官方服务地址。</p><form id="setup-form"><label for="server">服务地址</label><input id="server" type="url" required placeholder="https://…" autocomplete="url"><button type="submit">保存并继续</button></form></div>
-      <div id="account-panel" hidden><nav class="tabs" aria-label="账户操作"><button type="button" data-mode="login" aria-current="page">登录</button><button type="button" data-mode="register">注册</button></nav><h2 id="title">欢迎回来</h2><p class="subtitle" id="description">使用邮箱和密码登录，继续你的工作。</p>
+      <div id="account-panel"><nav class="tabs" aria-label="账户操作"><button type="button" data-mode="login" aria-current="page">登录</button><button type="button" data-mode="register">注册</button></nav><h2 id="title">欢迎回来</h2><p class="subtitle" id="description">使用邮箱和密码登录，继续你的工作。</p>
         <form id="account-form"><div id="name-row" hidden><label for="name">昵称</label><input id="name" maxlength="100" autocomplete="nickname"></div><label for="email">邮箱</label><input id="email" type="email" maxlength="320" required autocomplete="username" placeholder="name@example.com"><div id="password-row"><label for="password">密码</label><div class="password-field"><input id="password" type="password" minlength="8" maxlength="128" required autocomplete="current-password" placeholder="至少 8 位"><button id="show-password" type="button" aria-label="显示密码">显示</button></div></div><div class="form-links"><button id="forgot" class="text-button" type="button">忘记密码？</button><button id="back-login" class="text-button" type="button" hidden>返回登录</button></div><button id="submit" type="submit">登录 CCAGENT</button></form>
-        <p class="service-label">账户服务 <span id="service-origin"></span><button id="change-server" class="text-button" type="button">更改</button></p>
-      </div><p id="status" role="status" aria-live="polite"></p><p class="footnote">所有用户均需登录。注册后请先完成邮箱验证。</p>
+      </div><p id="status" role="status" aria-live="polite"></p>
+      <div id="verification-actions" class="form-links" hidden><button id="resend-verification" class="text-button" type="button">重新发送验证邮件</button></div>
+      <details id="connection-settings" class="advanced-settings"><summary>高级连接设置</summary><div id="setup-panel"><p class="connection-help">应用已预置官方账户服务。仅管理员或开发者在使用私有部署、调试服务时需要修改。</p><p class="service-label">当前账户服务 <span id="service-origin">官方账户服务</span></p><form id="setup-form"><label for="server">服务地址</label><input id="server" type="url" required placeholder="https://…" autocomplete="url"><button type="submit">保存连接设置</button></form></div></details>
+      <p class="footnote">所有用户均需登录。注册后请先完成邮箱验证。</p>
     </div></section>
   </main><script src="/login.js" type="module"></script>
 </body>

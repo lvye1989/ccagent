@@ -8,6 +8,7 @@ import { readOwnedFile, savePrivateResult } from './files';
 import { errorResponse, HttpError, readJson, requireSameOrigin } from './http';
 import { requireServiceIdentity } from './keys';
 import { measuredUsage, object, prepareUpstream, UsageStream, voiceDownloadUrl, type GatewayEndpoint } from './upstream';
+import { upstreamTransportFailure, type UpstreamTransportFailure } from './upstream-failure';
 import { authorizeUsage, finishUsage } from './wallet';
 import { availableServiceDefaults, readServiceDefaults } from './service-defaults';
 import { callIdentifierPattern } from './call-identifiers';
@@ -175,8 +176,9 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
     const execution = () => ({ executedRouteId: attempted.selection.route.id, executedPriceId: attempted.selection.price.id, executedPriceVersion: attempted.selection.price.version,
       executionStartedAt: attemptedAt.toISOString(), fallbackUsed: attempted !== primary });
     let attempts = 0;
+    let transportFailure: UpstreamTransportFailure | undefined;
     const pending = async (reason: string) => {
-      await database().db.update(reservations).set({ status: 'pending', usage: { reason, attempts, platformRetryCosts: Math.max(0, attempts - 1), ...execution() }, updatedAt: new Date() })
+      await database().db.update(reservations).set({ status: 'pending', usage: { reason, attempts, ...(transportFailure ? { transportFailure } : {}), platformRetryCosts: Math.max(0, attempts - 1), ...execution() }, updatedAt: new Date() })
         .where(and(eq(reservations.id, reservation.id), eq(reservations.status, 'held')));
     };
     const complete = async (payload: unknown, raw: Uint8Array | string, contentType: string, interrupted = false) => {
@@ -208,12 +210,14 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
           try {
             const result = await fetcher(plan.prepared.url, { method: 'POST', headers: { authorization: `Bearer ${plan.secret}`, 'content-type': 'application/json' },
               body: JSON.stringify(plan.body), signal: controller.signal, redirect: 'error' });
+            transportFailure = undefined;
             if ((result.status === 429 || result.status >= 500) && !controller.signal.aborted) {
               if (phaseAttempts <= plan.selection.route.retries) { await result.body?.cancel(); continue; }
               if (index + 1 < plans.length) { await result.body?.cancel(); break; }
             }
             response = result; break;
-          } catch {
+          } catch (error) {
+            transportFailure = upstreamTransportFailure(error, controller.signal.aborted);
             if (controller.signal.aborted) throw new Error('UPSTREAM_TRANSPORT_FAILED');
             if (phaseAttempts <= plan.selection.route.retries) continue;
             if (index + 1 < plans.length) break;

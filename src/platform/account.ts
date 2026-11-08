@@ -7,6 +7,13 @@ import { SecureCredentialStore } from "./secureStore.js";
 
 type PlatformConfiguration = { origin: string };
 
+/** Stable domain assigned to the CCAGENT account platform, never a protected Preview URL. */
+export const OFFICIAL_ACCOUNT_ORIGIN = "https://ccagent-cloud.vercel.app";
+
+export function getDefaultPlatformOrigin(): string {
+  return normalizePlatformOrigin(process.env.CCAGENT_CLOUD_URL?.trim() || OFFICIAL_ACCOUNT_ORIGIN);
+}
+
 export function getPlatformHome(): string {
   return path.resolve(process.env.CCAGENT_PLATFORM_HOME?.trim() || getCCAgentHome());
 }
@@ -64,8 +71,7 @@ export async function configurePlatform(origin: string): Promise<string> {
 
 export async function getPlatformAccountClient(sessionFile?: string): Promise<PlatformAccountClient> {
   const configuration = await configurationStore().read();
-  const origin = configuration?.origin ?? process.env.CCAGENT_CLOUD_URL?.trim();
-  if (!origin) throw new AccountError("官方服务尚未配置。请先运行 ccagent account setup --server <服务地址>。", "configuration");
+  const origin = configuration?.origin ?? getDefaultPlatformOrigin();
   if (typeof origin !== "string") throw new AccountError("账户服务配置格式错误。", "configuration");
   return new PlatformAccountClient(origin, sessionFile
     ? new SecureCredentialStore<StoredAccountSession>(validatePlatformSessionFile(sessionFile))

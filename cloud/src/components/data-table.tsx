@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 const labels: Record<string, string> = {
-  id: '编号', name: '名称', email: '邮箱', email_verified: '邮箱已验证', banned: '已禁用', roles: '角色', created_at: '创建时间',
+  id: '编号', request_id: '请求编号', name: '名称', email: '邮箱', email_verified: '邮箱已验证', banned: '已禁用', roles: '角色', created_at: '创建时间',
   user_id: '用户编号', actor_id: '操作人', prefix: 'Key 前缀', enabled: '已启用', limit: '累计额度（微元）', spent: '已使用（微元）', frozen: '冻结（微元）',
   balance: '余额（微元）', updated_at: '更新时间', revoked_at: '撤销时间', amount_fen: '充值金额（分）', amount: '金额（微元）',
   status: '状态', trade_no: '支付交易号', channel: '渠道', credited_at: '入账时间', order_id: '订单编号', initiated_by: '发起人', reason: '原因',

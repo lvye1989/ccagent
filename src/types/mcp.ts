@@ -27,6 +27,8 @@ export interface McpStdioServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Connection/initialize timeout (1000–600000 ms). Overrides MCP_CONNECT_TIMEOUT. */
+  connectTimeoutMs?: number;
   /** Timeout for one tools/call request. Defaults to MCP_TOOL_TIMEOUT_MS or 5 minutes. */
   toolTimeoutMs?: number;
 }
@@ -45,6 +47,8 @@ export interface McpHTTPServerConfig {
   headers?: Record<string, string>;
   /** Browser OAuth used by Google's official Workspace MCP servers. */
   oauth?: McpGoogleOAuthConfig;
+  /** Connection/initialize timeout (1000–600000 ms). Overrides MCP_CONNECT_TIMEOUT. */
+  connectTimeoutMs?: number;
   toolTimeoutMs?: number;
 }
 
@@ -70,6 +74,8 @@ export interface McpSSEServerConfig {
   type: "sse";
   url: string;
   headers?: Record<string, string>;
+  /** Connection/initialize timeout (1000–600000 ms). Overrides MCP_CONNECT_TIMEOUT. */
+  connectTimeoutMs?: number;
   toolTimeoutMs?: number;
 }
 

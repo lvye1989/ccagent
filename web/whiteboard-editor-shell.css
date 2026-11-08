@@ -1,0 +1,10 @@
+html,body,#whiteboard-editor-root{margin:0;width:100%;height:100%;min-height:100%;overflow:hidden;background:#fff;font-family:Inter,"Microsoft YaHei",sans-serif}*{box-sizing:border-box}.whiteboard-editor-boot{height:100%;display:grid;place-items:center;color:#9599aa;font-size:13px}.whiteboard-editor-canvas{height:100%;width:100%}.whiteboard-editor-canvas .excalidraw{--color-primary:#6965db;--color-primary-darker:#5955c4;--color-primary-darkest:#4f4bb8;--color-primary-light:#eeedfc;--color-surface-primary-container:#eeedfc;--border-radius-lg:10px}.whiteboard-editor-canvas .excalidraw .library-menu-control-buttons a,.whiteboard-editor-canvas .excalidraw .library-menu-browse-button{display:none!important}.whiteboard-editor-canvas .excalidraw a[href]{pointer-events:none}.whiteboard-editor-canvas .excalidraw .App-bottom-bar .help-icon{display:none}.whiteboard-editor-menu-note{max-width:210px;padding:8px 14px 12px;font-size:11px;line-height:1.7;color:#9295a4}@media(max-width:600px){.whiteboard-editor-canvas .excalidraw{--default-border-radius:8px}.whiteboard-editor-canvas .excalidraw .App-toolbar{max-width:calc(100vw - 12px)}}
+
+/* Keep every drawing tool reachable inside a narrow editor iframe. */
+@media(max-width:600px){
+  .whiteboard-editor-canvas .excalidraw .App-menu_top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+  .whiteboard-editor-canvas .excalidraw .shapes-section{grid-column:1/-1;order:3;min-width:0}
+  .whiteboard-editor-canvas .excalidraw .App-toolbar-container{display:block;width:100%;min-width:0}
+  .whiteboard-editor-canvas .excalidraw .App-toolbar{width:100%;max-width:100%;min-width:0}
+  .whiteboard-editor-canvas .excalidraw .App-toolbar>.Stack_horizontal{display:flex;flex-wrap:wrap;justify-content:center;gap:4px}
+}

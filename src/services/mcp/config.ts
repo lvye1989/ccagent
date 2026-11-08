@@ -27,6 +27,7 @@ import { loadSettingSources, type SettingSource } from "../../config/sources.js"
 import { isProjectTrusted } from "../../config/globalState.js";
 import { readJsonSettingsFile } from "../../utils/settings.js";
 import { isValidGoogleMcpRedirectUri } from "./googleWorkspace.js";
+import { isValidMcpConnectTimeoutMs } from "./connectTimeout.js";
 
 interface RawSettings {
   mcpServers?: unknown;
@@ -56,6 +57,12 @@ export function validateServerConfig(
   const obj = raw as Record<string, unknown>;
   if (obj.enabled !== undefined && typeof obj.enabled !== "boolean") {
     return { ok: false, error: `mcpServers.${name} (${scope}): 'enabled' must be a boolean` };
+  }
+  if (obj.connectTimeoutMs !== undefined && !isValidMcpConnectTimeoutMs(obj.connectTimeoutMs)) {
+    return {
+      ok: false,
+      error: `mcpServers.${name} (${scope}): 'connectTimeoutMs' must be an integer from 1000 to 600000`,
+    };
   }
   if (
     obj.toolTimeoutMs !== undefined &&
@@ -113,6 +120,7 @@ function validateStdioConfig(
     command: obj.command,
     args: (obj.args as string[] | undefined) ?? [],
     ...(obj.env ? { env: obj.env as Record<string, string> } : {}),
+    ...(typeof obj.connectTimeoutMs === "number" ? { connectTimeoutMs: obj.connectTimeoutMs } : {}),
     ...(typeof obj.toolTimeoutMs === "number" ? { toolTimeoutMs: obj.toolTimeoutMs } : {}),
   };
   return { ok: true, value: validated };
@@ -163,6 +171,7 @@ function validateRemoteConfig(
       url: obj.url,
       ...(headers ? { headers } : {}),
       ...(oauth ? { oauth } : {}),
+      ...(typeof obj.connectTimeoutMs === "number" ? { connectTimeoutMs: obj.connectTimeoutMs } : {}),
       ...(typeof obj.toolTimeoutMs === "number" ? { toolTimeoutMs: obj.toolTimeoutMs } : {}),
     } as McpHTTPServerConfig | McpSSEServerConfig,
   };

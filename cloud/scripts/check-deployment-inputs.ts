@@ -8,9 +8,10 @@ import { assertMigrationContract } from './lib/migration-contract';
 
 assertMigrationContract(requiredDatabaseContract);
 const root = path.resolve('..');
+const environment = process.argv.includes('--production') ? 'production' : 'preview';
 const cliEnvironment: NodeJS.ProcessEnv = { ...process.env, NODE_USE_SYSTEM_CA: '1', NODE_USE_ENV_PROXY: '1' };
 delete cliEnvironment.NODE_TLS_REJECT_UNAUTHORIZED;
-const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npx.cmd --offline --yes vercel@65.12.1 deploy --project prj_2VwqV4ZbAkSX4WKJKDImBzWsNNYF --scope lvye-1989s-projects --dry --json'],
+const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npx.cmd --offline --yes vercel@65.12.1 deploy --project prj_2VwqV4ZbAkSX4WKJKDImBzWsNNYF --scope lvye-1989s-projects --dry --json' + (environment === 'production' ? ' --prod' : '')],
   { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60000, env: cliEnvironment });
 if (result.status !== 0) throw new Error('DEPLOYMENT_DRY_RUN_FAILED');
 const plan = JSON.parse(result.stdout) as { files: { path: string; size: number; mode: number; sha?: string }[]; fileCount: number };
@@ -42,5 +43,5 @@ manifest.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 const sharedModules = ['money.ts', 'zpay.ts', 'pricingDefinition.ts'];
 if (sharedModules.some(name => !manifest.some(file => file.path === 'src/platform/' + name))) throw new Error('REQUIRED_SHARED_MODULE_MISSING');
 const sourceSha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
-console.log(JSON.stringify({ checked: true, target: 'ccagent-cloud', environment: 'preview', reviewedSourceFiles: files, bytes, sourceSha256,
+console.log(JSON.stringify({ checked: true, target: 'ccagent-cloud', environment, reviewedSourceFiles: files, bytes, sourceSha256,
   sharedModules, credentialsExcluded: true, localDataExcluded: true, generatedFilesExcluded: true }));

@@ -4,8 +4,8 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { accountHome, configurePlatform, getPlatformAccountClient, getPlatformHome, getPlatformSessionFile } from "../platform/account.js";
-import { AccountError, type AccountSession, type PlatformAccountClient } from "../platform/accountClient.js";
+import { accountHome, configurePlatform, getDefaultPlatformOrigin, getPlatformAccountClient, getPlatformHome, getPlatformSessionFile, OFFICIAL_ACCOUNT_ORIGIN } from "../platform/account.js";
+import { AccountError, normalizePlatformOrigin, type AccountSession, type PlatformAccountClient } from "../platform/accountClient.js";
 import { VERSION } from "../version.js";
 
 const COOKIE = "ccagent.local_session";
@@ -52,6 +52,11 @@ function text(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== "string" || value.length > 2048) throw new AccountError("请检查输入内容。", "invalid_input", 400);
   return value;
+}
+function isLocalWebOrigin(origin: string, port: number): boolean {
+  const url = new URL(origin);
+  return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    && url.protocol === "http:" && Number(url.port || 80) === port;
 }
 async function stopWorker(worker?: Worker): Promise<void> {
   if (!worker || worker.child.exitCode !== null || worker.child.signalCode !== null) return;
@@ -147,6 +152,14 @@ export async function runWebServer(args: string[]): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
   if (!(await stat(workspace)).isDirectory()) throw new Error("Workspace must be a folder");
   process.env.CCAGENT_PLATFORM_HOME = getPlatformHome();
+  // Repair the old first-run mistake without forwarding any existing session to the new origin.
+  const account = await getPlatformAccountClient().catch(() => null);
+  if (account && isLocalWebOrigin(account.origin, port)) {
+    let defaultOrigin = OFFICIAL_ACCOUNT_ORIGIN;
+    try { defaultOrigin = getDefaultPlatformOrigin(); } catch { /* An invalid override must not prevent repairing a known self-reference. */ }
+    try { await configurePlatform(isLocalWebOrigin(defaultOrigin, port) ? OFFICIAL_ACCOUNT_ORIGIN : defaultOrigin); }
+    catch { console.warn("无法自动修正账户服务设置，请在登录页的高级连接设置中重新保存地址。"); }
+  }
   const entryDir = path.dirname(path.resolve(process.argv[1]!));
   let webRoot = "";
   for (const candidate of [path.resolve(entryDir, "../web"), path.resolve(entryDir, "../../web")]) {
@@ -156,17 +169,22 @@ export async function runWebServer(args: string[]): Promise<void> {
   const locals = new Map<string, LocalClient>(), loginBusy = new Set<string>();
   let stopping = false;
   const desktopToken = process.env.CCAGENT_DESKTOP_TOKEN;
+  async function accountClient(sessionFile?: string): Promise<PlatformAccountClient> {
+    const client = await getPlatformAccountClient(sessionFile);
+    if (isLocalWebOrigin(client.origin, port)) throw new AccountError("账户服务仍指向本机应用，无法自动修正。请在高级连接设置中保存官方账户服务地址，或联系管理员。", "configuration", 503);
+    return client;
+  }
   async function localClient(req: IncomingMessage, fresh = false): Promise<LocalClient> {
     const native = tokenEquals(req.headers["x-ccagent-desktop-token"], desktopToken);
     const id = native ? "native" : (!fresh && browserId(req)) || randomBytes(32).toString("hex");
     let local = locals.get(id);
-    if (local && local.client.origin !== (await getPlatformAccountClient()).origin) {
+    if (local && local.client.origin !== (await accountClient()).origin) {
       await stopLocal(local); locals.delete(id); local = undefined;
     }
     if (!local) {
       if (locals.size > 64) throw new AccountError("本地会话过多，请重新启动应用。", "rate_limited", 429);
       const sessionFile = native ? getPlatformSessionFile() : path.join(getPlatformHome(), "platform", "web-sessions", id, "session.json");
-      local = { id, sessionFile, revision: 0, closing: false, client: await getPlatformAccountClient(native ? undefined : sessionFile) };
+      local = { id, sessionFile, revision: 0, closing: false, client: await accountClient(native ? undefined : sessionFile) };
       if (native) locals.set(id, local);
     }
     return local;
@@ -189,16 +207,18 @@ export async function runWebServer(args: string[]): Promise<void> {
         return res.end(await readFile(path.join(webRoot, file)));
       }
       if (req.method === "GET" && route === "/api/account/config") {
-        const origin = await getPlatformAccountClient().then(client => client.origin, () => null);
-        return json(res, 200, { origin, configured: Boolean(origin) });
+        const origin = (await accountClient()).origin;
+        return json(res, 200, { origin, configured: true });
       }
       if (req.method === "POST" && route === "/api/account/setup") {
-        const body = await readBody(req), origin = await configurePlatform(text(body, "origin"));
+        const body = await readBody(req), selectedOrigin = normalizePlatformOrigin(text(body, "origin"));
+        if (isLocalWebOrigin(selectedOrigin, port)) throw new AccountError("这是本机应用地址，不能用作账户服务地址。请使用官方账户服务地址，或独立部署的账户服务地址。", "invalid_input", 400);
+        const origin = await configurePlatform(selectedOrigin);
         for (const local of locals.values()) await stopLocal(local);
         locals.clear(); setCookie(res); return json(res, 200, { origin });
       }
       if (route.startsWith("/api/account/")) {
-        if (req.method === "POST" && ["login", "register", "forgot"].includes(route.slice(13))) {
+        if (req.method === "POST" && ["login", "register", "forgot", "resend-verification"].includes(route.slice(13))) {
           const body = await readBody(req), action = route.slice(13);
           const lockKey = native ? "native" : browserId(req) || "anonymous";
           if (loginBusy.has(lockKey)) return json(res, 409, { error: "请等待当前登录操作完成。" });
@@ -209,6 +229,7 @@ export async function runWebServer(args: string[]): Promise<void> {
           try {
             if (action === "register") { await local.client.signUp(text(body, "email"), text(body, "password"), text(body, "name")); return json(res, 200, { message: "请检查邮箱并完成验证，再返回登录。" }); }
             if (action === "forgot") { await local.client.requestPasswordReset(text(body, "email")); return json(res, 200, { message: "如果该邮箱已注册，系统将发送密码重置邮件。" }); }
+            if (action === "resend-verification") { await local.client.resendVerification(text(body, "email")); return json(res, 200, { message: "如果该邮箱已注册且尚未验证，系统将发送验证邮件，请查收。" }); }
             // Stop this browser's previous engine before changing its identity.
             const previousId = browserId(req), previous = native ? local : previousId ? locals.get(previousId) : undefined;
             const session = await local.client.signIn(text(body, "email"), text(body, "password"));
@@ -218,7 +239,7 @@ export async function runWebServer(args: string[]): Promise<void> {
             local.closing = false;
             if (!native) setCookie(res, local.id);
             return json(res, 200, { ...session, origin: local.client.origin });
-          } finally { loginBusy.delete(lockKey); if (!signedIn && !native) locals.delete(local.id); }
+          } finally { loginBusy.delete(lockKey); if (action === "login" && !signedIn && !native) locals.delete(local.id); }
         }
         const local = await localClient(req);
         if (req.method === "POST" && route === "/api/account/logout") {

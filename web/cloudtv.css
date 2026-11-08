@@ -4,6 +4,10 @@
 .cloudtv-entry strong { display: block; font-size: 13px; font-weight: 600; }
 .cloudtv-entry small { display: block; margin-top: 3px; color: #92909c; font-size: 10px; }
 .cloudtv-entry-arrow { margin-left: auto; color: #9893a7; font-size: 16px; }
+.city-renewal-entry { text-decoration: none; }
+.city-renewal-entry:hover { background: #edf5f1; border-color: #e0ece7; }
+.city-renewal-mark { background: #e7f3ef; color: #4f8d78; }
+.city-renewal-mark svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .main-area.cloudtv-active .surface-switch, .main-area.cloudtv-active #temporary-chat, .main-area.cloudtv-active #refresh-all { display: none; }
 .main-area.cloudtv-active .content { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .cloudtv-view { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; width: 100%; background: #fff; }

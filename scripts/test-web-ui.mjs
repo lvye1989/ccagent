@@ -50,6 +50,7 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === `/api/sessions/${sessionId}`) data = { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false };
   else if (route === `/api/sessions/${sessionId}/mode`) { sessionMode = payload.mode; data = {}; }
   else if (route === `/api/sessions/${sessionId}/messages`) { if (failSubmit) throw new Error("Fixture submit failure"); data = { accepted: true }; }
+  else if (route === `/api/sessions/${sessionId}/interrupt`) data = { interrupted: true };
   else if (route === "/api/composer-tools") data = { commands: [{ name: "test-skill", description: "Fixture skill", kind: "技能" }, { name: "help", description: "Help", kind: "命令" }] };
   else if (route === "/api/files/upload") { if (failUpload) throw new Error("Fixture upload failure"); data = { path: `.ccagent/attachments/id/${payload.name}`, name: payload.name, size: 4 }; }
   else if (route.startsWith("/api/files")) {
@@ -76,6 +77,8 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === "/api/customize/teams") { if (payload?.op === "global") teamEnabled = payload.enabled; data = { teams, enabled: teamEnabled, activeTeam: null }; }
   else if (route === "/api/customize/rag") data = { connections: [] };
   else if (route === "/api/plugins") data = { installed: [], available: [], marketplaces: [] };
+  else if (route === "/api/apps") data = { apps: [] };
+  else if (route === "/api/account/status") data = { user: { id: "offline-ui-user" } };
   else if (route === "/api/agents") data = { agents: [agent] };
   else if (route === "/api/skills") data = { globallyEnabled: true, skills: [skill] };
   else if (route === "/api/skills/state") { skill.enabled = payload.state === "open"; data = {}; }
@@ -146,6 +149,16 @@ try {
   lastEventSource.onmessage({ data: JSON.stringify({ type: "tool_start", id: "failed-image", name: "ReadImage" }) });
   lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "model_error" }) }); await settle();
   assert.match($("thread-status-label").textContent, /失败/); assert(![...document.querySelectorAll(".tool-state")].some((node) => node.textContent === "执行中"), "Failed turns leave no tool card looking active");
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "model", model: "ccagent:fixture" }) });
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  const beforeStop = calls.length;
+  await click("#stop-button");
+  assert.equal(calls.slice(beforeStop).filter(call => call.route.endsWith('/interrupt')).length, 1);
+  assert.match($("timeline").textContent, /官方服务调用仍会按可核实用量结算/);
+  assert.match($("timeline").textContent, /查询不会新增消费/);
+  assert.equal($("stop-button").disabled, false);
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "aborted" }) });
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "model", model: "fixture" }) });
   await click("#thread-insert-tool"); await click(tool("计划模式")); assert.equal(sessionMode, "plan");
   await click("#new-task");
   await click("#insert-command"); await click(tool("添加照片和文件"));

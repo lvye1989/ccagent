@@ -18,7 +18,14 @@ rhino/output/
 rhino/_diag/
 output/playwright/
 output/checks/
+output/runtime/
+docs/Everything.db
 .playwright-cli/
 deliverables/
 output/desktop/
 output/desktop-npm-audit.json
+output/npm-cache/
+output/photoshop-mcp-runtime/
+output/photoshop-mcp-probe-home/
+output/photoshop-npx-test-home/
+output/photoshop-web-test/

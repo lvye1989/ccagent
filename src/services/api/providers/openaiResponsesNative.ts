@@ -42,7 +42,7 @@ type OpenAIResponsesNativeEvent =
   | {
       type: "message_end";
       stop_reason?: string;
-      usage?: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number };
+      usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number; reasoning_tokens?: number };
     }
   | { type: "error"; message: string };
 
@@ -141,6 +141,7 @@ async function* parseOpenAIResponsesNative(
           break;
         }
         const usage = response?.usage as Record<string, unknown> | undefined;
+        const inputDetails = usage?.input_tokens_details as Record<string, unknown> | undefined;
         const details = usage?.output_tokens_details as Record<string, unknown> | undefined;
         yield {
           type: "message_end",
@@ -149,6 +150,7 @@ async function* parseOpenAIResponsesNative(
             ? {
                 usage: {
                   input_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
+                  cached_input_tokens: typeof inputDetails?.cached_tokens === "number" ? inputDetails.cached_tokens : undefined,
                   output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
                   reasoning_tokens: typeof details?.reasoning_tokens === "number" ? details.reasoning_tokens : undefined,
                 },
@@ -299,7 +301,20 @@ export async function* assembleOpenAIResponses(
         }
         rawStopReason = event.stop_reason;
         if (event.usage) {
-          if (typeof event.usage.input_tokens === "number") usage.input_tokens = event.usage.input_tokens;
+          if (typeof event.usage.input_tokens === "number") {
+            const totalInput = event.usage.input_tokens;
+            const cachedInput = event.usage.cached_input_tokens;
+            usage.input_tokens = totalInput;
+            delete usage.cache_read_input_tokens;
+            // Responses includes cached input in its total. Our shared Usage
+            // counts cached input separately, so split it without adding tokens.
+            if (Number.isSafeInteger(totalInput) && totalInput >= 0 &&
+                typeof cachedInput === "number" && Number.isSafeInteger(cachedInput) &&
+                cachedInput > 0 && cachedInput <= totalInput) {
+              usage.input_tokens = totalInput - cachedInput;
+              usage.cache_read_input_tokens = cachedInput;
+            }
+          }
           if (typeof event.usage.output_tokens === "number") usage.output_tokens = event.usage.output_tokens;
         }
         break;

@@ -209,6 +209,8 @@ export interface QueryEngineOptions {
   permissionSettings?: PermissionSettings;
   sessionPermissionRules?: PermissionRuleSet;
   onPermissionRequest?: (request: PermissionRequest) => Promise<PermissionDecision>;
+  /** Optional bound for specialized agent sessions; ordinary sessions retain the normal loop limit. */
+  maxTurns?: number;
 }
 
 export interface QueryEngineState {

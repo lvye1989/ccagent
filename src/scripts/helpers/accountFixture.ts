@@ -38,7 +38,7 @@ export async function startAccountFixture(base: string, options: { handleService
       return reply(200, { user, session: { expiresAt: new Date(Date.now() + 3600_000).toISOString() } });
     }
     if (req.url === "/api/auth/sign-out" && req.method === "POST") { if (token) sessions.delete(token); return reply(200, { success: true }); }
-    if (["/api/auth/sign-up/email", "/api/auth/request-password-reset"].includes(req.url ?? "")) return reply(200, { success: true });
+    if (["/api/auth/sign-up/email", "/api/auth/request-password-reset", "/api/auth/send-verification-email"].includes(req.url ?? "")) return reply(200, { success: true });
     if (options.handleService && await options.handleService(req, res, user && !disabled.has(user.id) ? user : undefined)) return;
     return reply(404, {});
   });
