@@ -7,7 +7,7 @@ const config: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   serverExternalPackages: ["postgres"],
-  turbopack: { root: path.resolve(import.meta.dirname, '..'), resolveAlias: { './money.js': '../src/platform/money.ts' } },
+  turbopack: { root: path.resolve(import.meta.dirname, '..'), resolveAlias: { './money.js': '../src/platform/money.ts', zod: './node_modules/zod/index.js' } },
   outputFileTracingRoot: path.resolve(import.meta.dirname, '..'),
 };
 

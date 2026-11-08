@@ -156,7 +156,7 @@ function registerIpc() {
   ipcMain.handle('ccagent:save-official-services', async (event, body) => {
     trustedGuide(event);
     if (!body || typeof body !== 'object' || Array.isArray(body) || (body.apiKey !== undefined && (typeof body.apiKey !== 'string' || body.apiKey.length > 8192))) throw new Error('请填写个人平台 Key 和服务选择。');
-    return api('/api/customize/official-services', Object.fromEntries(['apiKey', 'roles', 'auxiliaryEnabled', 'makeDefault'].filter(key => body[key] !== undefined).map(key => [key, body[key]])), 45000);
+    return api('/api/customize/official-services', Object.fromEntries(['apiKey', 'roles', 'auxiliaryEnabled', 'fallbackEnabled', 'catalogRevision', 'makeDefault'].filter(key => body[key] !== undefined).map(key => [key, body[key]])), 45000);
   });
   ipcMain.handle('ccagent:account-page', async (event, section) => {
     trustedGuide(event);

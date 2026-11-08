@@ -11,7 +11,7 @@ const external = await fetch(`${target}/login`, { redirect: 'manual', signal: Ab
 const protectionRedirect = external.status === 302 && new URL(external.headers.get('location') || '/', target).hostname === 'vercel.com';
 assert.ok([401, 403].includes(external.status) || protectionRedirect, 'PREVIEW_PROTECTION_MUST_REMAIN_ENABLED');
 console.log(JSON.stringify({ publicAccess: false, platformProtection: true }));
-for (const [path, expected] of [['/api/health', 200], ['/api/account/me', 401], ['/v1/models', 401], ['/api/admin/overview', 401], ['/api/admin/routes/defaults', 401], ['/api/system/maintenance', 401], ['/account', 307], ['/login', 200]] as const) {
+for (const [path, expected] of [['/api/health', 200], ['/api/account/me', 401], ['/v1/models', 401], ['/api/account/calls/check', 401], ['/api/account/calls?id=check', 401], ['/api/admin/overview', 401], ['/api/admin/routes/defaults', 401], ['/api/admin/routes/test?routeId=check', 401], ['/api/system/maintenance', 401], ['/account', 307], ['/login', 200]] as const) {
   const response = await fetch(`${target}${path}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (response.status !== expected) throw new Error(`PREVIEW_CHECK_FAILED:${path}:${response.status}`);
   if (path === '/account') assert.equal(response.headers.get('location'), '/login');

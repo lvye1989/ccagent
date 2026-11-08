@@ -189,7 +189,8 @@ test('explicitly approved one-hop fallback preserves real funding snapshots bill
       const timed = createGateway({ now: () => new Date(times[Math.min(clock++, times.length - 1)]!), fetch: async () => ++attempts === 1 ? unavailable() : success() });
       const response = await timed.execute(request('tariff-boundary', await pins()), 'responses'); assert.equal(response.status, 200); await response.text();
       const saved = await record('tariff-boundary'); assert.equal(saved.charged, 1040n); assert.equal(object(saved.usage).tariff, 'peak'); assert.equal(object(saved.usage).executionStartedAt, '2026-11-06T01:00:00.000Z');
-      const deadline = ['2026-12-31T23:59:59Z','2027-01-01T00:00:00Z']; let position = 0;
+      // The configured calendar expires at Beijing midnight (UTC 16:00).
+      const deadline = ['2026-12-31T15:59:59Z','2026-12-31T16:00:00Z']; let position = 0;
       const expired = createGateway({ now: () => new Date(deadline[Math.min(position++, 1)]!), fetch: async () => { throw new Error('MUST_NOT_DISPATCH'); } });
       const rejected = await expired.execute(request('calendar-before-send', await pins()), 'responses'); assert.equal(rejected.status, 503); assert.equal((await rejected.json()).code, 'PRICE_CALENDAR_EXPIRED');
       const neverSent = await record('calendar-before-send'); assert.equal(neverSent.status, 'released'); assert.equal(neverSent.charged, 0n); assert.equal(object(neverSent.usage).attempts, 0);

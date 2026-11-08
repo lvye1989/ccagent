@@ -1,4 +1,4 @@
-# Only the independent cloud application and two shared protocol modules deploy.
+# Only the independent cloud application and reviewed shared modules deploy.
 **
 !cloud
 !cloud/**
@@ -6,6 +6,7 @@
 !src/platform
 !src/platform/money.ts
 !src/platform/zpay.ts
+!src/platform/pricingDefinition.ts
 
 # Runtime uses migrated databases; operator scripts and credentials stay local.
 cloud/node_modules/**

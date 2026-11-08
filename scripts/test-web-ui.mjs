@@ -39,7 +39,7 @@ const files = [
 ];
 let officialConfigured = false, selectedOfficialRoles = {}, officialFallback = false;
 const catalogRevision = '11111111-1111-4111-8111-111111111111';
-const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }] } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
+const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }], tariff: { kind: 'constant' } } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
 const backupOfficialRoute = { ...defaultOfficialRoute, id: 'fixture-backup', name: '备用服务测试', limits: { fallbackEnabled: false, fallbackRouteId: null } };
 globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
@@ -192,6 +192,8 @@ try {
   assert(calls.some((c) => c.route === "/api/customize/settings" && c.payload?.mode === "auto"));
 
   await click('[data-setting="official"]');
+  document.querySelector('[data-setting="official"]').click(); document.querySelector('[data-setting="official"]').click(); await settle();
+  assert.equal(document.querySelectorAll('#official-fallback').length, 1, 'Concurrent settings renders never append duplicate forms or duplicate ids');
   assert($('official-auxiliary').disabled && $('official-default').disabled && $('official-fallback').disabled, 'A first Key verification cannot silently enable services fallback or replace the chat default');
   $('official-api-key').value = 'ccagent_' + 'x'.repeat(43);
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
@@ -208,6 +210,21 @@ try {
   assert.equal(consent.fallbackEnabled, true); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback').checked, true);
   assert($('settings-content').textContent.includes('管理员备用')); assert($('settings-content').textContent.includes('备用服务测试'));
   console.log('Official service DOM: first verification uses catalog recommendations, requires explicit enable/default choices and preserves cleared selections.');
+
+  const originalBackupPricing = backupOfficialRoute.pricing;
+  backupOfficialRoute.pricing = { ...originalBackupPricing, definition: { tariff: { kind: 'qwen-input-tiers', defaultThinking: true, maxThinkingTokens: 32768 },
+    rates: ['input_tokens', 'cached_input_tokens', 'output_tokens'].map(metric => ({ metric, unitQuantity: '1000000', tiers: [
+      { upToInputTokens: 128000, price: '0', ...(metric === 'output_tokens' ? { thinkingPrice: '8' } : {}) },
+      { upToInputTokens: 1000000, price: '48', ...(metric === 'output_tokens' ? { thinkingPrice: '64' } : {}) },
+    ] })),
+  } };
+  await click('[data-setting="official"]');
+  assert($('settings-content').textContent.includes('128000 < Token ≤ 1000000'));
+  assert($('settings-content').textContent.includes('思考 64'));
+  assert($('settings-content').textContent.includes('32768 Token'));
+  assert(!$('settings-content').textContent.includes('CNY undefined'));
+  backupOfficialRoute.pricing = originalBackupPricing;
+  console.log('Official service DOM: all Qwen tiers thinking prices and reasoning allowance are visible.');
 
   await click('[data-customize-view="teams"]'); assert(!$("teams-view").classList.contains("hidden"));
   await click("#teams-create"); assert($("edit-team-name"));

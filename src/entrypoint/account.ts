@@ -4,6 +4,7 @@ import { configurePlatform, enterPlatformAccount, getPlatformAccountClient } fro
 import { AccountError } from "../platform/accountClient.js";
 import { officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
 import { importLegacyData, previewLegacyData, legacyCategories } from "../platform/legacyData.js";
+import { pricingRateLines } from "../platform/pricingDefinition.js";
 
 const help = `CCAGENT 账户\n\n  ccagent account setup --server https://<官方服务地址>\n  ccagent account login [--email 邮箱]\n  ccagent account register [--email 邮箱]\n  ccagent account forgot [--email 邮箱]\n  ccagent account status\n  ccagent account logout\n  ccagent account key\n  ccagent account services\n  ccagent account fallback [--enabled true|false]\n  ccagent account import-preview [--source original-data-folder]\n  ccagent account import [--source original-data-folder]\n\n登录及注册密码在交互终端中隐藏输入，不接受命令行密码参数。\n`;
 
@@ -86,7 +87,8 @@ export async function runAccountCommand(args: string[], options: { prompter?: Ac
         output.write(`${route.id} → ${target?.id || '备用当前不可用'}\n`);
         for (const selected of target ? [route, target] : [route]) {
           output.write(`${selected.name} · 价格 v${selected.pricing.version} · ${selected.pricing.currency}${selected.pricing.currency === 'USD' ? ` · 汇率 ${selected.pricing.usdCny}` : ''}\n`);
-          for (const rate of selected.pricing.definition.rates) output.write(`  ${rate.metric}：每 ${rate.unitQuantity} 单位 ${rate.price}${rate.offPeakPrice !== undefined ? `（低峰 ${rate.offPeakPrice}）` : ''}\n`);
+          if (selected.pricing.definition.tariff.kind === 'qwen-input-tiers') output.write(`  按整次请求输入总量选择档位；默认${selected.pricing.definition.tariff.defaultThinking ? '开启' : '关闭'}思考；预算计入最大思考长度 ${selected.pricing.definition.tariff.maxThinkingTokens} Token。\n`);
+          for (const line of pricingRateLines(selected.pricing.definition)) output.write(`  ${line}\n`);
           output.write(`  来源：${selected.pricing.sourceUrl}\n`);
         }
       }

@@ -43,7 +43,7 @@ try {
       await database().db.insert(tables.audit).values({ id: randomUUID(), action: 'system.maintenance', objectId: 'scheduled', result: 'partial', metadata: { fixtureOnly: true } });
     }
   }
-  if (process.argv.includes('--with-default-data')) {
+  if (process.argv.includes('--with-default-data') || process.argv.includes('--with-fallback-data') || process.argv.includes('--with-route-test-data')) {
     const credentialEnv = 'CCAGENT_PROVIDER_DEFAULT_FIXTURE';
     process.env[credentialEnv] = 'synthetic-defaults-only-no-supplier-requests';
     const { saveRoute, createPriceVersion, routeInput, priceDefinition } = await import('../src/core/catalog');

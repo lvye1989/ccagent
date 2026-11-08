@@ -2,6 +2,9 @@
 import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import type { UsageMetric } from '@/core/catalog';
+import { RouteTestPanel } from './route-test-panel';
+import { blankQwenTierDraft, qwenTierDefinition, qwenTierDraft, QwenTierEditor } from './qwen-tier-editor';
+import { priceDefinition } from '../../../src/platform/pricingDefinition';
 
 const protocols: Record<string, [string, string][]> = { chat: [['openai-responses', 'Responses'], ['openai-chat', 'Chat Completions']], vision: [['openai-chat', 'Chat Completions'], ['openai-responses', 'Responses']],
   decision: [['jev-decisions', 'Jev Decisions']], search: [['tavily', 'Tavily'], ['bocha', '博查']], voice: [['dashscope-tts', 'Qwen 语音']] };
@@ -20,6 +23,7 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
   const router = useRouter();
   const [route, setRoute] = useState<Route>(blankRoute), [rates, setRates] = useState<Rate[]>(blankRates), [currency, setCurrency] = useState('CNY'), [tariff, setTariff] = useState('constant');
   const [sourceUrl, setSourceUrl] = useState(''), [holidays, setHolidays] = useState(''), [calendarYear, setCalendarYear] = useState(new Date().getFullYear()), [calendarSource, setCalendarSource] = useState('');
+  const [tierDraft, setTierDraft] = useState(blankQwenTierDraft);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState(''), [configured, setConfigured] = useState<boolean | null>(null), [version, setVersion] = useState<number | null>(null);
   const change = <K extends keyof Route>(key: K, value: Route[K]) => setRoute(previous => ({ ...previous, [key]: value }));
   async function load(event: FormEvent<HTMLFormElement>) {
@@ -33,10 +37,13 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
       setRoute(loaded); setConfigured(Boolean(result.credentialConfigured)); setVersion(result.latestPrice?.version ?? null);
       const latest = result.latestPrice;
       if (latest?.components?.definition) {
-        setRates(latest.components.definition.rates); setCurrency(latest.currency); setSourceUrl(latest.sourceUrl);
+        const definition = priceDefinition.parse(latest.components.definition);
+        if (definition.tariff.kind === 'qwen-input-tiers') setTierDraft(qwenTierDraft(definition));
+        else setRates(definition.rates.filter(rate => 'price' in rate));
+        setCurrency(latest.currency); setSourceUrl(latest.sourceUrl);
         const policy = latest.components.definition.tariff;
         setTariff(policy.kind); setHolidays((policy.holidays || []).join('\n')); setCalendarYear(policy.calendarYear || new Date().getFullYear()); setCalendarSource(policy.calendarSourceUrl || '');
-      } else { setRates(blankRates()); setTariff('constant'); setSourceUrl(''); setCurrency('CNY'); }
+      } else { setRates(blankRates()); setTierDraft(blankQwenTierDraft()); setTariff('constant'); setSourceUrl(''); setCurrency('CNY'); }
       setMessage(result.ready ? '路由已开放，服务器已配置凭据与成本。' : '已载入路由，请核对凭据、成本和开放状态。');
     } catch (error) { setError(error instanceof Error ? error.message : '读取失败。'); }
     finally { setBusy(false); }
@@ -46,7 +53,7 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
     try {
       const policy = tariff === 'constant' ? { kind: 'constant' } : { kind: 'deepseek', calendarYear, holidays: holidays.split(/[\s,，]+/).filter(Boolean), calendarSourceUrl: calendarSource };
       const payload = mode === 'routes' ? route : { routeId: route.id, currency, sourceUrl, effectiveAt: String(new FormData(event.currentTarget).get('effectiveAt') || '').trim() || new Date().toISOString(),
-        definition: { rates: rates.map(rate => ({ metric: rate.metric, price: rate.price, unitQuantity: rate.unitQuantity, ...(tariff === 'deepseek' ? { offPeakPrice: rate.offPeakPrice || '' } : {}) })), tariff: policy } };
+        definition: tariff === 'qwen-input-tiers' ? qwenTierDefinition(tierDraft) : { rates: rates.map(rate => ({ metric: rate.metric, price: rate.price, unitQuantity: rate.unitQuantity, ...(tariff === 'deepseek' ? { offPeakPrice: rate.offPeakPrice || '' } : {}) })), tariff: policy } };
       const response = await fetch(mode === 'routes' ? '/api/admin/routes' : '/api/admin/prices', { method: mode === 'routes' ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.message || '保存失败，请核对字段。');
@@ -76,9 +83,11 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
         <label className="field">开放状态<select value={String(route.enabled)} onChange={event => change('enabled', event.target.value === 'true')} disabled={busy}><option value="false">暂停开放</option><option value="true">开放服务</option></select><small>启用前校验凭据、完整公开成本和美元结算汇率。</small></label>
       </> : <>
         <div className="notice neutral">当前版本：{version ? `v${version}` : '尚未载入'}。保存将追加新版本，服务费固定为公开成本 × 1.3。</div>
-        <div className="form-row"><label className="field">成本币种<select value={currency} onChange={event => setCurrency(event.target.value)} disabled={busy}><option value="CNY">人民币 CNY</option><option value="USD">美元 USD</option></select></label><label className="field">价格策略<select value={tariff} onChange={event => setTariff(event.target.value)} disabled={busy}><option value="constant">固定单价</option><option value="deepseek">DeepSeek 峰谷价格</option></select></label></div>
+        <div className="form-row"><label className="field">成本币种<select aria-label="成本币种" value={currency} onChange={event => setCurrency(event.target.value)} disabled={busy}><option value="CNY">人民币 CNY</option><option value="USD">美元 USD</option></select></label><label className="field">价格策略<select aria-label="价格策略" value={tariff} onChange={event => setTariff(event.target.value)} disabled={busy}><option value="constant">固定单价</option><option value="deepseek">DeepSeek 峰谷价格</option><option value="qwen-input-tiers">Qwen 输入阶梯与思考模式</option></select></label></div>
+        {tariff === 'qwen-input-tiers' ? <QwenTierEditor value={tierDraft} onChange={setTierDraft} currency={currency} disabled={busy} /> : <>
         {rates.map((rate, index) => <div className="panel" key={index}><div className="form-row"><label className="field">计价项目<select value={rate.metric} onChange={event => setRates(previous => previous.map((item, i) => i === index ? { ...item, metric: event.target.value } : item))} disabled={busy}>{metrics.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label className="field">计价单位数量<input value={rate.unitQuantity} inputMode="numeric" pattern="[1-9][0-9]{0,9}" required onChange={event => setRates(previous => previous.map((item, i) => i === index ? { ...item, unitQuantity: event.target.value } : item))} disabled={busy} /></label></div><div className="form-row"><label className="field">{tariff === 'deepseek' ? '高峰' : '公开'}单价（{currency}）<input value={rate.price} inputMode="decimal" required onChange={event => setRates(previous => previous.map((item, i) => i === index ? { ...item, price: event.target.value } : item))} disabled={busy} /></label>{tariff === 'deepseek' && <label className="field">低谷单价（{currency}）<input value={rate.offPeakPrice || ''} inputMode="decimal" required onChange={event => setRates(previous => previous.map((item, i) => i === index ? { ...item, offPeakPrice: event.target.value } : item))} disabled={busy} /></label>}</div><button className="button secondary small" type="button" disabled={busy || rates.length === 1} onClick={() => setRates(previous => previous.filter((_, i) => i !== index))}>移除此项目</button></div>)}
         <div><button className="button secondary" type="button" disabled={busy || rates.length >= 10} onClick={() => setRates(previous => [...previous, { metric: 'requests', price: '', unitQuantity: '1' }])}>增加计价项目</button></div>
+        </>}
         {tariff === 'deepseek' && <><label className="field">价格日历年份<input type="number" min={2026} max={2100} value={calendarYear} onChange={event => setCalendarYear(Number(event.target.value))} required disabled={busy} /></label><label className="field">法定假期日期<textarea value={holidays} onChange={event => setHolidays(event.target.value)} placeholder="每行一个日期，如 2026-10-01" disabled={busy} /><small>按公开价格中的北京时间规则，周末全天低谷。</small></label><label className="field">官方假期来源<input type="url" value={calendarSource} onChange={event => setCalendarSource(event.target.value)} required disabled={busy} /></label></>}
         <label className="field">供应商公开价格来源<input type="url" value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} required maxLength={500} disabled={busy} /></label>
         <label className="field">生效时间（留空表示保存时生效）<input name="effectiveAt" placeholder="如 2026-11-07T00:00:00+08:00" disabled={busy} /><small>指定时间时，请使用含时区的 ISO 8601 格式。</small></label>
@@ -86,5 +95,6 @@ export function GatewayPanel({ mode, rows }: { mode: 'routes' | 'prices'; rows: 
       {message && <div className="notice" role="status">{message}</div>}{error && <div className="notice error" role="alert">{error}</div>}
       <div><button className="button" disabled={busy}>{busy ? '正在保存…' : mode === 'routes' ? '保存路由' : '追加成本版本'}</button></div>
     </form>
+    {mode === 'routes' && <RouteTestPanel routeId={route.id} />}
   </section>;
 }

@@ -339,6 +339,23 @@ try {
       assert.equal(await runAccountCommand(['fallback','--enabled','false'], options('n')), 0); assert.equal((await readServiceBinding())!.configuration.fallbackEnabled, false);
       assert.equal(questions, 2); assert.equal(modelRequests, before); assert.ok(output.includes(backupRoute.id)); assert.ok(output.includes('1.3')); assert.equal(output.includes(key), false);
     });
+    await test('CLI reviews every Qwen tier and reasoning allowance before accepting a fallback decision', async () => {
+      const originalPricing = structuredClone(primaryRoute.pricing), before = modelRequests;
+      try {
+        Object.assign(primaryRoute.pricing, { version: 77, fingerprint: 'c'.repeat(64), definition: {
+          tariff: { kind: 'qwen-input-tiers', defaultThinking: true, maxThinkingTokens: 32768 },
+          rates: ['input_tokens', 'cached_input_tokens', 'output_tokens'].map(metric => ({ metric, unitQuantity: '1000000', tiers: [
+            { upToInputTokens: 128000, price: metric === 'cached_input_tokens' ? '0' : '2', ...(metric === 'output_tokens' ? { thinkingPrice: '8' } : {}) },
+            { upToInputTokens: 1000000, price: '48', ...(metric === 'output_tokens' ? { thinkingPrice: '64' } : {}) },
+          ] })),
+        } });
+        let output = '';
+        assert.equal(await runAccountCommand(['fallback', '--enabled', 'true'], { output: { write(value: string) { output += value; return true; } } as any,
+          prompter: { ask: async () => 'n', secret: async () => { throw new Error('UNEXPECTED_KEY_PROMPT'); }, close() {} } }), 0);
+        assert(output.includes('128000 < Token ≤ 1000000')); assert(output.includes('思考 64')); assert(output.includes('32768 Token')); assert(output.includes('缓存') || output.includes('cached_input_tokens'));
+        assert.equal((await readServiceBinding())!.configuration.fallbackEnabled, false); assert.equal(modelRequests, before); assert.equal(output.includes(key), false);
+      } finally { Object.assign(primaryRoute.pricing, originalPricing); }
+    });
   } finally { routes.splice(routes.findIndex(route => route.id === backupRoute.id), 1); Object.assign(primaryRoute, originalRoute); await saveOfficialServices({ fallbackEnabled: false }); }
   await test("switching accounts cannot reuse an old client or read its private result", async () => {
     await fixture.nativeClient.signIn(fixture.users[1]!.email, fixture.password); delete process.env.CCAGENT_ACCOUNT_ID; process.env.CCAGENT_HOME = base; await enterPlatformAccount();

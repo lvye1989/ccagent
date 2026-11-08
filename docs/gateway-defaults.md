@@ -42,7 +42,7 @@ Web 首次验证仅提交平台 Key，随后显示推荐及价格；首次验证
 | 项目 | 实测值 |
 | --- | --- |
 | 保留项目 / 部署 | `ccagent-cloud` / `dpl_B2GW9td1aUhuCE3w2GpEmW5Q32zj` |
-| 当前开发 URL | <https://ccagent-cloud-6yi7nj952-lvye-1989s-projects.vercel.app> |
+| 本阶段开发 URL | <https://ccagent-cloud-6yi7nj952-lvye-1989s-projects.vercel.app> |
 | 状态 | Preview / READY，保持访问保护；非 Production |
 | 框架 / 运行时 / 区域 | Next.js 16.4.5 / Node.js 24.x / sin1 |
 | 构建耗时 | 21.889 秒（约 22 秒） |
@@ -60,6 +60,6 @@ Web 首次验证仅提交平台 Key，随后显示推荐及价格；首次验证
 
 ## 发布边界
 
-默认路由解决初始选择与管理配置，不等于上游已可实际推理。管理员显式备用的界面、实际切换、价格版本确认与成本结算，以及产品内真实调用检测仍须继续实现和验收；当前不能把 `fallbackRouteId` 字段当成可用备用功能。不会自动切换到用户私人付费 Key。
+本阶段完成初始推荐与管理配置，不能用 `fallbackRouteId` 字段推断备用已经可用。后续已完成管理员一级备用、用户价格确认、实际切换与成功路由结算，见 [备用路由记录](gateway-fallback.md)；产品内管理员连接检测及最新开发部署另见 [连接检测记录](gateway-connection-tests.md)。正式远端供应商验收仍待完成，不自动切换用户私人付费 Key。
 
 真实邮件、七支付、正式价格/供应商配置、生产数据隔离/域名/备份/调度、最终安装升级及大陆网络验收仍按 [完整需求核对](goal-audit.md) 推进。没有把模拟成本或测试路由写入保留开发库，也没有依据自动续行替用户创建 OpenAI Key、发送邮件或发起真实交易。

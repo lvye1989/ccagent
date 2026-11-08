@@ -6,6 +6,7 @@ import { getCCAgentHome } from "../utils/paths.js";
 import { accountHome, getPlatformHome } from "./account.js";
 import { normalizePlatformOrigin } from "./accountClient.js";
 import { SecureCredentialStore } from "./secureStore.js";
+import { priceDefinition } from "./pricingDefinition.js";
 
 export const platformKeyPattern = /^ccagent_[A-Za-z0-9_-]{43}$/;
 export const officialRoles = ["main", "image", "decision", "search", "voice"] as const;
@@ -13,12 +14,11 @@ export type OfficialRole = typeof officialRoles[number];
 export const officialModelPrefix = "ccagent:";
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/);
 const rolesSchema = z.object({ main: routeId.optional(), image: routeId.optional(), decision: routeId.optional(), search: routeId.optional(), voice: routeId.optional() }).strict();
-const rate = z.object({ metric: z.string().max(50), price: z.string().regex(/^(?:0|[1-9]\d{0,8})(?:\.\d{1,12})?$/), unitQuantity: z.string().regex(/^[1-9]\d{0,9}$/), offPeakPrice: z.string().optional() });
 export const serviceRouteSchema = z.object({
   id: routeId, name: z.string().min(1).max(100),
   service: z.enum(["chat", "vision", "decision", "search", "voice"]),
   protocol: z.enum(["openai-chat", "openai-responses", "jev-decisions", "tavily", "bocha", "dashscope-tts"]),
-  pricing: z.object({ currency: z.enum(["CNY", "USD"]), definition: z.object({ rates: z.array(rate).min(1).max(10), tariff: z.record(z.string(), z.unknown()) }), markup: z.literal("1.3"),
+  pricing: z.object({ currency: z.enum(["CNY", "USD"]), definition: priceDefinition, markup: z.literal("1.3"),
     usdCny: z.string().nullable().optional(), version: z.number().int().positive(), sourceUrl: z.url().refine(value => new URL(value).protocol === "https:"), fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }),
   limits: z.object({ contextWindow: z.number().int().min(128).max(4000000), maxOutputTokens: z.number().int().min(1).max(1000000), maxImages: z.number().int().min(0).max(600), fallbackRouteId: routeId.nullable().optional(), fallbackEnabled: z.boolean().default(false) }),
 });

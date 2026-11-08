@@ -128,7 +128,14 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     });
   }
 
-  async function renderSettings() {
+  let settingsRevision = 0, settingsQueue = Promise.resolve();
+  function renderSettings() {
+    const revision = ++settingsRevision;
+    const render = settingsQueue.then(() => revision === settingsRevision ? renderSettingsContent() : undefined);
+    settingsQueue = render.catch(() => {});
+    return render;
+  }
+  async function renderSettingsContent() {
     const url = new URL(location.href); url.searchParams.set("setting", selectedSettings); history.replaceState({}, "", url);
     const root = $("settings-content"); root.replaceChildren(el("p", "editor-hint", "正在读取设置…"));
     try {
@@ -183,7 +190,12 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
             copy.append(el('p', 'editor-hint', backup ? `管理员备用：${backup.name}（${backup.id}），价格 v${backup.pricing.version}，完整价格见该服务条目。需单独开启备用授权。` : '管理员配置的备用当前不可用，请刷新目录核对。'));
           }
           const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", search_credits: "搜索 credit" };
-          for (const rate of route.pricing.definition.rates || []) copy.append(el("p", "editor-hint", `每 ${rate.unitQuantity} ${labels[rate.metric] || rate.metric}：${route.pricing.currency} ${rate.price}${rate.offPeakPrice !== undefined ? `（低峰 ${rate.offPeakPrice}）` : ""}`));
+          const policy = route.pricing.definition.tariff;
+          if (policy.kind === "qwen-input-tiers") copy.append(el("p", "editor-hint", `按整次输入总量（含缓存）选择档位；默认${policy.defaultThinking ? "开启" : "关闭"}思考；预算计入最大思考长度 ${policy.maxThinkingTokens} Token。`));
+          for (const rate of route.pricing.definition.rates || []) {
+            if (Array.isArray(rate.tiers)) for (const [index, tier] of rate.tiers.entries()) copy.append(el("p", "editor-hint", `输入 ${index ? rate.tiers[index - 1].upToInputTokens : 0} < Token ≤ ${tier.upToInputTokens}，每 ${rate.unitQuantity} ${labels[rate.metric] || rate.metric}：${route.pricing.currency} ${tier.price}${tier.thinkingPrice !== undefined ? `（思考 ${tier.thinkingPrice}）` : ""}`));
+            else copy.append(el("p", "editor-hint", `每 ${rate.unitQuantity} ${labels[rate.metric] || rate.metric}：${route.pricing.currency} ${rate.price}${rate.offPeakPrice !== undefined ? `（低峰 ${rate.offPeakPrice}）` : ""}`));
+          }
           copy.append(el("p", "editor-hint", `收费倍率 1.3${route.pricing.currency === "USD" ? ` · 结算汇率 ${route.pricing.usdCny} 元/美元` : ""}；最终按实际用量结算并释放未使用的冻结额度。`));
           const source = el("a", "settings-secondary", "供应商公开价格"); source.href = route.pricing.sourceUrl; source.target = "_blank"; source.rel = "noopener noreferrer"; copy.append(source);
           row.append(copy); root.append(row);

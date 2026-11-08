@@ -3,11 +3,12 @@ import { requireSession } from './auth';
 import { database } from './db';
 import { blobs, reservations } from './db/schema';
 import { HttpError } from './http';
+import { callIdentifierPattern } from './call-identifiers';
 
 /** A revoked platform Key does not hide its owner's previous billing records. */
 export async function ownedCallStatus(request: Request, requestId: string) {
   const { user } = await requireSession(request.headers);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(requestId)) throw new HttpError(400, 'INVALID_CALL_ID', '调用标识无效。');
+  if (!callIdentifierPattern.test(requestId)) throw new HttpError(400, 'INVALID_CALL_ID', '调用标识无效。');
   const [record] = await database().db.select({ id: reservations.id, routeId: reservations.routeId, taskId: reservations.taskId,
     requestId: reservations.idempotencyKey, status: reservations.status, authorized: reservations.authorized, charged: reservations.charged,
     priceSnapshot: reservations.priceSnapshot, usage: reservations.usage, createdAt: reservations.createdAt, updatedAt: reservations.updatedAt,

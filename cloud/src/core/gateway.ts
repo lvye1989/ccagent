@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { publishedRoute, publicPricing, quoteDefinition, routeInput, selectedTariff, type UsageMetric } from './catalog';
+import { applyRequestPricing, publishedRoute, publicPricing, quoteDefinition, routeInput, selectedTariff, type UsageMetric } from './catalog';
 import { database } from './db';
 import { reservations, routes } from './db/schema';
 import { readOwnedFile, savePrivateResult } from './files';
@@ -10,8 +10,9 @@ import { requireServiceIdentity } from './keys';
 import { measuredUsage, object, prepareUpstream, UsageStream, voiceDownloadUrl, type GatewayEndpoint } from './upstream';
 import { authorizeUsage, finishUsage } from './wallet';
 import { availableServiceDefaults, readServiceDefaults } from './service-defaults';
+import { callIdentifierPattern } from './call-identifiers';
 
-const id = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/);
+const id = z.string().regex(callIdentifierPattern);
 const maximumResult = 64 * 1024 * 1024;
 function canonical(value: unknown, depth = 0): unknown {
   if (depth > 40) throw new HttpError(400, 'INPUT_TOO_DEEP', '请求嵌套层级过深。');
@@ -66,10 +67,11 @@ async function bytes(response: Response, limit = maximumResult): Promise<Uint8Ar
   return Buffer.concat(chunks);
 }
 type Selection = Awaited<ReturnType<typeof publishedRoute>>;
-function maximumQuantities(selection: Selection, input: Record<string, unknown>, body: Record<string, unknown>) {
+export function maximumQuantities(selection: Selection, input: Record<string, unknown>, body: Record<string, unknown>) {
   const options = routeInput.shape.options.parse(selection.route.options), result: Partial<Record<UsageMetric, bigint>> = {};
   // Reserve a documented upper budget; actual measured usage, never this budget, determines the bill.
-  const output = BigInt(Number(body.max_output_tokens ?? body.max_tokens ?? options.maxOutputTokens));
+  const thinking = selection.definition.tariff.kind === 'qwen-input-tiers' && body.enable_thinking === true ? BigInt(selection.definition.tariff.maxThinkingTokens) : 0n;
+  const output = BigInt(Number(body.max_output_tokens ?? body.max_tokens ?? options.maxOutputTokens)) + thinking;
   const serialized = JSON.stringify(body);
   const containsImage = /"(?:input_image|image_url|input_audio|video_url)"|ccagent-file:/.test(serialized);
   const textBound = BigInt(Buffer.byteLength(serialized, 'utf8')) * 2n + 1024n;
@@ -79,10 +81,11 @@ function maximumQuantities(selection: Selection, input: Record<string, unknown>,
     : rate.metric === 'input_characters' ? BigInt(Array.from(String(input.text || '')).length) : inputBound;
   return result;
 }
-function snapshot(selection: Selection, at: Date) {
+function snapshot(selection: Selection, at: Date, body: Record<string, unknown>) {
   return { routeId: selection.route.id, provider: selection.route.provider, model: selection.route.upstreamModel, protocol: selection.route.protocol,
     priceId: selection.price.id, priceVersion: selection.price.version, sourceUrl: selection.price.sourceUrl, definition: selection.definition,
-    currency: selection.currency, usdCny: selection.usdCny, markup: '1.3', tariffAt: at.toISOString(), fingerprint: publicPricing(selection).fingerprint };
+    currency: selection.currency, usdCny: selection.usdCny, markup: '1.3', tariffAt: at.toISOString(), fingerprint: publicPricing(selection).fingerprint,
+    ...(selection.definition.tariff.kind === 'qwen-input-tiers' ? { thinking: body.enable_thinking } : {}) };
 }
 function fallbackConsent(headers: Headers) {
   const route = headers.get('x-ccagent-fallback-route'), version = headers.get('x-ccagent-fallback-price-version'), fingerprint = headers.get('x-ccagent-fallback-price-fingerprint');
@@ -147,6 +150,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
     for (const selected of selections) {
       const { createdAt: _created, updatedAt: _updated, ...value } = selected.route;
       const parsed = routeInput.parse(value), prepared = prepareUpstream(endpoint, input, parsed);
+      prepared.body = applyRequestPricing(selected.definition, prepared.body);
       const secret = process.env[selected.route.credentialEnv];
       if (!secret) throw new HttpError(503, 'UPSTREAM_NOT_CONFIGURED', '服务供应商尚未配置。');
       if (endpoint === 'responses') prepared.body.prompt_cache_key = `ccagent:${createHash('sha256').update(current.user.id).digest('hex').slice(0, 32)}:${typeof input.prompt_cache_key === 'string' ? input.prompt_cache_key.slice(0, 100) : 'default'}`;
@@ -156,11 +160,11 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
     const at = now(); let attemptedAt = at;
     let maximum = 1n;
     for (const plan of plans) {
-      const quote = quoteDefinition(plan.selection.definition, plan.selection.currency, maximumQuantities(plan.selection, input, plan.prepared.body), at, plan.selection.usdCny || undefined, true);
+      const quote = quoteDefinition(plan.selection.definition, plan.selection.currency, maximumQuantities(plan.selection, input, plan.prepared.body), at, plan.selection.usdCny || undefined, true, plan.prepared.body);
       if (quote.chargeMicro > maximum) maximum = quote.chargeMicro;
     }
     const authorized = await authorizeUsage({ userId: current.user.id, keyId: current.keyId, routeId, taskId, idempotencyKey, requestHash,
-      authorized: maximum, priceSnapshot: { ...snapshot(selection, at), ...(consent ? { fallback: snapshot(selections[1]!, at), fallbackConsent: consent } : {}) } });
+      authorized: maximum, priceSnapshot: { ...snapshot(selection, at, primary.prepared.body), ...(consent ? { fallback: snapshot(selections[1]!, at, plans[1]!.prepared.body), fallbackConsent: consent } : {}) } });
     if (authorized.replay) return replay(current.user.id, authorized.reservation);
     const reservation = authorized.reservation;
     const secrets = [...new Set(plans.map(plan => plan.secret))], secretLength = Math.max(...secrets.map(secret => secret.length));
@@ -185,11 +189,11 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
       catch { /* A failed result upload never repeats the supplier call or prevents settlement. */ }
       if (resultId) await database().db.update(reservations).set({ resultBlobId: resultId }).where(eq(reservations.id, reservation.id));
       if (!quantities) { await pending('supplier_usage_unmeasured'); return; }
-      const quote = quoteDefinition(selected.definition, selected.currency, quantities, attemptedAt, selected.usdCny || undefined);
+      const quote = quoteDefinition(selected.definition, selected.currency, quantities, attemptedAt, selected.usdCny || undefined, false, active.prepared.body);
       const charged = quote.chargeMicro > reservation.authorized ? reservation.authorized : quote.chargeMicro;
       await finishUsage({ userId: current.user.id, reservationId: reservation.id, charged,
         usage: { ...usage, publicCostMicro: quote.publicCostMicro.toString(), calculatedChargeMicro: quote.chargeMicro.toString(),
-          platformAbsorbedMicro: (quote.chargeMicro - charged).toString(), tariff: quote.tariff } });
+          platformAbsorbedMicro: (quote.chargeMicro - charged).toString(), tariff: quote.tariff, ...(quote.priceTier ? { priceTier: quote.priceTier } : {}) } });
     };
     let response: Response | undefined;
     try {
