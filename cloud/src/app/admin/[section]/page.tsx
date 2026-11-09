@@ -1,9 +1,12 @@
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
 import { Shell, PageHeader } from '@/components/shell';
 import { DataTable } from '@/components/data-table';
 import { Pager } from '@/components/pager';
 import { SettingsPanel } from '@/components/settings-panel';
 import { AdminActions } from '@/components/admin-actions';
+import { AdminKeysPanel } from '@/components/admin-keys-panel';
+import { AdminRoutesPanel } from '@/components/admin-routes-panel';
 import { GatewayPanel } from '@/components/gateway-panel';
 import { GatewayDefaultsPanel } from '@/components/gateway-defaults-panel';
 import { GatewayConfigPanel } from '@/components/gateway-config-panel';
@@ -25,8 +28,9 @@ const groups: Record<string, [string, string][]> = {
 };
 export default async function AdminSection({ params, searchParams }: { params: Promise<{ section: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { section } = await params;
-  const permission = section === 'settings' ? 'settings.write' : section === 'data' ? 'data.read' : adminView(section).permission;
+  const permission = section === 'routes' ? undefined : section === 'settings' ? 'settings.write' : section === 'data' ? 'data.read' : adminView(section).permission;
   const current = await webAccount(permission);
+  if (section === 'routes' && !current.permissions.some(value => value === 'admin.read' || value === 'routes.write')) notFound();
   const title = section === 'settings' ? '系统设置' : section === 'data' ? '后端数据' : adminView(section).title;
   const active = ['wallets', 'ledger'].includes(section) ? 'orders' : ['roles', 'permissions'].includes(section) ? 'users' : section === 'tasks' ? 'usage' : section === 'prices' ? 'routes' : section === 'audit' ? 'data' : section;
   let content: React.ReactNode, taskQuery = '';
@@ -46,7 +50,7 @@ export default async function AdminSection({ params, searchParams }: { params: P
       const navigation = new URLSearchParams(exportQuery); navigation.delete('format'); navigation.set('pageSize', String(result.pageSize)); taskQuery = navigation.toString();
     }
     const safeRows = result ? JSON.parse(JSON.stringify(result.rows)) as Record<string, unknown>[] : [];
-    content = <><section className="panel">{filterError && <div className="notice error" role="alert">{filterError}</div>}<AdminFilters section={section} values={result?.filters || adminFilterInputs(section, url)} pageSize={result?.pageSize} exportHref={result && current.permissions.includes('data.export') ? `/api/admin/data/${section}?${exportQuery}` : undefined} />{result && <><AdminSummary values={result.summary} /><DataTable rows={result.rows} /><Pager path={`/admin/${section}`} page={result.page} pageSize={result.pageSize} total={result.total} filters={result.filters} />{result.total > 10000 && <p className="small-text muted">每次导出最多 10,000 条，请继续缩小筛选范围；汇总金额包含全部匹配记录。</p>}</>}</section>{result && <><AdminActions key={`${section}-${result.page}-${exportQuery}`} section={section} rows={safeRows} permissions={current.permissions} />{(section === 'routes' || section === 'prices') && current.permissions.includes('routes.write') && <GatewayPanel mode={section} rows={safeRows} />}</>}</>;
+    content = <><section className="panel">{filterError && <div className="notice error" role="alert">{filterError}</div>}<AdminFilters section={section} values={result?.filters || adminFilterInputs(section, url)} pageSize={result?.pageSize} exportHref={result && current.permissions.includes('data.export') ? `/api/admin/data/${section}?${exportQuery}` : undefined} />{result && <><AdminSummary values={result.summary} />{section === 'routes' ? <AdminRoutesPanel key={`${section}-${result.page}-${exportQuery}`} rows={safeRows} permissions={current.permissions} /> : <DataTable rows={result.rows} />}<Pager path={`/admin/${section}`} page={result.page} pageSize={result.pageSize} total={result.total} filters={result.filters} />{result.total > 10000 && <p className="small-text muted">每次导出最多 10,000 条，请继续缩小筛选范围；汇总金额包含全部匹配记录。</p>}</>}</section>{result && <>{section === 'keys' ? <AdminKeysPanel key={`${section}-${result.page}-${exportQuery}`} rows={safeRows} /> : section !== 'routes' && <AdminActions key={`${section}-${result.page}-${exportQuery}`} section={section} rows={safeRows} permissions={current.permissions} />}{section === 'prices' && current.permissions.includes('routes.write') && <GatewayPanel mode="prices" rows={safeRows} />}</>}</>;
   }
   if (section === 'routes' && current.permissions.includes('routes.write')) content = <><GatewayDefaultsPanel initial={await adminServiceDefaults()} />{content}<GatewayConfigPanel /></>;
   return <Shell user={current.user} title={title} path={`/admin/${active}`} admin><PageHeader title={title} description={section === 'settings' ? '管理通用、认证、支付与计费配置，查看服务凭据配置状态。' : '查询平台业务数据，按权限执行管理操作。'} />{groups[section] && <nav className="tabs">{groups[section].map(([key, label]) => <Link className={section === key ? 'active' : ''} key={key} href={`/admin/${key}${taskQuery && ['usage', 'tasks'].includes(key) ? `?${taskQuery}` : ''}`}>{label}</Link>)}</nav>}{content}</Shell>;

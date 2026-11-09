@@ -20,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { marked } from "marked";
 import type { ToolContext } from "./Tool.js";
-import { getToolAllowedRoots, resolveSafePath } from "./pathUtils.js";
+import { ensureRealPathInsideAllowedRoots, getToolAllowedRoots, resolveSafePath } from "./pathUtils.js";
 
 export type DocumentConversionKind =
   | "markdown-to-pdf"
@@ -306,20 +306,10 @@ async function resolveOutputFile(
   }
   const outputPath = resolveSafePath(value, cwd);
   assertExtension(outputPath, allowedExtensions, "output_path");
-  let existingAncestor = path.dirname(outputPath);
-  while (true) {
-    try {
-      await lstat(existingAncestor);
-      break;
-    } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException;
-      if (err.code !== "ENOENT") throw error;
-      const parent = path.dirname(existingAncestor);
-      if (parent === existingAncestor) throw error;
-      existingAncestor = parent;
-    }
-  }
-  await ensureExistingPathInsideAllowedRoots(await realpath(existingAncestor), cwd);
+  // A newly granted output root may itself not exist yet. Validate the final
+  // destination through its existing ancestors before creating it, then repeat
+  // the inode-based root check against the newly created canonical parent.
+  await ensureRealPathInsideAllowedRoots(outputPath, cwd);
   await mkdir(path.dirname(outputPath), { recursive: true });
   const canonicalParent = await realpath(path.dirname(outputPath));
   await ensureExistingPathInsideAllowedRoots(canonicalParent, cwd);

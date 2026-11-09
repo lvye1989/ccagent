@@ -103,6 +103,7 @@ export async function autoCompactIfNeeded(
   options: {
     usage?: Usage;
     usageAnchorIndex?: number;
+    usageSystemPromptTokens?: number;
     systemPrompt?: string;
     querySource?: string;
     contextWindow?: number;
@@ -127,6 +128,7 @@ export async function autoCompactIfNeeded(
     const result = await compactMessages(messages, undefined, {
       usage: options.usage,
       usageAnchorIndex: options.usageAnchorIndex,
+      usageSystemPromptTokens: options.usageSystemPromptTokens,
       systemPrompt: options.systemPrompt,
       model,
       contextWindow: options.contextWindow,

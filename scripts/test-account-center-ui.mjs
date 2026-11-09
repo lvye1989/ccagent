@@ -129,13 +129,14 @@ await scenario(async ({ popups, calls, start, ready }) => {
 await scenario(async ({ browser, $, calls, popups, gesture, ready, complete, setFetcher, messageListeners }) => {
   setFetcher(({ route }) => {
     if (route === '/api/account/status') return response({ user: { id: 'fixture-user', email: 'user@example.test', name: 'User' }, origin });
-    if (route === '/api/customize/official-services') return response({ origin, permissions: ['admin.read'] });
+    if (route === '/api/customize/official-services') return response({ origin, permissions: ['admin.read'], wallet: { available: '1', balance: '100001', frozen: '100000' } });
     if (route === '/api/account/bridge') return response(ticketReply());
     if (route === '/api/account/logout') return response({ error: '模拟退出失败，请重试。' }, 503);
     assert.fail('Unexpected menu route ' + route);
   });
   await import('../web/account-menu.js?account-center-ui=' + ++serial);
   assert.equal(popups.length, 0); $('account-menu').click(); await until(() => browser.document.querySelector('a[href$="/admin"]')?.hidden === false, 'Admin visibility still follows local account permissions');
+  assert(browser.document.body.textContent.includes('余额 ¥0.000001 · 冻结 ¥0.10'), 'The local account menu preserves a single micro-yuan as exact yuan');
   const center = browser.document.querySelector('a[href$="/account"]'), admin = browser.document.querySelector('a[href$="/admin"]');
   assert.equal(center.href, origin + '/account'); assert.equal(admin.href, origin + '/admin');
   const centerClick = new browser.MouseEvent('click', { ctrlKey: true, bubbles: true, cancelable: true }); gesture(() => center.dispatchEvent(centerClick));

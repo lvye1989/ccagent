@@ -2,15 +2,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RouteTestResult } from '@/core/route-tests';
 import type { PriceDefinition } from '../../../src/platform/pricingDefinition';
+import { formatMicroYuan } from '@/core/money-display';
 
 type Quote = { routeId: string; name: string; provider: string; upstreamModel: string; protocol: string; enabled: boolean; confirmationFingerprint: string;
   estimatedPublicCostMicro: string; timeoutMs: number; description: string; pricing: { version: number; currency: string; sourceUrl: string; usdCny: string | null; definition?: PriceDefinition } };
 function money(value: string) {
-  try { const amount = BigInt(value); return `${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, '0')}`; } catch { return '—'; }
+  try { return formatMicroYuan(value); } catch { return '—'; }
 }
 const stateNames = { running: '正在检测', succeeded: '检测通过', failed: '检测失败', unknown: '结果待确认' };
 const metricNames: Record<string, string> = { input_tokens: '未缓存输入 Token', cached_input_tokens: '缓存输入 Token', output_tokens: '输出 Token', image_input_tokens: '图片输入 Token',
-  audio_input_tokens: '音频输入 Token', audio_output_tokens: '音频输出 Token', video_input_tokens: '视频输入 Token', input_characters: '输入字符', search_credits: '搜索 Credit', requests: '请求次数' };
+  audio_input_tokens: '音频输入 Token', audio_output_tokens: '音频输出 Token', video_input_tokens: '视频输入 Token', input_characters: '输入字符', input_images: '输入图片（张）', output_images: '输出图片（张）',
+  output_images_1k: '1K 输出图片（张）', output_images_2k: '2K 输出图片（张）', output_images_4k: '4K 输出图片（张）', search_credits: '搜索 Credit', requests: '请求次数' };
 export function RouteTestPanel({ routeId }: { routeId: string }) {
   const [quote, setQuote] = useState<Quote | null>(null), [test, setTest] = useState<RouteTestResult | null>(null), [testId, setTestId] = useState('');
   const [confirmed, setConfirmed] = useState(false), [submitted, setSubmitted] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -60,7 +62,7 @@ export function RouteTestPanel({ routeId }: { routeId: string }) {
   const displayedId = testId || test?.id || '';
   return <section className="form-stack" aria-labelledby="route-test-heading">
     <h3 id="route-test-heading">真实连接检测</h3>
-    <p className="muted">检测服务器已保存的路由。修改配置后请先保存，再准备检测；暂停开放的路由也可检测。检测使用对应服务协议，一次请求、最长 30 秒，费用由平台承担，用户余额不扣费。</p>
+    <p className="muted">检测服务器已保存的路由。修改配置后请先保存，再准备检测；暂停开放的路由也可检测。检测按对应协议执行一次任务，时限与内容以准备后的报价为准，费用由平台承担，用户余额不扣费。KIE 图像检测会真实生成一张 1K 图片，提交后查询原检测状态，避免重复付费。</p>
     <div><button type="button" className="button secondary" disabled={!routeId || busy || unresolved} onClick={() => { void prepare(); }}>准备连接检测</button></div>
     {quote && <div className="form-stack">
       <div className="notice neutral">{quote.name} · {quote.provider} · {quote.upstreamModel} · {quote.protocol}<br />{quote.enabled ? '已开放路由' : '暂停中的路由'} · 成本 v{quote.pricing.version} · 单次超时 {quote.timeoutMs / 1000} 秒<br />{quote.description}</div>

@@ -1,9 +1,10 @@
 /** Web editors write the same definitions and settings consumed by the CLI. */
-import { cp, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getUserSettingsPath, getCCAgentPath } from "../utils/paths.js";
-import { readJsonSettingsFile, updateUserSettings } from "../utils/settings.js";
+import { readJsonSettingsFile, readTrustedStringArraySetting, updateUserSettings } from "../utils/settings.js";
+import { expandHome, resolveSafePath } from "../tools/pathUtils.js";
 import { loadSettingSources } from "../config/sources.js";
 import { loadProfiles } from "../services/api/providers/profile.js";
 import { streamMessage } from "../services/api/streaming.js";
@@ -20,6 +21,7 @@ import { isAgentTeamsEnabled } from "../utils/agentTeamsEnabled.js";
 import { connectOfficialServices, forgetOfficialKey, officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
 import { importLegacyData, previewLegacyData } from "../platform/legacyData.js";
 import { getPlatformHome } from "../platform/account.js";
+import { discoverOllamaModels, normalizeOllamaBaseURL } from "../services/ollama.js";
 
 export interface TeamRole { name: string; prompt: string; agentType: string }
 export interface TeamPreset { id: string; name: string; description: string; enabled: boolean; roles: TeamRole[] }
@@ -91,6 +93,7 @@ export async function modelText(model: string, prompt: string, system: string): 
       if (output.length > 60000) throw new Error("Model output too large.");
     }
   } catch {
+    if (profiles[model]!.provider === "ollama") throw new Error("Ollama 请求失败或超时。请确认服务已启动、模型已下载且支持对话；Agent 执行工具还需要模型支持工具调用。");
     throw new Error("Model request failed or timed out. Check endpoint, protocol, model and API key in Settings.");
   } finally { await stream.return(undefined as never); }
 }
@@ -193,30 +196,36 @@ function publicUrl(value: string | undefined): string {
 async function modelsView(context: CustomizationContext) {
   const { profiles } = await loadProfiles(context.workspace);
   const own = map((await userSettings()).models);
-  return { defaultModel: context.defaultModel, models: [...Object.values(profiles).map((p) => ({ id: p.id, protocol: p.protocol, model: p.model, baseURL: publicUrl(p.baseURL), hasKey: Boolean(p.apiKey || p.platformService), managedByPlatform: Boolean(p.platformService), maxTokens: p.maxTokens, contextWindow: p.contextWindow, editable: !p.platformService && Object.hasOwn(own, p.id) })),
+  return { defaultModel: context.defaultModel, models: [...Object.values(profiles).map((p) => ({ id: p.id, protocol: p.protocol, provider: p.provider, localModel: p.provider === "ollama", model: p.model, baseURL: publicUrl(p.baseURL), hasKey: Boolean(p.apiKey || p.platformService), managedByPlatform: Boolean(p.platformService), maxTokens: p.maxTokens, contextWindow: p.contextWindow, editable: !p.platformService && Object.hasOwn(own, p.id) })),
     ...Object.entries(own).filter(([id, value]) => !id.startsWith("ccagent:") && !profiles[id] && value && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).disabled === true).map(([id, value]) => {
-      const raw = object(value); return { id, protocol: raw.protocol, model: raw.model, baseURL: publicUrl(typeof raw.baseURL === "string" ? raw.baseURL : ""), hasKey: Boolean(resolveWebSecret(raw.apiKey)), managedByPlatform: false, editable: true, setupRequired: true };
+      const raw = object(value); return { id, protocol: raw.protocol, provider: raw.provider === "ollama" ? "ollama" : undefined, localModel: raw.provider === "ollama", model: raw.model, baseURL: publicUrl(typeof raw.baseURL === "string" ? raw.baseURL : ""), hasKey: raw.provider !== "ollama" && Boolean(resolveWebSecret(raw.apiKey)), managedByPlatform: false, editable: true, setupRequired: true };
     })] };
 }
 async function saveModel(body: Record<string, unknown>, context: CustomizationContext) {
   const config = await userSettings();
   const id = safeDefinitionName(body.id);
   const models = map(config.models);
+  if (body.provider !== undefined && !["ollama", "custom"].includes(String(body.provider))) throw new Error("Choose a supported model provider.");
+  const ollama = body.provider === "ollama";
   if (!["anthropic", "openai-chat", "openai-responses", "gemini"].includes(String(body.protocol))) throw new Error("Choose a supported protocol.");
-  const endpoint = validateServiceUrl(text(body.baseURL, "API address", 4096)).replace(/\/$/, "");
+  if (ollama && body.protocol !== "openai-chat") throw new Error("Ollama 接入使用 OpenAI Chat 兼容协议。");
+  if (ollama && body.apiKey !== undefined && (typeof body.apiKey !== "string" || body.apiKey.trim())) throw new Error("Ollama 本地模型无需 API Key，请清空密钥后保存。");
+  const endpoint = ollama ? normalizeOllamaBaseURL(body.baseURL) : validateServiceUrl(text(body.baseURL, "API address", 4096)).replace(/\/$/, "");
   if (new URL(endpoint).search) throw new Error("API address cannot contain query credentials.");
   const old = models[id] ? object(models[id]) : {};
-  if (old.disabled === true && typeof old.apiKey === "string" && old.apiKey.includes("CCAGENT_IMPORT_UNSET_") && !(typeof body.apiKey === "string" && body.apiKey.trim())) throw new Error("请补全此导入模型的 API Key 后再启用。");
+  if (!ollama && old.disabled === true && typeof old.apiKey === "string" && old.apiKey.includes("CCAGENT_IMPORT_UNSET_") && !(typeof body.apiKey === "string" && body.apiKey.trim())) throw new Error("请补全此导入模型的 API Key 后再启用。");
   const next: Record<string, unknown> = { ...old, protocol: body.protocol, model: text(body.model, "Model name", 200), baseURL: endpoint };
   delete next.disabled;
   delete next.legacyImport;
+  if (ollama) { next.provider = "ollama"; next.apiKey = ""; delete next.headers; }
+  else delete next.provider;
   for (const key of ["maxTokens", "contextWindow"]) {
     const value = body[key];
     if (value !== undefined && value !== "") { const n = Number(value); if (!Number.isSafeInteger(n) || n < 1 || n > 10000000) throw new Error(`Invalid ${key}.`); next[key] = n; }
     else if (value === "") delete next[key];
   }
-  if (typeof body.apiKey === "string" && body.apiKey.trim()) next.apiKey = await storeWebSecret("model:" + id, body.apiKey);
-  else if (!old.apiKey) next.apiKey = "";
+  if (!ollama && typeof body.apiKey === "string" && body.apiKey.trim()) next.apiKey = await storeWebSecret("model:" + id, body.apiKey);
+  else if (!ollama && !old.apiKey) next.apiKey = "";
   await updateUserSettings({ models: { ...models, [id]: next }, ...(body.makeDefault === true ? { model: id, defaultModel: id } : {}) });
   return { id };
 }
@@ -231,7 +240,11 @@ export async function handleCustomization(resource: string, method: string, body
     if (resource === "settings") {
       const sources = await loadSettingSources(context.workspace);
       const effective = Object.assign({}, ...sources.map((s) => s.raw ?? {}));
-      return { settings: Object.fromEntries(["language", "effortLevel", "alwaysThinkingEnabled", "cleanupPeriodDays", "mode", "outputStyle", "prefersReducedMotion"].map((key) => [key, effective[key]])), settingsPath: getUserSettingsPath(), defaultModel: context.defaultModel };
+      const own = await userSettings();
+      return { settings: { ...Object.fromEntries(["language", "effortLevel", "alwaysThinkingEnabled", "cleanupPeriodDays", "mode", "outputStyle", "prefersReducedMotion"].map((key) => [key, effective[key]])),
+        additionalDirectories: Array.isArray(own.additionalDirectories) ? own.additionalDirectories.filter((value): value is string => typeof value === "string") : [] },
+        approvedDirectories: (await readTrustedStringArraySetting(context.workspace, "additionalDirectories")).map(directory => resolveSafePath(directory, context.workspace)),
+        settingsPath: getUserSettingsPath(), defaultModel: context.defaultModel };
     }
     throw new Error("Unknown customization resource.");
   }
@@ -252,6 +265,7 @@ export async function handleCustomization(resource: string, method: string, body
   if (resource === "agents") return saveAgent(body, context);
   if (resource === "local-skill") return importLocalSkill(body, context);
   if (resource === "models") return saveModel(body, context);
+  if (resource === "ollama-models") return discoverOllamaModels(body.baseURL);
   if (resource === "model-test") {
     const selected = text(body.id, "Model profile", 64);
     return { ok: true, reply: (await modelText(selected, "Reply with OK only.", "This is a connection test. No tools.")).slice(0, 500) };
@@ -259,6 +273,25 @@ export async function handleCustomization(resource: string, method: string, body
   const config = await userSettings();
   if (resource === "settings") {
     const patch: Record<string, unknown> = {};
+    if (body.additionalDirectories !== undefined) {
+      if (!Array.isArray(body.additionalDirectories) || body.additionalDirectories.length > 64) throw new Error("授权目录必须是路径列表，最多 64 个目录。");
+      const directories: string[] = [], seen = new Set<string>();
+      for (const value of body.additionalDirectories) {
+        const directory = expandHome(text(value, "授权目录", 4096).replace(/^"(.*)"$/, "$1"));
+        if (!path.isAbsolute(directory)) throw new Error("授权目录必须填写绝对路径，每行一个目录。");
+        const normalized = path.resolve(directory), key = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+        if (seen.has(key)) continue;
+        // Validate without creating folders. File tools create a missing target
+        // only when an approved task actually writes its output there.
+        let ancestor = normalized;
+        while (true) {
+          try { if (!(await stat(ancestor)).isDirectory()) throw new Error("授权路径必须是目录。"); await realpath(ancestor); break; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; const parent = path.dirname(ancestor); if (parent === ancestor) throw error; ancestor = parent; }
+        }
+        seen.add(key); directories.push(normalized);
+      }
+      patch.additionalDirectories = directories;
+    }
     if (body.language !== undefined) patch.language = text(body.language, "Language", 80);
     if (body.outputStyle !== undefined) patch.outputStyle = text(body.outputStyle, "Output style", 80);
     if (body.effortLevel !== undefined) { if (!["low", "medium", "high", "max"].includes(String(body.effortLevel))) throw new Error("Invalid effort level."); patch.effortLevel = body.effortLevel; }

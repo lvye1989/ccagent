@@ -6,16 +6,27 @@
 <body>
   <aside class="brand-panel"><div class="wordmark"><span class="brand-icon">C</span> CCAGENT</div>
     <div class="brand-copy"><div class="eyebrow">YOUR LOCAL AI WORKSPACE</div><h1>从想法出发，<br>把工作向前推进。</h1><p>对话、文件、工具与智能体，<br>汇聚在你的桌面工作区。</p></div>
-    <ol class="steps" aria-label="使用准备"><li class="active">检查运行环境</li><li>选择工作文件夹</li><li>接入你的模型</li><li>准备开始</li></ol>
+    <ol class="steps" aria-label="使用准备"><li class="active">检查运行环境</li><li>选择工作文件夹</li><li>选择模型服务</li><li>准备开始</li></ol>
     <footer>WINDOWS DESKTOP <span id="version"></span></footer>
   </aside>
   <main><header><span id="step-label">使用准备 · 01 / 04</span><span class="status" id="service-status" role="status">正在启动本地服务…</span></header>
-    <section class="pane" data-step="0"><div class="eyebrow">WELCOME</div><h2>欢迎使用 CCAGENT</h2><p class="intro">完成几步简单设置，就能开始你的第一项任务。</p>
-      <div class="check-list"><div><span class="check" id="node-check">…</span><span><strong>内置运行环境</strong><small id="node-note">随应用提供，无需额外安装 Node.js / npm</small></span><b>已包含</b></div>
+    <section class="pane" data-step="0" aria-label="运行环境检查"><div class="eyebrow">ENVIRONMENT CHECK</div><h2>先检查工作环境</h2><p class="intro">基础运行时随安装包提供。先确认必需环境，再按你的工作需要选择扩展组件。</p>
+      <p id="environment-summary" class="environment-summary" role="status" aria-live="polite">正在检查系统与内置运行时…</p>
+      <h3 class="environment-heading">基础环境</h3>
+      <div class="check-list"><div><span class="check" id="node-check">…</span><span><strong>内置 Node.js / npm / npx</strong><small id="node-note">随应用提供，不需要安装全局 Node.js</small></span><b id="node-state">检查中</b></div>
         <div><span class="check" id="backend-check">…</span><span><strong>本地任务服务</strong><small>启动、会话与工具执行由桌面应用管理</small></span><b id="backend-note">启动中</b></div>
-        <div><span class="check optional" id="git-check">○</span><span><strong>Git / Bash</strong><small>代码版本管理与 Bash 工具按需使用</small></span><b id="git-note">检测中</b></div>
-        <div><span class="check optional" id="python-check">○</span><span><strong>Python 与专业软件</strong><small>Python 脚本、Rhino 等功能需要相应本机软件</small></span><b id="python-note">按需配置</b></div></div>
-      <div class="note">核心对话与工作区无需开发环境。部分工具、MCP 和专业软件连接可能需要额外依赖；可在需要时配置。</div>
+      </div>
+      <div id="environment-required" class="environment-components"></div>
+      <div class="environment-heading-row"><h3 class="environment-heading">按需扩展能力</h3><button id="environment-refresh" class="secondary" type="button">重新检测</button></div>
+      <p class="help">Git Bash 用于代码版本管理和 Bash 工具；Python 用于脚本与部分 MCP；LibreOffice 用于本地文档转换。缺少这些可选组件，仍可使用普通对话与工作区。</p>
+      <div id="environment-components" class="environment-components"></div>
+      <section class="environment-install" aria-label="安装所选组件">
+        <strong id="environment-selection">选择你需要的可选组件</strong><p id="environment-installer-note" class="help">检测不会安装软件。选择组件并点击安装后，才会启动对应安装任务。</p>
+        <div class="environment-actions"><button id="environment-install" class="secondary" type="button" disabled>安装所选组件</button><button id="environment-cancel" class="secondary" type="button" hidden>取消安装</button><button id="environment-installer-page" class="text-button" type="button" hidden>Windows 安装器官方下载 ↗</button></div>
+        <p id="environment-job-status" role="status" aria-live="polite"></p><p id="environment-error" role="alert" hidden></p>
+      </section>
+      <button id="environment-skip" class="text-button" type="button" disabled>暂不安装可选组件，继续</button>
+      <div class="note">环境检测与组件安装无需登录，也不需要供应商 API Key。可选组件可以跳过，之后从“文件 → 开始使用向导”重新检测。内置运行时损坏时请修复或重新安装客户端。</div>
     </section>
     <section class="pane" data-step="1" hidden><div class="eyebrow">WORKSPACE</div><h2>为工作选一个位置</h2><p class="intro">生成的文件、项目内容和工作区资料，都从这里开始。</p>
       <label class="field-label">当前工作文件夹</label><div class="folder-card"><span class="folder-symbol">▱</span><code id="workspace"></code><button id="choose-folder" class="secondary">选择文件夹…</button></div>

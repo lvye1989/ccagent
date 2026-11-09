@@ -34,7 +34,7 @@ import { cleanupOldFileHistoryBackups } from "../session/fileHistory.js";
 import { refreshHookDisableFromSettings } from "../hooks/settings.js";
 import { loadSettingSources, getScalarSetting } from "../config/sources.js";
 import { configureThinkingDefaults, resetSessionThinkingState } from "../utils/thinking.js";
-import { setAdditionalAllowedRoots } from "../tools/pathUtils.js";
+import { resolveSafePath, setAdditionalAllowedRoots } from "../tools/pathUtils.js";
 import { bootstrapAgentTeams } from "../utils/agentTeamsEnabled.js";
 import { bootstrapAgentSkills } from "../utils/agentSkillsEnabled.js";
 import { bootstrapAgentStates } from "../agents/preferences.js";
@@ -70,7 +70,8 @@ import { loadMemoryHeaders } from "../context/memory/memdir.js";
 import { WebScheduleStore, type WebScheduledTask } from "./webSchedules.js";
 import { handleCustomization, readSessionTeam, saveSessionTeam, sessionTeamInstructions } from "./webCustomization.js";
 import { getActiveTeam } from "../state/teamContext.js";
-import { pendingNotificationCount } from "../state/notificationStore.js";
+import { clearPendingNotifications } from "../state/notificationStore.js";
+import { findWebNotificationSession } from "./webNotifications.js";
 import { getRunningAsyncAgents } from "../state/asyncAgentStore.js";
 import { browseWorkingFolders, listFolderLocations, pickNativeWorkingFolder, resolveWorkingFolder } from "./webWorkspaces.js";
 import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWorkspaceAttachment, MAX_UPLOAD } from "./webFiles.js";
@@ -79,6 +80,7 @@ import { getAllUserCommands } from "../commands/userCommands/registry.js";
 import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
 import { requirePlatformScope } from "../platform/account.js";
 import { AccountError } from "../platform/accountClient.js";
+import { readServiceConfiguration } from "../platform/serviceState.js";
 import { changeWebApp, webAppsView } from "./webApps.js";
 import { runPhotoshopWebTest } from "./webPhotoshop.js";
 import { runComfyuiWebTest } from "./webComfyui.js";
@@ -86,6 +88,9 @@ import { runSketchupWebTest } from "./webSketchup.js";
 import { handleWhiteboard, WhiteboardError } from "./webWhiteboards.js";
 import { serveWhiteboardAsset, WHITEBOARD_EDITOR_CSP } from "./webWhiteboardAssets.js";
 import { createWhiteboardAIManager, WhiteboardAIError } from "./webWhiteboardAI.js";
+import { createWhiteboardDesignManager, WhiteboardDesignError } from "./webWhiteboardDesign.js";
+import { getDesignImageConfig, saveDesignImageConfig, DesignImageError } from "../services/images/designImageProvider.js";
+import { bootstrapWorkfriendScheduler, clearWorkfriendTimers } from "../workfriend/scheduler.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -104,6 +109,8 @@ const MIME: Record<string, string> = {
   "/browser-panel.js": "text/javascript; charset=utf-8",
   "/cloudtv.js": "text/javascript; charset=utf-8",
   "/cloudtv.css": "text/css; charset=utf-8",
+  "/cloudtv-logo.jpg": "image/jpeg",
+  "/caiyunjian-logo.jpg": "image/jpeg",
   "/library.js": "text/javascript; charset=utf-8",
   "/memory.js": "text/javascript; charset=utf-8",
   "/schedules.js": "text/javascript; charset=utf-8",
@@ -120,6 +127,9 @@ const MIME: Record<string, string> = {
   "/whiteboard.css": "text/css; charset=utf-8",
   "/whiteboard-ai.js": "text/javascript; charset=utf-8",
   "/whiteboard-ai.css": "text/css; charset=utf-8",
+  "/whiteboard-design.js": "text/javascript; charset=utf-8",
+  "/whiteboard-design-canvas.js": "text/javascript; charset=utf-8",
+  "/whiteboard-design.css": "text/css; charset=utf-8",
   "/whiteboard-editor.html": "text/html; charset=utf-8",
   "/whiteboard-editor-shell.css": "text/css; charset=utf-8",
   "/charts.js": "text/javascript; charset=utf-8",
@@ -165,6 +175,14 @@ type PendingInteraction = {
   resolve: (value: never) => void;
 };
 
+type WebExecution = {
+  id: string;
+  startedAt: string;
+  completedAt: string | null;
+  reason: string | null;
+  tools: Array<{ id: string; name: string; startedAt: string; completedAt: string | null; isError?: boolean }>;
+};
+
 type WebSession = {
   id: string;
   model: string;
@@ -180,6 +198,7 @@ type WebSession = {
   persistenceUnavailable: boolean;
   browserUrl?: string;
   lastTurnReason?: string;
+  execution?: WebExecution;
   pending?: PendingInteraction;
 };
 
@@ -213,14 +232,40 @@ async function readJson(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promis
     if (size > maxBytes) throw new Error("Request body is too large");
     chunks.push(bytes);
   }
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+  // JSON syntax errors can contain submitted credential fragments. Keep parse
+  // failures independent of the request bytes returned to the browser.
+  let value: unknown;
+  try { value = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}"); }
+  catch { throw new Error("Invalid JSON body"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object");
   return value as Record<string, unknown>;
 }
 
 function publish(session: WebSession, data: Record<string, unknown>): void {
-  if (data.type === "turn_started") session.lastTurnReason = undefined;
-  if (data.type === "turn_complete") session.lastTurnReason = String(data.reason || "completed");
+  const timestamp = new Date().toISOString();
+  if (data.type === "turn_started") {
+    session.lastTurnReason = undefined;
+    session.execution = { id: randomUUID(), startedAt: timestamp, completedAt: null, reason: null, tools: [] };
+    data = { ...data, startedAt: timestamp };
+  }
+  const execution = session.execution;
+  if (execution && (data.type === "tool_start" || data.type === "tool_done") && typeof data.id === "string" && typeof data.name === "string") {
+    let tool = execution.tools.find(item => item.id === data.id);
+    if (!tool) {
+      // The timestamp describes when this worker observed the tool call, not CPU execution time.
+      tool = { id: data.id, name: data.name, startedAt: timestamp, completedAt: null };
+      execution.tools.push(tool);
+    }
+    if (data.type === "tool_done") { tool.completedAt = timestamp; tool.isError = data.isError === true; }
+  }
+  if (data.type === "turn_complete") {
+    session.lastTurnReason = String(data.reason || "completed");
+    if (execution) {
+      execution.completedAt = timestamp; execution.reason = session.lastTurnReason;
+    }
+    data = { ...data, completedAt: timestamp };
+  }
+  data = { ...data, timestamp, ...(execution ? { turnId: execution.id } : {}) };
   const event = { id: session.nextEventId++, data };
   session.events.push(event);
   if (session.events.length > 500) session.events.shift();
@@ -249,14 +294,17 @@ function waitForQuestion(session: WebSession, request: UserQuestionRequest): Pro
   });
 }
 
-function summarizeEvent(event: QueryEngineEvent): Record<string, unknown> | null {
+export function summarizeEvent(event: QueryEngineEvent): Record<string, unknown> | null {
   switch (event.type) {
     case "text": return { type: "text", text: event.text };
     case "tool_use_start": return { type: "tool_start", id: event.id, name: event.name };
     case "tool_use_done": return { type: "tool_done", id: event.id, name: event.name, input: event.input, isError: event.result.isError === true };
     case "assistant_message": return { type: "assistant", message: event.message };
     case "tool_result_message": return { type: "tool_result", message: event.message };
-    case "messages_updated": return { type: "messages", messages: event.messages };
+    // The Web client consumes incremental events and restores history with
+    // GET /api/sessions/:id. Re-sending the entire history here is unused and
+    // repeatedly copies image attachments and large tool results into SSE.
+    case "messages_updated": return null;
     case "usage_updated": return { type: "usage", usage: event.totalUsage };
     case "mode_changed": return { type: "mode", mode: event.mode };
     case "command": return { type: "notice", tone: event.kind, message: event.message };
@@ -267,6 +315,18 @@ function summarizeEvent(event: QueryEngineEvent): Record<string, unknown> | null
     case "stream_restart": return { type: "stream_restart" };
     default: return null;
   }
+}
+
+function sessionSnapshot(session: WebSession) {
+  const state = session.engine.getState();
+  return {
+    sessionId: session.id, model: state.model, mode: session.engine.getPermissionMode(), temporary: session.temporary, browserUrl: session.browserUrl ?? null,
+    messages: state.messages, usage: state.totalUsage, busy: session.busy, team: session.team,
+    execution: session.execution ?? null, serverTime: new Date().toISOString(),
+    lastEventId: session.nextEventId - 1, lastTurnReason: session.lastTurnReason ?? null,
+    recentNotices: session.events.map((item) => item.data).filter((item) => item.type === "notice").slice(-5),
+    pending: session.pending ? { id: session.pending.id, kind: session.pending.kind, request: session.pending.payload } : null,
+  };
 }
 
 function parseArgs(args: string[]): { port: number; workspace: string } {
@@ -295,6 +355,7 @@ async function bootstrap(workspace: string): Promise<string> {
   await tryBootstrap("Agent Teams", () => bootstrapAgentTeams());
   await tryBootstrap("Agent Skills", () => bootstrapAgentSkills());
   await tryBootstrap("Agent preferences", () => bootstrapAgentStates());
+  await tryBootstrap("Workfriend reminders", () => bootstrapWorkfriendScheduler());
   await tryBootstrap("Skills", () => bootstrapSkills(workspace));
   await tryBootstrap("Agents", () => bootstrapAgents(workspace));
   await tryBootstrap("Output styles", () => bootstrapOutputStyles(workspace));
@@ -305,7 +366,7 @@ async function bootstrap(workspace: string): Promise<string> {
     if (token) process.env.ANTHROPIC_AUTH_TOKEN = token;
   }
   const additional = await readTrustedStringArraySetting(workspace, "additionalDirectories").catch(() => []);
-  setAdditionalAllowedRoots(additional.map((dir) => path.resolve(workspace, dir.startsWith("~") ? dir.replace("~", os.homedir()) : dir)));
+  setAdditionalAllowedRoots(additional.map(directory => resolveSafePath(directory, workspace)));
   await applySessionRetentionPolicy(workspace);
   await cleanupOldFileHistoryBackups(workspace).catch(() => {});
   await refreshHookDisableFromSettings(workspace).catch(() => {});
@@ -341,6 +402,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
   let model = await bootstrap(workspace);
   let permissions = await loadPermissionSettings(workspace);
   const sessions = new Map<string, WebSession>();
+  const deletedSessions = new Set<string>();
   let activeTurn: string | null = null;
   let teamOwner: string | null = null;
   let pluginMutationBusy = false;
@@ -381,9 +443,11 @@ export async function runWebWorker(args: string[]): Promise<void> {
   const chartsPath = path.join(webRoot, "../dist/charts.js");
 
   async function openSession(id: string): Promise<WebSession> {
+    if (deletedSessions.has(id)) throw new Error("Session not found");
     const existing = sessions.get(id);
     if (existing) return existing;
-    const restored = await restoreSession(workspace, id).catch(error => {
+    const sessionWorkspace = workspace;
+    const restored = await restoreSession(sessionWorkspace, id).catch(error => {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT" || (error instanceof Error && error.message === "No saved session found for this project.")) throw new Error("Session not found");
       throw error;
     });
@@ -391,9 +455,9 @@ export async function runWebWorker(args: string[]): Promise<void> {
     const engine = new QueryEngine({
       model: restored.summary.model,
       toolContext: {
-        cwd: workspace, sessionId: id,
+        cwd: sessionWorkspace, sessionId: id,
+        strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
-        openUrlInWebPanel: (url, signal) => openBrowserFromAgent(session, url, signal),
       },
       initialMessages: restored.messages,
       initialUsage: restored.summary.totalUsage,
@@ -402,10 +466,13 @@ export async function runWebWorker(args: string[]): Promise<void> {
       onPermissionRequest: (request) => waitForPermission(session, request),
     });
     session = {
-      id, model: restored.summary.model, temporary: false, scheduled: false, team: await readSessionTeam(workspace, id), engine, busy: false,
+      id, model: restored.summary.model, temporary: false, scheduled: false, team: await readSessionTeam(sessionWorkspace, id), engine, busy: false,
       restoredSnapshots: restored.fileHistorySnapshots,
       clients: new Set(), events: [], nextEventId: 1, persistenceUnavailable: false,
     };
+    if (workspace !== sessionWorkspace || deletedSessions.has(id)) throw new Error("Session not found");
+    const opened = sessions.get(id);
+    if (opened) return opened;
     sessions.set(id, session);
     return session;
   }
@@ -428,8 +495,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: selectedModel,
       toolContext: {
         cwd: workspace, sessionId: id, temporaryChat: temporary,
+        strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
-        openUrlInWebPanel: (url, signal) => openBrowserFromAgent(session, url, signal),
       },
       permissionMode: mode ?? permissions.mode,
       permissionSettings: permissions,
@@ -443,13 +510,6 @@ export async function runWebWorker(args: string[]): Promise<void> {
       message: "会话记录暂时无法写入。当前对话可以继续，但重启后新增内容无法恢复。请检查 .ccagent 会话目录的访问权限。",
     });
     return session;
-  }
-
-  async function openBrowserFromAgent(session: WebSession, url: string, signal?: AbortSignal): Promise<boolean> {
-    if (signal?.aborted || ![...session.clients].some((client) => !client.destroyed)) return false;
-    session.browserUrl = url;
-    publish(session, { type: "browser_open", url, source: "agent" });
-    return true;
   }
 
   async function persistTranscript(session: WebSession, entry: TranscriptEntry): Promise<void> {
@@ -468,10 +528,15 @@ export async function runWebWorker(args: string[]): Promise<void> {
 
   async function webModels() {
     const { profiles } = await loadProfiles(workspace);
+    const official = await readServiceConfiguration().catch(() => null);
     return Object.values(profiles).map((profile) => ({
-      id: profile.id, label: ({ deepseek: "DeepSeek", "qwen-plus": "Qwen Plus" } as Record<string, string>)[profile.id] || profile.id,
+      id: profile.id, label: profile.provider === "ollama" ? `Ollama · ${profile.model}` : ({ deepseek: "DeepSeek", "qwen-plus": "Qwen Plus" } as Record<string, string>)[profile.id] || profile.id,
       model: profile.model, configured: true,
-      available: Boolean(profile.apiKey || profile.platformService) || Boolean(profile.baseURL && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(profile.baseURL).hostname)),
+      // Keep auxiliary profiles available to tools and existing sessions, but
+      // expose only the configured official main route in the chat picker.
+      mainModelSelectable: !profile.platformService || Boolean(official?.roles.main === profile.platformService
+        && official.routes.some(route => route.id === profile.platformService && route.service === "chat")),
+      available: Boolean(profile.apiKey || profile.platformService) || Boolean(profile.baseURL && (profile.provider === "ollama" || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(profile.baseURL).hostname))),
     }));
   }
 
@@ -489,6 +554,15 @@ export async function runWebWorker(args: string[]): Promise<void> {
       activeTurn = runId;
     },
     onIdle: (runId) => { if (activeTurn === runId) activeTurn = null; },
+  });
+  const whiteboardDesign = createWhiteboardDesignManager({
+    getWorkspace: () => workspace,
+    isBusy: () => Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || teamOwner || getActiveTeam() || getRunningAsyncAgents().length),
+    onBusy: runId => {
+      if (activeTurn || scheduleDispatching || pluginMutationBusy || teamOwner || getActiveTeam() || getRunningAsyncAgents().length) throw new WhiteboardDesignError("请先结束当前任务，再开始图像生成。", 409, "busy");
+      activeTurn = runId;
+    },
+    onIdle: runId => { if (activeTurn === runId) activeTurn = null; },
   });
 
   async function mcpView() {
@@ -665,6 +739,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
             if (resource === "teams") await bootstrapAgentTeams();
             if (resource === "models" || resource === "settings" || resource === "official-services") {
               permissions = await loadPermissionSettings(workspace);
+              const additional = await readTrustedStringArraySetting(workspace, "additionalDirectories");
+              setAdditionalAllowedRoots(additional.map(directory => resolveSafePath(directory, workspace)));
               model = (await readMergedStringSetting(workspace, "model")) ?? (await readMergedStringSetting(workspace, "defaultModel")) ?? model;
               const sources = await loadSettingSources(workspace);
               configureThinkingDefaults({
@@ -690,6 +766,31 @@ export async function runWebWorker(args: string[]): Promise<void> {
         finally { if (mutating) pluginMutationBusy = false; }
       }
       if (req.method === "GET" && route.startsWith("/whiteboard-assets/")) return await serveWhiteboardAsset(res, route, webRoot);
+      if (route.startsWith("/api/whiteboards/design/")) {
+        const body = req.method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req, route.endsWith("/assets") ? 44 * 1024 * 1024 : route.endsWith("/start") ? 12 * 1024 * 1024 : MAX_BODY_BYTES);
+        if (body.workspace !== workspace) return json(res, 409, { error: "工作文件夹已切换，请重新打开画布。", code: "workspace_changed" });
+        if (route === "/api/whiteboards/design/assets") {
+          if (req.method === "POST") return json(res, 201, await whiteboardDesign.uploadAsset(workspace, body.image));
+          if (req.method === "DELETE" && typeof body.assetId === "string") return json(res, 200, await whiteboardDesign.removeAsset(workspace, body.assetId));
+        }
+        if (route === "/api/whiteboards/design/config") {
+          if (req.method === "GET") return json(res, 200, { workspace, config: await getDesignImageConfig(workspace) });
+          if (req.method === "POST") {
+            if (activeTurn || pluginMutationBusy) return json(res, 409, { error: "请等待当前任务完成后再修改图像模型。", code: "busy" });
+            pluginMutationBusy = true;
+            try { const { workspace: ignored, ...config } = body; return json(res, 200, { workspace, config: await saveDesignImageConfig(config, workspace) }); }
+            finally { pluginMutationBusy = false; }
+          }
+        }
+        if (req.method === "POST" && route === "/api/whiteboards/design/start") return json(res, 202, await whiteboardDesign.start(body));
+        if (req.method === "GET" && route === "/api/whiteboards/design/request" && typeof body.requestId === "string") return json(res, 200, await whiteboardDesign.lookup(body.requestId, workspace));
+        if (typeof body.runId === "string") {
+          if (req.method === "GET" && route === "/api/whiteboards/design/run") return json(res, 200, await whiteboardDesign.status(body.runId, workspace));
+          if (req.method === "POST" && route === "/api/whiteboards/design/stop") return json(res, 200, await whiteboardDesign.stop(body.runId, workspace));
+          if (req.method === "POST" && route === "/api/whiteboards/design/resume") return json(res, 202, await whiteboardDesign.resume(body.runId, workspace));
+        }
+        return json(res, 404, { error: "Unknown design action" });
+      }
       if (route.startsWith("/api/whiteboards/ai/")) {
         const body = req.method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req);
         if (body.workspace !== workspace) return json(res, 409, { error: "工作文件夹已切换，请重新打开画布。", code: "workspace_changed" });
@@ -806,17 +907,29 @@ export async function runWebWorker(args: string[]): Promise<void> {
           return json(res, 200, { summary: restored.summary, messages: restored.messages });
         }
         if (req.method === "POST") {
-          if (activeTurn || sessions.get(id)?.busy) return json(res, 409, { error: "Wait for the active task to finish" });
           const body = await readJson(req);
+          if (body.workspace !== undefined && body.workspace !== workspace) return json(res, 409, { error: "工作文件夹已切换，请刷新任务列表。" });
+          if (activeTurn || scheduleDispatching || pluginMutationBusy || sessions.get(id)?.busy) return json(res, 409, { error: "请等待当前任务或工作区操作完成。" });
           if (body.action === "pin" || body.action === "unpin") {
             await setSessionPinned(workspace, id, body.action === "pin");
             return json(res, 200, { pinned: body.action === "pin" });
           }
           if (body.action === "delete") {
-            await deleteStoredSession(workspace, id);
-            const active = sessions.get(id);
-            if (active) { for (const client of active.clients) client.end(); sessions.delete(id); }
-            return json(res, 200, { deleted: true });
+            if (deletedSessions.has(id)) return json(res, 200, { deleted: true });
+            if (teamOwner === id || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待后台 Agent 或团队结束，再删除聊天记录。" });
+            pluginMutationBusy = true;
+            try {
+              const active = sessions.get(id);
+              await deleteStoredSession(workspace, id, Boolean(active && !active.temporary));
+              deletedSessions.add(id);
+              clearPendingNotifications({ sessionId: id });
+              sessions.delete(id);
+              if (active) {
+                publish(active, { type: "session_deleted" });
+                for (const client of active.clients) client.end();
+              }
+              return json(res, 200, { deleted: true });
+            } finally { pluginMutationBusy = false; }
           }
           return json(res, 400, { error: "Unknown memory action" });
         }
@@ -848,6 +961,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         if (target !== workspace) {
           const previous = workspace;
           try {
+            clearWorkfriendTimers();
             process.chdir(target);
             await loadEnv();
             const nextConfigs = await loadMcpConfigs(target);
@@ -870,6 +984,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
           }
           for (const session of sessions.values()) for (const client of session.clients) client.end();
           sessions.clear();
+          deletedSessions.clear();
         }
         let warning: string | undefined;
         try { await rememberWorkspace(target, previousWorkspace); }
@@ -880,7 +995,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       if (req.method === "GET" && route === "/api/bootstrap") {
         let stored: Awaited<ReturnType<typeof listProjectSessions>>;
         let storageUnavailable = false;
-        try { stored = await listProjectSessions(workspace); }
+        try { stored = (await listProjectSessions(workspace)).filter((item) => !deletedSessions.has(item.sessionId)); }
         catch (error) {
           if (!isSessionStorageError(error)) throw error;
           stored = [];
@@ -949,22 +1064,21 @@ export async function runWebWorker(args: string[]): Promise<void> {
         if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再修改应用连接。" });
         pluginMutationBusy = true;
         try {
-          const result = await changeWebApp(workspace, await readJson(req));
-          if (result.removed) {
-            const entry = getMcpRegistryEntry(result.serverName);
-            deleteMcpRegistryEntry(result.serverName);
+          const result = await changeWebApp(workspace, await readJson(req), async (name, oldConfig) => {
+            const entry = getMcpRegistryEntry(name);
+            deleteMcpRegistryEntry(name);
             refreshGlobalToolRegistry();
-            if (entry) await clearServerCache(result.serverName, entry.connection.config);
-            configuredMcpNames.delete(result.serverName);
-            const oldConfig = entry?.connection.config;
-            if (oldConfig?.type === "http" && oldConfig.oauth) {
+            await clearServerCache(name, entry?.connection.config ?? { ...oldConfig, scope: "user" });
+            configuredMcpNames.delete(name);
+            if (oldConfig.type === "http" && oldConfig.oauth?.provider === "google") {
               const host = new URL(oldConfig.url).hostname;
               const others = Object.values((await loadMcpConfigs(workspace)).servers);
-              if (!others.some((item) => item.type === "http" && item.oauth && new URL(item.url).hostname === host)) {
+              if (!others.some((item) => item.type === "http" && item.oauth?.provider === "google" && new URL(item.url).hostname === host)) {
                 await new GoogleWorkspaceOAuthProvider(host, oldConfig.oauth).invalidateCredentials("tokens");
               }
             }
-          } else {
+          });
+          if (!result.removed) {
             const config = (await loadMcpConfigs(workspace)).servers[result.serverName];
             if (config) {
               await saveMcpServerState(result.serverName, "open");
@@ -1162,7 +1276,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         }
         if (body.team !== undefined && typeof body.team !== "string") throw new Error("Invalid team selection.");
         const session = await createSession(mode as PermissionMode | undefined, requestedModel as string | undefined, body.temporary === true, false, typeof body.team === "string" ? body.team : "off");
-        return json(res, 201, { sessionId: session.id, model: session.model, temporary: session.temporary, team: session.team });
+        return json(res, 201, { sessionId: session.id, model: session.model, temporary: session.temporary, team: session.team, snapshot: sessionSnapshot(session) });
       }
 
       const match = /^\/api\/sessions\/([0-9a-f-]{36})(?:\/(events|messages|interrupt|respond|model|mode|browser|team))?$/.exec(route);
@@ -1170,14 +1284,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         const session = await openSession(match[1]!);
         const action = match[2];
         if (req.method === "GET" && !action) {
-          const state = session.engine.getState();
-          return json(res, 200, {
-            sessionId: session.id, model: state.model, mode: session.engine.getPermissionMode(), temporary: session.temporary, browserUrl: session.browserUrl ?? null,
-            messages: state.messages, usage: state.totalUsage, busy: session.busy, team: session.team,
-            lastEventId: session.nextEventId - 1, lastTurnReason: session.lastTurnReason ?? null,
-            recentNotices: session.events.map((item) => item.data).filter((item) => item.type === "notice").slice(-5),
-            pending: session.pending ? { id: session.pending.id, kind: session.pending.kind, request: session.pending.payload } : null,
-          });
+          return json(res, 200, sessionSnapshot(session));
         }
         if (req.method === "GET" && action === "events") {
           res.writeHead(200, {
@@ -1189,6 +1296,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
           for (const item of session.events) {
             if (item.id > lastId) res.write(`id: ${item.id}\ndata: ${JSON.stringify(item.data)}\n\n`);
           }
+          // A reconnect may outlive the bounded event buffer. Snapshot after replay so old starts cannot reset its clock.
+          const serverTime = new Date().toISOString();
+          res.write(`data: ${JSON.stringify({ type: "execution_state", timestamp: serverTime, serverTime,
+            ...(session.execution ? { turnId: session.execution.id } : {}), execution: session.execution ?? null })}\n\n`);
           session.clients.add(res);
           const heartbeat = setInterval(() => { if (!res.destroyed) res.write(": heartbeat\n\n"); }, 15000);
           req.on("close", () => { clearInterval(heartbeat); session.clients.delete(res); });
@@ -1196,6 +1307,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         }
         if (req.method === "POST" && action === "messages") {
           const body = await readJson(req);
+          if (sessions.get(session.id) !== session) return json(res, 404, { error: "聊天记录已删除或工作文件夹已切换。" });
           const input = typeof body.text === "string" ? body.text.trim() : "";
           if (!input || input.length > 50000) return json(res, 400, { error: "Message must be 1–50000 characters" });
           if (/^\/(resume|clear)\b/i.test(input)) return json(res, 400, { error: "Use the task list or New task button to switch conversations" });
@@ -1317,6 +1429,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       }
       return json(res, 404, { error: "Not found" });
     } catch (error) {
+      if (error instanceof WhiteboardDesignError || error instanceof DesignImageError) return json(res, error.status, { error: error.message, code: error.code });
       if (error instanceof WhiteboardAIError) return json(res, error.status, { error: error.message, code: error.code });
       if (error instanceof WhiteboardError) return json(res, error.status, { error: error.message, code: error.code });
       if (error instanceof AccountError) return json(res, error.status || 503, { error: error.message, code: error.code });
@@ -1336,7 +1449,9 @@ export async function runWebWorker(args: string[]): Promise<void> {
       if (stopping) return;
       stopping = true;
       server.close();
+      clearWorkfriendTimers();
       whiteboardAI.dispose();
+      whiteboardDesign.dispose();
       for (const session of sessions.values()) {
         session.engine.interrupt();
         for (const client of session.clients) client.end();
@@ -1365,9 +1480,12 @@ export async function runWebWorker(args: string[]): Promise<void> {
   }
   console.log(`CCAGENT Web: http://127.0.0.1:${port}`);
   setInterval(() => {
-    if (activeTurn || pluginMutationBusy || scheduleDispatching || !teamOwner || pendingNotificationCount() === 0) return;
-    const session = sessions.get(teamOwner);
-    if (session && !session.busy) { activeTurn = session.id; void runTurn(session, ""); }
+    if (activeTurn || pluginMutationBusy || scheduleDispatching) return;
+    // The queue belongs to conversations, not the currently visible tab.
+    // Keep team execution pinned to its existing owner and never adopt an
+    // unowned legacy reminder or restore a different workspace implicitly.
+    const session = findWebNotificationSession(sessions.values(), teamOwner);
+    if (session) { activeTurn = session.id; void runTurn(session, ""); }
   }, 1000).unref();
   console.log(`Workspace: ${workspace}`);
 }

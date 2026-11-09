@@ -1,13 +1,12 @@
 .cloudtv-entry { display: flex; align-items: center; gap: 10px; width: calc(100% - 24px); margin: 6px 12px 8px; padding: 10px 12px; border: 1px solid transparent; border-radius: 10px; background: transparent; text-align: left; color: #42434d; cursor: pointer; }
 .cloudtv-entry:hover, .cloudtv-entry.selected { background: #eeedf7; border-color: #e3e0f2; }
-.cloudtv-mark { display: grid; place-items: center; width: 30px; height: 28px; flex-shrink: 0; border-radius: 8px; background: #eeebfa; color: #7861b4; font-size: 11px; font-weight: 700; letter-spacing: -.5px; }
+.cloudtv-mark { display: block; width: 30px; height: 30px; flex-shrink: 0; object-fit: cover; border-radius: 8px; }
+.rail-button .cloudtv-mark { width: 18px; height: 18px; border-radius: 4px; }
 .cloudtv-entry strong { display: block; font-size: 13px; font-weight: 600; }
 .cloudtv-entry small { display: block; margin-top: 3px; color: #92909c; font-size: 10px; }
 .cloudtv-entry-arrow { margin-left: auto; color: #9893a7; font-size: 16px; }
 .city-renewal-entry { text-decoration: none; }
 .city-renewal-entry:hover { background: #edf5f1; border-color: #e0ece7; }
-.city-renewal-mark { background: #e7f3ef; color: #4f8d78; }
-.city-renewal-mark svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .main-area.cloudtv-active .surface-switch, .main-area.cloudtv-active #temporary-chat, .main-area.cloudtv-active #refresh-all { display: none; }
 .main-area.cloudtv-active .content { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .cloudtv-view { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; width: 100%; background: #fff; }

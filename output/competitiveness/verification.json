@@ -1,0 +1,14 @@
+﻿{
+    "nativeWordTextVerified":  true,
+    "pdf":  "C:\\Users\\Windows11\\Desktop\\ccagent.src\\ccagent-0.1.1\\output\\competitiveness\\review.pdf",
+    "pages":  1,
+    "nonWhitespaceCharacters":  1013,
+    "withinLimit":  true,
+    "createdAt":  "2026-11-09T16:04:04.3971287+08:00",
+    "file":  "C:\\Users\\Windows11\\Desktop\\CCAGENT项目核心竞争力说明.docx",
+    "visualReviewPassed":  true,
+    "renderer":  "Microsoft Word PDF export and Windows native PDF page renderer",
+    "reviewedImages":  [
+                           "page-1.png"
+                       ]
+}

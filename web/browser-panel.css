@@ -1,8 +1,7 @@
 .thread-view { position: relative; }
 .thread-head { position: relative; }
-.thread-head h1 { padding-right: 80px; }
 .thread-browser-button {
-  position: absolute; right: max(28px, calc((100% - 770px) / 2)); top: 37px;
+  position: static; flex: 0 0 auto; margin-left: auto;
   height: 31px; padding: 0 10px; border: 1px solid #e7e7e9; border-radius: 9px;
   background: #fff; color: #55565d; font-size: 12px; cursor: pointer;
 }

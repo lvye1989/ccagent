@@ -58,6 +58,7 @@ import {
   universalToOpenAIResponsesInput,
 } from "./openaiTranslate.js";
 import { assembleOpenAIResponses } from "./openaiResponsesNative.js";
+import { isDeepSeekProfile, deepseekReasoningEndpoint, applyDeepSeekHistory, parseDeepSeekChatStream } from "./deepseekChat.js";
 
 // ─── Protocol → llm-bridge provider + endpoint defaults ────────────────────
 
@@ -250,9 +251,21 @@ export function prepareRequest(profile: ModelProfile, params: StreamRequestParam
     // openai-chat: rebuild `messages[]` so tool results become `role:"tool"`
     // messages carrying tool_call_id (llm-bridge mis-emits these).
     body.messages = universalToOpenAIChatMessages(universal);
+    if (isDeepSeekProfile(profile)) applyDeepSeekHistory(body.messages as Record<string, unknown>[], params.messages, profile);
     // Ask for a final usage chunk so token accounting matches the Anthropic path.
     body.stream_options = { include_usage: true };
-    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    if (isDeepSeekProfile(profile)) {
+      const thinking = params.thinking ?? buildDefaultThinkingConfig();
+      const enabled = thinking.type !== "disabled" && !process.env.CLAUDE_CODE_DISABLE_THINKING;
+      body.thinking = { type: enabled ? "enabled" : "disabled" };
+      const effort = params.effortLevel ?? getSessionEffortLevel();
+      if (enabled && effort) body.reasoning_effort = effort === "medium" ? "high" : effort;
+    } else if (profile.provider === "ollama") {
+      // Ollama's `minimal` alias enables thinking, which rejects ordinary
+      // models such as Qwen2.5. Use its documented off value; otherwise let
+      // the model choose its own default rather than force OpenAI levels.
+      if ((params.thinking ?? buildDefaultThinkingConfig()).type === "disabled" || process.env.CLAUDE_CODE_DISABLE_THINKING) body.reasoning_effort = "none";
+    } else if (reasoningEffort) body.reasoning_effort = reasoningEffort;
   }
   return {
     provider,
@@ -421,7 +434,12 @@ export async function* streamViaProvider(
     return yield* assembleOpenAIResponses(response.body);
   }
 
-  const parse = parserFor(prepared.provider);
+  const deepseek = isDeepSeekProfile(profile);
+  // The official stream reaches EOF after its result and usage are persisted.
+  // Draining it keeps the native call journal from treating completion as cancel.
+  const parse = deepseek
+    ? (body: ReadableStream<Uint8Array>) => parseDeepSeekChatStream(body, { waitForEOF: !!profile.platformService })
+    : parserFor(prepared.provider);
 
   // Accumulators — mirror streaming.ts so the assembled message is identical.
   const contentBlocks: ContentBlock[] = [];
@@ -444,6 +462,7 @@ export async function* streamViaProvider(
       case "content_delta": {
         if (event.delta.text) {
           if (!currentText) {
+            if (deepseek && currentThinking) yield { type: "thinking_done", thinking: currentThinking.thinking, signature: currentThinking.signature };
             currentText = { type: "text", text: "" };
             contentBlocks.push(currentText);
             currentThinking = null;
@@ -453,7 +472,7 @@ export async function* streamViaProvider(
         }
         if (event.delta.thinking) {
           if (!currentThinking) {
-            currentThinking = { type: "thinking", thinking: "" };
+            currentThinking = { type: "thinking", thinking: "", ...(deepseek ? { reasoningProvider: "deepseek" as const, reasoningEndpoint: deepseekReasoningEndpoint(profile) } : {}) };
             contentBlocks.push(currentThinking);
             currentText = null;
             yield { type: "thinking_start" };

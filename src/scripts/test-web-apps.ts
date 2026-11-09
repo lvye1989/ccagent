@@ -46,7 +46,7 @@ globalThis.fetch = (input, options) => {
 let activeConfig: Awaited<ReturnType<typeof loadMcpConfigs>>["servers"][string] | undefined;
 try {
   await fs.writeFile(settingsFile, JSON.stringify({ sentinel: { preserve: true }, mcpServers: { manual: { command: "manual-only", enabled: false } } }));
-  assert.equal(COMMON_APPS.length, 12);
+  assert.equal(COMMON_APPS.length, 15);
   assert.ok((await webAppsView(workspace)).apps.every((app) => app.state === "available"));
   const beforeSketchup = await fs.readFile(settingsFile, "utf8");
   await assert.rejects(changeWebApp(workspace, { id: "sketchup", op: "install", credentials: { port: 0 } }), /端口/);

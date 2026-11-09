@@ -6,7 +6,7 @@ import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { startAccountFixture } from "./helpers/accountFixture.js";
 import { enterPlatformAccount } from "../platform/account.js";
-import { authorizedPrivateUploadUrl, forgetOfficialKey, getPlatformGatewayClient, officialRole, officialServicesView, saveOfficialServices } from "../platform/gatewayClient.js";
+import { authorizedPrivateUploadUrl, forgetOfficialKey, getPlatformGatewayClient, officialRole, officialServicesView, PlatformServiceError, saveOfficialServices } from "../platform/gatewayClient.js";
 import { servicePaths, readServiceBinding } from "../platform/serviceState.js";
 import { loadProfiles, resolveProfile } from "../services/api/providers/profile.js";
 import { streamMessage, createMessage } from "../services/api/streaming.js";
@@ -99,6 +99,7 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
   assert.match(requestId, /^[a-f0-9-]{36}$/); assert(taskId && taskId !== "undefined");
   modelRequests++; sent.push({ body, requestId, taskId, path: url.pathname, pins: Object.fromEntries(['x-ccagent-price-version','x-ccagent-price-fingerprint','x-ccagent-fallback-route','x-ccagent-fallback-price-version','x-ccagent-fallback-price-fingerprint'].map(name => [name, req.headers[name]])) });
   if (JSON.stringify(body).includes("INSUFFICIENT_CASE")) return reply(402, { code: "INSUFFICIENT_BALANCE", message: keys.get(user.id) });
+  if (typeof body.input === "string" && body.input.startsWith("GATEWAY_ERROR_CASE:")) return reply(400, { code: body.input.slice("GATEWAY_ERROR_CASE:".length), message: `SUPPLIER_TEXT_MUST_NOT_REACH_UI:${keys.get(user.id)}`, fields: ["SUPPLIER_FIELD_MUST_NOT_REACH_UI"] });
   let call = calls.get(requestId);
   if (call) {
     if (call.owner !== user.id || JSON.stringify(call.body) !== JSON.stringify(body) || call.taskId !== taskId) return reply(409, { code: "IDEMPOTENCY_CONFLICT" });
@@ -195,6 +196,24 @@ try {
     assert.equal(profiles["ccagent:official-main"]!.baseURL, fixture.origin + "/v1"); assert.equal(profiles["ccagent:official-main"]!.apiKey, undefined);
   });
   let client = await getPlatformGatewayClient();
+  await test("gateway validation errors show fixed actionable messages without supplier text", async () => {
+    const before = suppliers;
+    const cases = [
+      ["TOO_MANY_IMAGES", "本次图片数量超出所选官方路由的限制，请减少图片，或使用已配置的读图工具处理。"],
+      ["PROTOCOL_MISMATCH", "所选官方模型与本次请求协议不匹配，请刷新服务目录并重新选择模型。"],
+      ["UNPRICED_CAPABILITY", "本次请求使用了官方服务尚未开放的能力，请使用本地工具或普通文本请求。"],
+      ["SUPPLIER_SPECIFIC_ERROR", "官方服务请求格式或协议不受支持，请核对服务配置。"],
+    ];
+    for (const [code, message] of cases) {
+      await assert.rejects(client.call("responses", baseInput(`GATEWAY_ERROR_CASE:${code}`)), (error: unknown) => {
+        assert(error instanceof PlatformServiceError);
+        assert.equal(error.code, code); assert.equal(error.status, 400); assert.equal(error.message, message);
+        assert(!JSON.stringify(error).includes(key)); assert(!error.message.includes("SUPPLIER_"));
+        return true;
+      });
+    }
+    assert.equal(suppliers, before, "Rejected validation requests never reach the synthetic supplier");
+  });
   await test("native request identity and result replay execute one synthetic supplier operation", async () => {
     const requestId = randomUUID(), input = baseInput("SYNTHETIC_PROMPT_NOT_STORED"), before = suppliers;
     assert.equal((await (await client.call("responses", input, { requestId, taskId: "same-task" })).json()).output[0].content[0].text, "PLATFORM_OK");

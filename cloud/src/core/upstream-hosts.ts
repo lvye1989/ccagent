@@ -9,7 +9,7 @@ import { settings } from './db/schema';
 import { HttpError } from './http';
 
 export const upstreamHostsKey = 'gateway.allowed_upstream_hosts';
-const builtins = ['api.deepseek.com', 'openrouter.ai', 'api.tavily.com', 'api.bochaai.com', 'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com'];
+const builtins = ['api.deepseek.com', 'openrouter.ai', 'api.tavily.com', 'api.bochaai.com', 'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com', 'api.kie.ai'];
 const denied = () => new HttpError(400, 'UPSTREAM_HOST_NOT_ALLOWED', '请使用已批准的公开 HTTPS 上游域名。');
 export function normalizeUpstreamHost(value: string): string {
   const host = value.trim().toLowerCase();
@@ -104,6 +104,38 @@ export async function requestUpstream(value: string, init: RequestInit, legacyFe
       } catch {
         incoming.destroy(); reject(new HttpError(502, 'UPSTREAM_RESPONSE_INVALID', '上游响应格式无效。'));
       }
+    });
+    request.on('error', () => reject(new HttpError(502, 'UPSTREAM_TRANSPORT_FAILED', '上游连接未完成。')));
+    request.end(init.body || undefined);
+  });
+}
+
+/** Supplier task queries and image downloads: validate and pin every DNS answer, including known hosts. */
+export async function requestPublicHttps(value: string, init: RequestInit, options: { allowedHosts?: readonly string[]; allowQuery?: boolean } = {}): Promise<Response> {
+  init.signal?.throwIfAborted();
+  let url: URL; try { url = new URL(value); } catch { throw denied(); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port && url.port !== '443' || !options.allowQuery && url.search) throw denied();
+  const host = normalizeUpstreamHost(url.hostname);
+  if (options.allowedHosts && !options.allowedHosts.includes(host)) throw denied();
+  const records = await publicUpstreamAddresses(host), pinned = records.find(item => item.family === 4) || records[0]!;
+  const headers = Object.fromEntries(new Headers(init.headers));
+  if (Object.keys(headers).some(name => ['host', 'connection', 'transfer-encoding', 'cookie'].includes(name))) throw denied();
+  if (init.body !== undefined && init.body !== null && typeof init.body !== 'string' && !(init.body instanceof Uint8Array)) throw new HttpError(400, 'INVALID_UPSTREAM_BODY', '上游请求格式无效。');
+  init.signal?.throwIfAborted();
+  return new Promise<Response>((resolve, reject) => {
+    const request = https.request(url, { method: init.method || 'GET', headers, rejectUnauthorized: true, agent: false,
+      servername: host, family: pinned.family, signal: init.signal || undefined,
+      lookup: (_hostname, _options, callback) => callback(null, pinned.address, pinned.family) }, incoming => {
+      try {
+      const status = incoming.statusCode || 502;
+      if (status >= 300 && status < 400) { incoming.destroy(); reject(new HttpError(502, 'UPSTREAM_REDIRECT_NOT_ALLOWED', '上游不允许重定向。')); return; }
+      if (status < 200 || status > 599) throw new Error('INVALID_STATUS');
+      const responseHeaders = new Headers();
+      for (const [name, values] of Object.entries(incoming.headers)) if (values !== undefined && name !== 'set-cookie') for (const item of Array.isArray(values) ? values : [values]) responseHeaders.append(name, item);
+      const body = [204, 205].includes(status) ? null : Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+      if (!body) incoming.resume();
+      resolve(new Response(body, { status, headers: responseHeaders }));
+      } catch { incoming.destroy(); reject(new HttpError(502, 'UPSTREAM_RESPONSE_INVALID', '上游响应格式无效。')); }
     });
     request.on('error', () => reject(new HttpError(502, 'UPSTREAM_TRANSPORT_FAILED', '上游连接未完成。')));
     request.end(init.body || undefined);

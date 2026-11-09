@@ -57,11 +57,12 @@ const runtimeVersion = execFileSync(path.join(backend, 'runtime', 'node.exe'), [
 if (runtimeVersion !== 'v' + nodeVersion) throw new Error('Unexpected bundled runtime');
 execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts', 'desktop-assets.ps1'), '-Destination', assets], { windowsHide: true, stdio: 'inherit' });
 await fs.mkdir(path.join(stage, 'desktop'), { recursive: true });
-for (const filename of ['main.cjs', 'runtime.cjs', 'preload.cjs', 'welcome.html', 'welcome.css', 'welcome.js']) await copy('desktop/' + filename, stage);
+const desktopFiles = ['main.cjs', 'runtime.cjs', 'prerequisites.cjs', 'preload.cjs', 'welcome.html', 'welcome.css', 'welcome.js'];
+for (const filename of desktopFiles) await copy('desktop/' + filename, stage);
 await fs.copyFile(path.join(assets, 'icon.ico'), path.join(stage, 'desktop', 'icon.ico'));
 await copy('LICENSE', stage);
 await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({ name: 'ccagent-desktop', version: pkg.version, private: true, description: 'CCAGENT AI 桌面工作区', author: 'CCAGENT', license: 'MIT', main: 'desktop/main.cjs' }, null, 2));
-const license = 'CCAGENT Windows 桌面版\r\n\r\n本应用按 MIT 许可证提供，许可证全文见下方。\r\n\r\n使用准备：\r\n1. 安装后先使用邮箱和密码登录，再选择工作文件夹及模型服务。\r\n2. 官方服务使用人民币预付余额，按公开成本、实际用量和 1.3 倍率结算；也可使用自己的供应商或本地模型配置。\r\n3. 部分脚本、MCP 与专业软件工具需要额外运行环境。\r\n4. 升级和卸载保留用户配置与工作文件；删除配置请另行手动处理。\r\n5. 工具按应用权限规则执行，开始任务前请确认工作范围。\r\n\r\n' + await fs.readFile(path.join(root, 'LICENSE'), 'utf8');
+const license = 'CCAGENT Windows 桌面版\r\n\r\n本应用按 MIT 许可证提供，许可证全文见下方。\r\n\r\n使用准备：\r\n1. Windows 10 / Server 2016 或更高版本，x64 架构。安装包自带 Node.js、npm / npx 和浏览器内核。\r\n2. 首次启动先检查环境；Git Bash、Python、LibreOffice 按功能需要安装，可跳过可选组件后登录。\r\n3. 官方服务使用人民币预付余额，按公开成本、实际用量和 1.3 倍率结算；也可使用自己的供应商或本地模型配置。\r\n4. 部分 MCP 与专业软件工具需要额外宿主程序或库，请按具体工具说明配置。\r\n5. 升级和卸载保留用户配置与工作文件；删除配置请另行手动处理。\r\n6. 工具按应用权限规则执行，开始任务前请确认工作范围。\r\n\r\n' + await fs.readFile(path.join(root, 'LICENSE'), 'utf8');
 await fs.writeFile(path.join(assets, 'license.txt'), '\ufeff' + license, 'utf8');
 // Include notices for all installed build/runtime dependencies. This intentionally
 // over-includes notices rather than omit a bundled transitive dependency license.
@@ -78,7 +79,9 @@ for (const relative of Object.keys(lock.packages)) {
   }
 }
 await fs.writeFile(path.join(backend, 'THIRD-PARTY-NOTICES.txt'), notices.join('\n'));
-const manifest = { version: pkg.version, nodeVersion, nodeArchiveSha256: nodeSha256, builtAt: new Date().toISOString(), payload: [] };
+const manifest = { version: pkg.version, nodeVersion, nodeArchiveSha256: nodeSha256, builtAt: new Date().toISOString(),
+  environmentGuideVersion: 1, platform: 'win32', architecture: 'x64', minimumWindowsMajor: 10, desktop: [], payload: [] };
+for (const filename of desktopFiles) manifest.desktop.push({ path: 'desktop/' + filename, sha256: await hashFile(path.join(stage, 'desktop', filename)) });
 for (const relative of payload) manifest.payload.push({ path: relative, sha256: await hashFile(path.join(backend, relative)) });
 await fs.writeFile(path.join(backend, 'desktop-manifest.json'), JSON.stringify(manifest, null, 2));
 console.log(`Prepared desktop payload: ${payload.length} application files, Node.js ${nodeVersion}, credentials/configuration excluded.`);

@@ -128,13 +128,28 @@ export function getTokenCountFromUsage(usage: Usage): number {
 
 export function tokenCountWithEstimation(
   messages: readonly MessageParam[],
-  options?: { usage?: Usage; usageAnchorIndex?: number; systemPrompt?: string },
+  options?: { usage?: Usage; usageAnchorIndex?: number; usageSystemPromptTokens?: number; systemPrompt?: string },
 ): number {
   const systemPromptTokens = options?.systemPrompt ? estimateSystemPromptTokens(options.systemPrompt) : 0;
 
-  if (options?.usage && options.usageAnchorIndex !== undefined && options.usageAnchorIndex >= 0) {
+  const usage = options?.usage;
+  const promptTokens = usage ? usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0;
+  // A restored transcript has no per-request usage. Its zero-valued placeholder
+  // must not hide the history; cached-only prompts, however, are real usage.
+  if (usage && [usage.input_tokens, usage.output_tokens, usage.cache_creation_input_tokens ?? 0, usage.cache_read_input_tokens ?? 0].every(value => Number.isFinite(value) && value >= 0)
+    && promptTokens > 0 && options?.usageAnchorIndex !== undefined
+    && Number.isInteger(options.usageAnchorIndex) && options.usageAnchorIndex >= 0 && options.usageAnchorIndex < messages.length) {
     const suffix = messages.slice(options.usageAnchorIndex + 1);
-    return getTokenCountFromUsage(options.usage) + roughTokenCountEstimationForMessages(suffix) + systemPromptTokens;
+    // Provider prompt usage already includes the system prompt and tool
+    // definitions. Only count messages added after its assistant response and
+    // growth of the dynamic system prompt since that same request.
+    const measuredTokens = getTokenCountFromUsage(usage) + roughTokenCountEstimationForMessages(suffix);
+    if (options.usageSystemPromptTokens !== undefined && Number.isFinite(options.usageSystemPromptTokens) && options.usageSystemPromptTokens >= 0) {
+      return measuredTokens + Math.max(0, systemPromptTokens - options.usageSystemPromptTokens);
+    }
+    // Older callers lack the system snapshot. Keep the current visible prompt
+    // as a floor without adding its entire system prompt a second time.
+    return Math.max(measuredTokens, roughTokenCountEstimationForMessages(messages) + systemPromptTokens);
   }
 
   return roughTokenCountEstimationForMessages(messages) + systemPromptTokens;
@@ -161,6 +176,7 @@ export function buildTokenBudgetSnapshot(
   options?: {
     usage?: Usage;
     usageAnchorIndex?: number;
+    usageSystemPromptTokens?: number;
     systemPrompt?: string;
     model?: string;
     contextWindow?: number;

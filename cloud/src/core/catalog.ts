@@ -12,12 +12,19 @@ import { HttpError } from './http';
 import { lockAdministration } from './database-locks';
 import { resolveRouteCredential, routeCredentialStatus, saveRouteCredential } from './provider-credentials';
 import { assertUpstreamHost, validateTrustedUpstreamHost } from './upstream-hosts';
+import { activeRouteCondition, assertRouteNotArchived, checkRouteVersion, nextRouteUpdate } from './route-lifecycle';
+import { validateKieRoute } from './kie-images';
 
 const httpsUrl = z.string().max(500).url().refine(value => {
   const url = new URL(value);
   return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash;
 }, 'Use an HTTPS URL without credentials, query or fragment');
 export function validateServicePrice(route: { service: string; protocol: string; provider: string; options?: unknown }, definition: PriceDefinition): void {
+  if (route.protocol === 'kie-images') {
+    const metrics = ['output_images_1k', 'output_images_2k', 'output_images_4k'];
+    if (route.service !== 'image' || route.provider !== 'kie' || definition.tariff.kind !== 'constant' || definition.rates.length !== 3 || definition.rates.some(rate => !metrics.includes(rate.metric) || rate.unitQuantity !== '1' || !('price' in rate))) throw new HttpError(409, 'INCOMPLETE_SERVICE_PRICE', 'Kie 图像须分别配置每张 1K、2K、4K 的固定单价。');
+    return;
+  }
   if (!['openai-chat', 'openai-responses', 'jev-decisions', 'tavily', 'bocha', 'dashscope-tts'].includes(route.protocol)) throw new HttpError(409, 'PROTOCOL_NOT_READY', '此协议尚未完成网关联调，暂不能开放。');
   const required: UsageMetric[] = route.protocol === 'tavily' ? ['search_credits'] : route.protocol === 'bocha' ? ['requests']
     : route.protocol === 'dashscope-tts' && definition.rates.some(rate => rate.metric === 'input_characters') ? ['input_characters'] : ['input_tokens', 'output_tokens'];
@@ -31,7 +38,7 @@ export function validateServicePrice(route: { service: string; protocol: string;
   }
 }
 export const routeInput = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/), name: z.string().trim().min(1).max(100),
-  service: z.enum(['chat', 'vision', 'decision', 'search', 'voice']), protocol: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'jev-decisions', 'tavily', 'bocha', 'dashscope-tts']),
+  service: z.enum(['chat', 'vision', 'decision', 'search', 'voice', 'image']), protocol: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'jev-decisions', 'tavily', 'bocha', 'dashscope-tts', 'openai-images', 'dashscope-images', 'kie-images']),
   provider: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,49}$/), baseUrl: httpsUrl, upstreamModel: z.string().min(1).max(200).regex(/^[^\s\r\n\0]+$/),
   credentialEnv: z.string().regex(/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/).default('CCAGENT_PROVIDER_MANAGED'), enabled: z.boolean().default(false),
   timeoutMs: z.number().int().min(1000).max(180000).default(120000), retries: z.number().int().min(0).max(2).default(0),
@@ -39,11 +46,15 @@ export const routeInput = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._:-]
     maxImages: z.number().int().min(0).max(600).default(20), fallbackRouteId: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/).nullable().default(null), fallbackEnabled: z.boolean().default(false),
   }).strict(),
 }).strict().superRefine((value, context) => {
-  const protocols: Record<string, string[]> = { chat: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], vision: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], decision: ['jev-decisions'], search: ['tavily', 'bocha'], voice: ['dashscope-tts'] };
+  const protocols: Record<string, string[]> = { chat: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], vision: ['openai-chat', 'openai-responses', 'anthropic', 'gemini'], decision: ['jev-decisions'], search: ['tavily', 'bocha'], voice: ['dashscope-tts'], image: ['openai-images', 'dashscope-images', 'kie-images'] };
   if (!protocols[value.service].includes(value.protocol)) context.addIssue({ code: 'custom', message: 'Service and protocol do not match' });
   if (value.options.fallbackRouteId === value.id) context.addIssue({ code: 'custom', message: 'Route cannot fall back to itself' });
   if (value.options.fallbackEnabled && !value.options.fallbackRouteId) context.addIssue({ code: 'custom', message: 'Enabled fallback requires a route' });
   if (value.options.maxOutputTokens > value.options.contextWindow) context.addIssue({ code: 'custom', message: 'Output limit exceeds context window' });
+  if (value.protocol === 'kie-images') {
+    try { validateKieRoute(value); } catch { context.addIssue({ code: 'custom', message: 'Invalid Kie official model, URL, provider or retry policy' }); }
+    if (value.options.maxImages > 16 || value.options.fallbackEnabled || value.options.fallbackRouteId) context.addIssue({ code: 'custom', message: 'Kie permits at most 16 images and no automatic fallback' });
+  }
 });
 export const priceInput = z.object({ routeId: z.string().min(1).max(80), currency: z.enum(['CNY', 'USD']), definition: priceDefinition,
   sourceUrl: httpsUrl, effectiveAt: z.iso.datetime({ offset: true }), expectedRouteFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
@@ -108,7 +119,7 @@ export async function testableRoute(id: string, reader: DatabaseReader = databas
   return selectRoute(id, undefined, reader, true);
 }
 async function selectRoute(id: string, service: string | undefined, reader: DatabaseReader, allowPaused: boolean) {
-  const [route] = await reader.select().from(routes).where(eq(routes.id, id));
+  const [route] = await reader.select().from(routes).where(and(eq(routes.id, id), activeRouteCondition()));
   if (!route || (!allowPaused && !route.enabled) || (service && route.service !== service)) throw new HttpError(404, 'SERVICE_UNAVAILABLE', '该服务尚未开放。');
   await assertUpstreamHost(route.baseUrl, reader);
   if (!/^CCAGENT_PROVIDER_[A-Z0-9_]{1,64}$/.test(route.credentialEnv)) throw new HttpError(503, 'INVALID_CREDENTIAL_REFERENCE', '服务凭据配置需要更新。');
@@ -131,17 +142,26 @@ export function publicPricing(selection: Awaited<ReturnType<typeof publishedRout
     { contextWindow: options.contextWindow, maxOutputTokens: options.maxOutputTokens, maxImages: options.maxImages }])).digest('hex');
   return { ...pricing, fingerprint };
 }
-export async function saveRoute(actorId: string, input: z.infer<typeof routeInput>, credential: { apiKey?: string; remove?: boolean } = {}) {
+export async function saveRoute(actorId: string, input: z.infer<typeof routeInput>, credential: { apiKey?: string; remove?: boolean } = {},
+  management: { mode?: 'create' | 'upsert'; expectedUpdatedAt?: string } = {}) {
   await assertUpstreamHost(input.baseUrl);
   return database().db.transaction(async tx => {
     await lockAdministration(tx, 804714033);
+    await assertRouteNotArchived(input.id, tx);
     const [existing] = await tx.select().from(routes).where(eq(routes.id, input.id)).for('update');
+    if (management.mode === 'create' && existing) throw new HttpError(409, 'ROUTE_ALREADY_EXISTS', '路由编号已存在，请载入编辑或使用新的编号。');
+    if (management.expectedUpdatedAt !== undefined) {
+      if (!existing) throw new HttpError(409, 'ROUTE_CONFIGURATION_CHANGED', '路由已不存在，请重新载入后再操作。');
+      checkRouteVersion(existing, management.expectedUpdatedAt);
+    }
+    if (input.enabled && ['openai-images', 'dashscope-images'].includes(input.protocol)) throw new HttpError(409, 'PROTOCOL_NOT_READY', '图像生成暂支持保存配置，执行与计费尚未接入，不能开放服务。');
     const changed = existing && routeFingerprint(existing) !== routeFingerprint(input);
     const destinationChanged = !!existing && (existing.provider !== input.provider || new URL(existing.baseUrl).href.replace(/\/$/, '') !== new URL(input.baseUrl).href.replace(/\/$/, ''));
     const hasNewKey = Boolean(credential.apiKey?.trim());
     await saveRouteCredential(actorId, input, { ...credential, ...(destinationChanged && !hasNewKey ? { remove: true } : {}) }, tx);
     // A changed provider/model/protocol never reuses the previous supplier price.
     const enabled = changed || credential.remove || destinationChanged && !hasNewKey ? false : input.enabled;
+    if (input.options.fallbackRouteId) await assertRouteNotArchived(input.options.fallbackRouteId, tx);
     if (input.options.fallbackEnabled) {
       const [target] = await tx.select().from(routes).where(eq(routes.id, input.options.fallbackRouteId!));
       if (!target || target.service !== input.service || target.protocol !== input.protocol) throw new HttpError(409, 'INCOMPATIBLE_FALLBACK', '备用须为另一条同服务类型、同协议的路由。');
@@ -149,7 +169,7 @@ export async function saveRoute(actorId: string, input: z.infer<typeof routeInpu
         try { await publishedRoute(target.id, input.service, tx); }
         catch { throw new HttpError(409, 'FALLBACK_NOT_READY', '启用前请完成备用路由的凭据、成本及开放配置。'); }
       }
-      const graph = new Map((await tx.select({ id: routes.id, options: routes.options }).from(routes)).map(route => [route.id, routeInput.shape.options.parse(route.options)]));
+      const graph = new Map((await tx.select({ id: routes.id, options: routes.options }).from(routes).where(activeRouteCondition())).map(route => [route.id, routeInput.shape.options.parse(route.options)]));
       graph.set(input.id, input.options);
       const visited = new Set<string>(); let cursor: string | null = input.id;
       while (cursor) {
@@ -167,17 +187,18 @@ export async function saveRoute(actorId: string, input: z.infer<typeof routeInpu
       validateServicePrice(input, definition);
       selectedTariff(definition, new Date());
     }
-    const value = { ...input, enabled, updatedAt: new Date() };
+    const value = { ...input, enabled, updatedAt: nextRouteUpdate(existing?.updatedAt) };
     if (existing) await tx.update(routes).set(value).where(eq(routes.id, input.id));
     else await tx.insert(routes).values(value);
     await tx.insert(audit).values({ id: randomUUID(), actorId, action: 'routes.save', objectId: input.id, result: 'success', metadata: { enabled, repricingRequired: !!changed,
       fallbackEnabled: input.options.fallbackEnabled, fallbackRouteId: input.options.fallbackRouteId } });
-    return { saved: true, enabled, repricingRequired: !!changed };
+    return { saved: true, enabled, repricingRequired: !!changed, updatedAt: value.updatedAt.toISOString() };
   });
 }
 export async function createPriceVersion(actorId: string, input: z.infer<typeof priceInput>) {
   return database().db.transaction(async tx => {
     await lockAdministration(tx, 804714033);
+    await assertRouteNotArchived(input.routeId, tx);
     const [route] = await tx.select().from(routes).where(eq(routes.id, input.routeId)).for('update');
     if (!route) throw new HttpError(404, 'ROUTE_NOT_FOUND', '服务路由不存在。');
     if (input.expectedRouteFingerprint !== undefined && input.expectedRouteFingerprint !== routeFingerprint(route)) {

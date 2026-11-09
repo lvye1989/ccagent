@@ -62,6 +62,7 @@ export interface CompactionResult {
 export interface CompactionCheckOptions {
   usage?: Usage;
   usageAnchorIndex?: number;
+  usageSystemPromptTokens?: number;
   systemPrompt?: string;
   force?: boolean;
   /** Clear old tool payloads without making a summarization API call. */
@@ -275,6 +276,7 @@ export async function compactMessages(
   const budget = buildTokenBudgetSnapshot(microCompacted, {
     usage: options.usage,
     usageAnchorIndex: options.usageAnchorIndex,
+    usageSystemPromptTokens: options.usageSystemPromptTokens,
     systemPrompt: options.systemPrompt,
     model: options.model,
     contextWindow: options.contextWindow,

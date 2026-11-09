@@ -321,10 +321,12 @@ export async function setSessionPinned(cwd: string, sessionId: string, pinned: b
   await fs.writeFile(path.join(projectDir, PINNED_FILE), JSON.stringify([...ids], null, 2) + "\n", "utf8");
 }
 
-export async function deleteStoredSession(cwd: string, sessionId: string): Promise<void> {
+export async function deleteStoredSession(cwd: string, sessionId: string, allowMissing = false): Promise<void> {
   if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error("Invalid session id");
   const { transcriptPath, latestPath } = await getSessionPaths(cwd, sessionId);
-  await fs.unlink(transcriptPath);
+  await fs.unlink(transcriptPath).catch((error: NodeJS.ErrnoException) => {
+    if (!allowMissing || error.code !== "ENOENT") throw error;
+  });
   const pinned = new Set(await listPinnedSessionIds(cwd));
   if (pinned.delete(sessionId)) {
     await fs.writeFile(path.join(path.dirname(transcriptPath), PINNED_FILE), JSON.stringify([...pinned], null, 2) + "\n", "utf8");

@@ -30,8 +30,13 @@ export function prepareUpstream(endpoint: GatewayEndpoint, input: Record<string,
       z.array(z.record(z.string(), z.unknown())).min(1).max(2000).parse(input.messages);
       if (input.n !== undefined && input.n !== 1) throw new HttpError(400, 'SINGLE_OUTPUT_REQUIRED', '每次调用只支持一份输出。');
       const maxTokens = outputLimit.parse(input.max_completion_tokens ?? input.max_tokens ?? route.options.maxOutputTokens);
+      // DeepSeek enables thinking by default on some models. Keep an explicit
+      // caller choice intact so tool-result continuations use the same mode.
+      const thinking = route.provider === 'deepseek' && input.thinking !== undefined
+        ? z.object({ type: z.enum(['enabled', 'disabled']) }).strict().parse(input.thinking) : undefined;
       path = 'chat/completions';
       body = { ...copy(input, [...common, 'messages', 'response_format', 'reasoning_effort', 'enable_thinking', 'thinking_budget']),
+        ...(thinking ? { thinking } : {}),
         model: route.upstreamModel, stream, n: 1, max_tokens: maxTokens, ...(stream ? { stream_options: { include_usage: true } } : {}) };
     } else {
       if (typeof input.input !== 'string') z.array(z.unknown()).min(1).max(2000).parse(input.input);

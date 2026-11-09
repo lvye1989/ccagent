@@ -1,4 +1,5 @@
 import { createWhiteboardAI } from "./whiteboard-ai.js";
+import { createWhiteboardDesign, designSceneImages } from "./whiteboard-design.js";
 const MESSAGE_TYPE = "ccagent-whiteboard";
 const EMPTY_SCENE = { type: "excalidraw", version: 2, source: "CCAGENT", elements: [], appState: {}, files: {} };
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
@@ -12,7 +13,7 @@ function isConflict(error) { return error?.code === "conflict" || (!error?.code 
 
 export function createWhiteboardUI({ api, toast, getWorkspace }) {
   const s = { workspace: "", generation: 0, boards: [], board: null, scene: null, sceneKey: "", name: "", dirty: false, edits: 0, canvasVersion: 0, busy: false, freezing: false, conflict: false, error: "", saving: null, action: null, timer: null, ready: false, frame: null, channel: "", token: "", framePromise: null, frameError: false };
-  const pending = new Map(); let requestId = 0, root, selector, title, statusText, statusBox, recovery, stage, welcome, loading, importInput, ai;
+  const pending = new Map(); let requestId = 0, root, selector, title, statusText, statusBox, recovery, stage, welcome, loading, importInput, ai, design, aiHost, designHost, designToggle;
 
   function valid(generation, workspace) { return generation === s.generation && workspace === s.workspace && workspace === getWorkspace(); }
   function mounted() {
@@ -22,7 +23,8 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
     const header = node("header", "whiteboard-header"); const heading = node("div", "whiteboard-heading");
     heading.append(node("span", "whiteboard-eyebrow", "EXCALIDRAW"), node("h1", "", "白板"), node("p", "", "把想法画出来，让协作更清晰。"));
     const tools = node("div", "whiteboard-header-actions");
-    tools.append(button("＋ 新建白板", () => void runAction(createBoard), "whiteboard-button primary"), button("导入白板", () => importInput.click()));
+    designToggle = button("建筑与城市设计", () => selectDesign(designHost.classList.contains("hidden")), "whiteboard-button whiteboard-design-toggle"); designToggle.id = "whiteboard-design-toggle"; designToggle.setAttribute("aria-pressed", "false");
+    tools.append(designToggle, button("＋ 新建白板", () => void runAction(createBoard), "whiteboard-button primary"), button("导入白板", () => importInput.click()));
     importInput = node("input", "sr-only"); importInput.id = "whiteboard-import"; importInput.type = "file"; importInput.accept = ".excalidraw,application/json";
     importInput.addEventListener("change", () => { const file = importInput.files?.[0]; importInput.value = ""; if (file) void runAction(() => importBoard(file)); });
     header.append(heading, tools, importInput); root.append(header);
@@ -43,8 +45,9 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
     const illustration = node("div", "whiteboard-illustration"); illustration.setAttribute("aria-hidden", "true"); illustration.append(node("span", "whiteboard-sketch-box", "一个想法"), node("span", "whiteboard-sketch-arrow", "⟶"), node("span", "whiteboard-sketch-box accent", "无限可能"));
     welcome.append(illustration, node("h2", "", "从一块空白开始"), node("p", "", "流程图、草图、便签与思维导图，在同一个画布里自由展开。"), button("创建第一块白板", () => void runAction(createBoard), "whiteboard-button primary"), node("small", "", "自动保存在当前账号与工作文件夹中 · 可导入和导出 .excalidraw"));
     loading = node("div", "whiteboard-loading hidden", "正在打开本地白板编辑器…"); loading.setAttribute("role", "status"); stage.append(welcome, loading);
-    const workbench = node("div", "whiteboard-workbench"), aiHost = node("div"); workbench.append(stage, aiHost); root.append(workbench);
+    const workbench = node("div", "whiteboard-workbench"); aiHost = node("div"); designHost = node("div", "hidden"); workbench.append(stage, aiHost, designHost); root.append(workbench);
     ai = createWhiteboardAI({ api, toast, host: aiHost, getContext: aiContext, applyDrawing: applyAIDrawing, undoDrawing: undoAIDrawing });
+    design = createWhiteboardDesign({ api, toast, host: designHost, capture: captureDesign, importImage: importDesignImage, removeImage: removeDesignImage, sketch: sketchDesign, onClose: () => selectDesign(false) });
     window.addEventListener("beforeunload", (event) => { if (s.dirty || s.saving) { event.preventDefault(); event.returnValue = ""; } }); render();
   }
   function render() {
@@ -54,7 +57,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
     if (document.activeElement !== title) title.value = s.name;
     const locked = s.busy || s.freezing;
     root.setAttribute("aria-busy", String(locked)); root.classList.toggle("whiteboard-locked", locked);
-    root.querySelectorAll("button,select,input").forEach((control) => { if (!control.closest(".whiteboard-ai")) control.disabled = locked; });
+    root.querySelectorAll("button,select,input").forEach((control) => { if (!control.closest(".whiteboard-ai,.whiteboard-design")) control.disabled = locked; });
     title.disabled = locked || !s.board; selector.disabled = locked || !s.boards.length;
     root.querySelectorAll(".whiteboard-export-actions button").forEach((control) => { control.disabled = locked || !s.board; });
     welcome.classList.toggle("hidden", Boolean(s.board)); if (s.frame) s.frame.classList.toggle("hidden", !s.board);
@@ -68,6 +71,12 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
       recovery.querySelectorAll("button").forEach((control) => { control.disabled = locked; });
     } else if (s.error) recovery.append(button("重试", () => void open()));
     ai?.contextChanged(s.board ? { workspace: s.workspace, id: s.board.id, name: s.name, revision: s.board.revision, token: s.token, canvasVersion: s.canvasVersion } : null);
+    design?.contextChanged(s.board ? { workspace: s.workspace, id: s.board.id, name: s.name, revision: s.board.revision, token: s.token, canvasVersion: s.canvasVersion, images: designSceneImages(s.scene) } : null);
+  }
+  function selectDesign(selected) {
+    aiHost.classList.toggle("hidden", selected); designHost.classList.toggle("hidden", !selected);
+    designToggle.classList.toggle("active", selected); designToggle.setAttribute("aria-pressed", String(selected));
+    selected ? design.open() : design.close();
   }
   function fail(error) { s.conflict = isConflict(error); s.error = s.conflict ? "这块白板已在其他页面更新。当前更改已保留，请下载副本或另存为新白板。" : (error?.message || "操作未完成，请重试。") + (s.dirty ? " 当前更改仍保留在画布中。" : ""); render(); }
   function setScene(scene) { s.scene = scene; s.sceneKey = JSON.stringify(scene); }
@@ -157,6 +166,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   }
   async function chooseBoard(id) {
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (!(await flush())) return false;
     const generation = s.generation, workspace = s.workspace, result = await request("open", { id });
     if (result.workspace !== workspace) throw new Error("工作文件夹已变化，请重新打开白板。");
@@ -164,6 +174,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   }
   async function createBoard() {
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (!(await flush())) return false;
     const generation = s.generation, workspace = s.workspace, result = await request("create", { name: "未命名白板" });
     if (result.workspace !== workspace) throw new Error("工作文件夹已变化，请重新打开白板。");
@@ -174,6 +185,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
     let scene; try { scene = JSON.parse(await file.text()); } catch { throw new Error("白板文件不是有效的 JSON，请重新选择。"); }
     if (scene?.type !== "excalidraw" || !sceneObject(scene)) throw new Error("请选择有效的 .excalidraw 白板文件。");
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (!(await flush())) return false;
     const generation = s.generation, workspace = s.workspace, result = await request("create", { name: file.name.replace(/\.excalidraw$/i, "").slice(0, 100) || "导入的白板", scene });
     if (result.workspace !== workspace) throw new Error("工作文件夹已变化，请重新打开白板。");
@@ -189,6 +201,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   async function saveAsNew() {
     if (!s.board) return false;
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     try { await snapshot(); } catch { /* Use the retained scene when the editor is unavailable. */ }
     const generation = s.generation, workspace = s.workspace, result = await request("create", { name: `${s.name.trim() || "未命名白板"} 副本`.slice(0, 100), scene: s.scene });
     if (result.workspace !== workspace) throw new Error("工作文件夹已变化，请重新打开白板。");
@@ -196,6 +209,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   }
   async function reloadEditor() {
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (s.board) { try { await snapshot(); } catch { /* Retained content will be restored into the new editor. */ } }
     const scene = s.scene || EMPTY_SCENE, token = s.token;
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error("编辑器正在重新加载。")); } pending.clear();
@@ -212,6 +226,37 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
     return { workspace: s.workspace, id: s.board.id, name: s.name, revision: s.board.revision, token: s.token, canvasVersion: s.canvasVersion };
   }
   function matchingContext(context) { return context && context.workspace === s.workspace && context.workspace === getWorkspace() && context.id === s.board?.id && context.token === s.token && context.name === s.name && context.canvasVersion === s.canvasVersion; }
+  async function captureDesign(baseImageId) {
+    const context = await aiContext();
+    if (!baseImageId) return { ...context, baseImageId: "" };
+    const result = await rpc("designSnapshot", { token: s.token, baseImageId });
+    if (!matchingContext(context) || result?.token !== context.token || result.canvasVersion !== context.canvasVersion) throw new Error("画布在准备期间已有变化，请基于当前勾画重新生成。");
+    return { ...context, ...result, baseImageId };
+  }
+  async function importDesignImage(role, image, baseImageId, requestId, expectedContext) {
+    if (!s.board) throw new Error("请先新建或打开一块白板，再导入图片。");
+    const context = expectedContext || { workspace: s.workspace, id: s.board.id, token: s.token };
+    const sameScope = () => context.workspace === s.workspace && s.workspace === getWorkspace() && context.id === s.board?.id && context.token === s.token;
+    return canvasAction(async () => {
+      await snapshot();
+      if (!sameScope() || (role === "result" && !matchingContext(context))) throw new Error("画布已变化，图片未加入；请重新打开当前设计图。");
+      const result = await rpc("importDesignImage", { token: s.token, expectedCanvasVersion: s.canvasVersion, role, image, ...(baseImageId ? { baseImageId } : {}), ...(requestId ? { requestId } : {}) });
+      if (result?.token !== s.token || !sceneObject(result.scene) || !Number.isSafeInteger(result.canvasVersion)) throw new Error("图片未能加入当前白板，请重试。");
+      changed(result.scene, result.canvasVersion); const saved = await flush({ capture: false }); return { ...result, saved };
+    });
+  }
+  async function removeDesignImage(imageId) {
+    return canvasAction(async () => {
+      await snapshot(); const result = await rpc("removeDesignImage", { token: s.token, expectedCanvasVersion: s.canvasVersion, imageId });
+      if (result?.token !== s.token || !sceneObject(result.scene) || !Number.isSafeInteger(result.canvasVersion)) throw new Error("参考图移除未完成，请重试。");
+      changed(result.scene, result.canvasVersion); const saved = await flush({ capture: false }); return { ...result, saved };
+    });
+  }
+  async function sketchDesign(baseImageId) {
+    if (!s.board || !s.ready || s.frameError || s.action || s.freezing) throw new Error("请先打开有效的原图。");
+    const result = await rpc("designSketch", { token: s.token, baseImageId });
+    if (result?.token !== s.token) throw new Error("画笔切换未完成，请重试。"); return result;
+  }
   async function canvasAction(action) {
     if (s.action || s.freezing || s.frameError) throw new Error("白板正忙，请稍后重新生成。");
     s.busy = true; const task = Promise.resolve().then(action); s.action = task; render();
@@ -241,6 +286,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   async function beforeLeave() {
     if (!root || !s.board) return true;
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (s.action) { try { await s.action; } catch { /* A failed action retains the existing scene. */ } }
     s.freezing = true; render();
     try { const saved = await flush(); if (!saved) toast("白板更改尚未保存，请重试、下载副本或另存为新白板后再离开。"); return saved; }
@@ -249,6 +295,7 @@ export function createWhiteboardUI({ api, toast, getWorkspace }) {
   async function workspaceChanged(workspace) {
     if (workspace === s.workspace) return false;
     await ai?.beforeLeave();
+    await design?.beforeLeave();
     if (s.workspace && s.dirty && !(await beforeLeave())) return false;
     clearTimeout(s.timer); s.generation++; s.workspace = workspace; s.boards = []; s.board = null; s.name = ""; s.scene = null; s.sceneKey = ""; s.dirty = false; s.conflict = false; s.error = ""; s.token = nonce();
     if (s.ready && !s.frameError) void rpc("load", { scene: EMPTY_SCENE, token: s.token }).catch(() => {});

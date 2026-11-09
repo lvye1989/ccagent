@@ -2,9 +2,9 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomBytes } = require('node:crypto');
-const { execFile } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { readState, writeState, freePort, serviceRequest, startBackend, waitForBackend, stopBackend, sameOrigin, externalUrl, onboardingFinished, completeOnboarding } = require('./runtime.cjs');
+const { createPrerequisiteManager } = require('./prerequisites.cjs');
 
 app.setName('CCAGENT');
 app.setAppUserModelId('pro.ccagent.desktop');
@@ -14,6 +14,8 @@ const locked = app.requestSingleInstanceLock();
 if (!locked) app.quit();
 let mainWindow, guideWindow, child, origin, state, stateFile, logFile, backendRoot;
 let ready = false, startupError = '', quitting = false, exitPrompt = false;
+let prerequisites, backendStarting;
+const environmentGuideVersion = 1;
 const token = randomBytes(32).toString('hex');
 const guideUrl = pathToFileURL(path.join(__dirname, 'welcome.html')).href;
 const api = (route, body, timeout) => serviceRequest(origin, token, route, body, timeout);
@@ -41,8 +43,11 @@ function configureWindow(window) {
     dialog.showErrorBox('CCAGENT 页面已停止', '请通过“查看 → 重新加载”恢复页面。正在执行的任务由本地服务管理。');
   });
 }
-function showGuide() {
-  if (guideWindow && !guideWindow.isDestroyed()) { reveal(guideWindow); return; }
+function showGuide(environment = false) {
+  const selectEnvironment = () => {
+    if (environment === true && guideWindow && !guideWindow.isDestroyed()) void guideWindow.webContents.executeJavaScript("document.dispatchEvent(new Event('ccagent:show-environment'))").catch(() => {});
+  };
+  if (guideWindow && !guideWindow.isDestroyed()) { reveal(guideWindow); selectEnvironment(); return; }
   guideWindow = new BrowserWindow({ width: 1100, height: 790, minWidth: 980, minHeight: 730, title: 'CCAGENT · 开始使用',
     backgroundColor: '#f5f7fb', autoHideMenuBar: true, show: false, icon: path.join(__dirname, 'icon.ico'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
@@ -50,12 +55,12 @@ function showGuide() {
   configureWindow(guideWindow);
   guideWindow.on('closed', () => { guideWindow = null; });
   guideWindow.once('ready-to-show', () => guideWindow?.show());
-  void guideWindow.loadURL(guideUrl).then(() => guideWindow?.show());
+  void guideWindow.loadURL(guideUrl).then(() => { guideWindow?.show(); selectEnvironment(); });
 }
 async function showMain(view = '') {
   if (!ready) throw new Error(startupError || '本地服务正在启动，请稍候。');
   if (mainWindow && !mainWindow.isDestroyed()) {
-    if (view) await mainWindow.loadURL(origin + '/?view=' + encodeURIComponent(view));
+    if (view || !sameOrigin(mainWindow.webContents.getURL(), origin)) await mainWindow.loadURL(origin + (view ? '/?view=' + encodeURIComponent(view) : '/'));
     reveal(mainWindow); return;
   }
   mainWindow = new BrowserWindow({ width: state.width || 1440, height: state.height || 940, minWidth: 1000, minHeight: 700,
@@ -112,27 +117,48 @@ async function requestExit() {
     quitting = true; app.quit();
   }
 }
-function checkCommand(command, args) {
-  return new Promise(resolve => {
-    execFile('where.exe', [command], { windowsHide: true, timeout: 2000 }, (error, stdout) => {
-      if (error) return resolve(false);
-      const candidate = stdout.split(/\r?\n/).find(file => file && !/\\Microsoft\\WindowsApps\\/i.test(file));
-      if (!candidate) return resolve(false);
-      execFile(candidate, args, { windowsHide: true, timeout: 3000 }, failed => resolve(!failed));
-    });
-  });
-}
 async function status() {
   const account = ready ? await api('/api/account/status').catch(() => null) : null;
   const models = account ? (await api('/api/customize/models')).models : [];
   const workspace = account ? (await api('/api/workspaces')).current : state.workspace;
   return { ready, authenticated: Boolean(account), email: account?.user?.email, error: startupError, version: productVersion, workspace, models,
+    environmentReviewed: state.environmentGuideVersion === environmentGuideVersion,
     nodeVersion: readState(path.join(backendRoot, 'desktop-manifest.json')).nodeVersion,
-    git: await checkCommand('git', ['--version']), python: await checkCommand(process.env.CCAGENT_PYTHON || 'python', ['--version']),
   };
 }
+async function checkEnvironment(reviewed = false) {
+  const report = await prerequisites.detect();
+  if (report.job?.running) throw new Error('环境安装仍在进行，请等待完成或先取消安装。');
+  if (!report.requiredReady) throw new Error('请先修复环境检测中标记为必需的组件，然后重新检测。');
+  if (reviewed && state.environmentGuideVersion !== environmentGuideVersion) throw new Error('请先完成环境检测向导。');
+  return report;
+}
 function registerIpc() {
-  ipcMain.handle('ccagent:login', async event => { trustedGuide(event); await showMain(); guideWindow?.close(); });
+  ipcMain.handle('ccagent:prerequisites', async (event, options) => {
+    trustedGuide(event);
+    if (options !== undefined && (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'refresh') || (options.refresh !== undefined && typeof options.refresh !== 'boolean'))) throw new Error('环境检测参数无效。');
+    const report = options?.refresh === false ? prerequisites.getState() : await prerequisites.detect();
+    if (options?.refresh !== false && report.requiredReady && !ready && !quitting) void ensureBackend();
+    return report;
+  });
+  ipcMain.handle('ccagent:install-prerequisite', async (event, id) => {
+    trustedGuide(event);
+    if (typeof id !== 'string' || !['git-bash', 'python'].includes(id)) throw new Error('不支持安装此组件，请使用官方安装说明。');
+    return prerequisites.startInstall(id);
+  });
+  ipcMain.handle('ccagent:cancel-prerequisite-install', async event => { trustedGuide(event); return prerequisites.cancelInstall(); });
+  ipcMain.handle('ccagent:prerequisite-page', async (event, id) => {
+    trustedGuide(event);
+    if (typeof id !== 'string' || !['windows', 'architecture', 'powershell', 'bundled-node', 'bundled-npm', 'git-bash', 'python', 'libreoffice', 'winget'].includes(id)) throw new Error('无效的组件帮助页面。');
+    return prerequisites.openOfficial(id);
+  });
+  ipcMain.handle('ccagent:review-prerequisites', async event => {
+    trustedGuide(event);
+    const report = await checkEnvironment();
+    save({ environmentGuideVersion });
+    return report;
+  });
+  ipcMain.handle('ccagent:login', async event => { trustedGuide(event); await checkEnvironment(true); await showMain(); guideWindow?.close(); });
   ipcMain.handle('ccagent:status', async event => { trustedGuide(event); return status(); });
   ipcMain.handle('ccagent:folder', async event => {
     trustedGuide(event);
@@ -169,6 +195,7 @@ function registerIpc() {
   });
   ipcMain.handle('ccagent:finish', async (event, view) => {
     trustedGuide(event); if (!['', 'settings'].includes(view)) throw new Error('Invalid view');
+    await checkEnvironment(true);
     save(completeOnboarding(state, await api('/api/account/status')));
     await showMain(view);
     if (sameOrigin(mainWindow?.webContents.getURL(), origin)) await mainWindow.webContents.executeJavaScript("document.dispatchEvent(new CustomEvent('ccagent:models-changed'))");
@@ -178,10 +205,10 @@ function registerIpc() {
 }
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: '文件', submenu: [{ label: '开始使用向导', click: showGuide }, { label: '设置', click: () => void showMain('settings') }, { type: 'separator' }, { label: '退出', accelerator: 'Alt+F4', click: () => void requestExit() }] },
+    { label: '文件', submenu: [{ label: '开始使用向导', click: () => showGuide() }, { label: '环境检测与安装', click: () => showGuide(true) }, { label: '设置', click: () => { if (ready && state.environmentGuideVersion === environmentGuideVersion) void showMain('settings'); else showGuide(true); } }, { type: 'separator' }, { label: '退出', accelerator: 'Alt+F4', click: () => void requestExit() }] },
     { label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' }, { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' }] },
     { label: '查看', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'resetZoom', label: '实际大小' }, { role: 'zoomIn', label: '放大' }, { role: 'zoomOut', label: '缩小' }, { role: 'togglefullscreen', label: '全屏' }] },
-    { label: '帮助', submenu: [{ label: '使用指南', click: showGuide }, { label: '打开诊断日志', click: () => shell.showItemInFolder(logFile) },
+    { label: '帮助', submenu: [{ label: '使用指南', click: () => showGuide() }, { label: '环境检测与安装', click: () => showGuide(true) }, { label: '打开诊断日志', click: () => shell.showItemInFolder(logFile) },
       { label: '关于 CCAGENT', click: () => void dialog.showMessageBox(mainWindow || guideWindow, { type: 'info', title: '关于 CCAGENT', message: `CCAGENT ${productVersion}`, detail: 'Windows 桌面版\n任务、模型、MCP、技能与权限均使用 CCAGENT 核心。\n源码优化后重新构建安装包即可升级。\n开源许可：MIT；第三方许可随安装文件提供。' }) }] },
   ]));
 }
@@ -191,6 +218,7 @@ async function launch() {
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   if (fs.existsSync(logFile) && fs.statSync(logFile).size > 2 * 1024 * 1024) fs.renameSync(logFile, logFile + '.previous');
   backendRoot = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.resolve(__dirname, '../output/desktop/backend');
+  prerequisites = createPrerequisiteManager({ backendRoot, openExternal: url => shell.openExternal(url) });
   state = readState(stateFile);
   const defaultWorkspace = path.join(app.getPath('documents'), 'CCAGENT 工作区');
   let workspace = process.env.CCAGENT_DESKTOP_WORKSPACE || state.workspace || defaultWorkspace;
@@ -198,17 +226,43 @@ async function launch() {
   fs.mkdirSync(workspace, { recursive: true });
   save({ workspace });
   registerIpc(); installMenu(); showGuide();
+  if (!await ensureBackend()) return;
+  const account = await api('/api/account/status').catch(() => null);
+  if (state.environmentGuideVersion === environmentGuideVersion && (!account || onboardingFinished(state, account))) { await showMain(); guideWindow?.close(); }
+}
+async function ensureBackend() {
+  if (ready) return true;
+  if (backendStarting) return backendStarting;
+  backendStarting = bootBackend().catch(async () => {
+    if (!startupError) startupError = '无法启动本地服务，请重新安装或查看诊断日志。';
+    log('Desktop backend startup failed.');
+    const failedChild = child;
+    await stopBackend(failedChild);
+    if (child === failedChild) child = null;
+    return false;
+  }).finally(() => { backendStarting = null; });
+  return backendStarting;
+}
+async function bootBackend() {
+  const report = await prerequisites.detect();
+  if (quitting) return false;
+  if (!report.requiredReady) {
+    startupError = '必需环境尚未就绪，请按向导修复后点击“重新检测”。';
+    return false;
+  }
+  startupError = '';
   const port = await freePort(); origin = `http://127.0.0.1:${port}`;
-  child = startBackend({ backendRoot, workspace, port, token, log: () => {} });
+  if (quitting) return false;
+  child = startBackend({ backendRoot, workspace: state.workspace, port, token, log: () => {} });
   child.once('error', error => { startupError = '无法启动本地服务，请重新安装或查看诊断日志。'; log(`Backend spawn failed: ${error.code || 'UNKNOWN'}`); });
   child.once('exit', code => {
     ready = false;
     if (!quitting) { startupError = '本地服务已停止，请退出并重新打开应用。'; log(`Backend exited: ${code}`); showGuide(); }
   });
   await waitForBackend(child, origin, token);
+  if (quitting) return false;
   ready = true; log(`Started version ${productVersion}`);
-  const account = await api('/api/account/status').catch(() => null);
-  if (!account || onboardingFinished(state, account)) { await showMain(); guideWindow?.close(); }
+  return true;
 }
 app.on('second-instance', () => reveal(mainWindow || guideWindow));
 app.on('window-all-closed', () => { if (!quitting) { quitting = true; app.quit(); } });
@@ -219,7 +273,7 @@ app.on('before-quit', event => {
   if (ready && stateFile) void api('/api/workspaces').then(value => save({ workspace: value.current })).catch(() => {}).finally(shutdown);
   else void shutdown();
 });
-async function shutdown() { if (stopped) return; await stopBackend(child); stopped = true; app.quit(); }
+async function shutdown() { if (stopped) return; await prerequisites?.dispose(); await stopBackend(child); if (backendStarting) await backendStarting; stopped = true; app.quit(); }
 if (locked) app.whenReady().then(launch).catch(error => {
   startupError = error.message; if (logFile) log('Desktop startup failed.');
   dialog.showErrorBox('CCAGENT 启动失败', error.message); showGuide();

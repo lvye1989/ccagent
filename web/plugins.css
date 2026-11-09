@@ -118,6 +118,11 @@
 .skill-card p { color: #88888f; font-size: 12px; line-height: 1.5; margin: 8px 0; }
 .skill-card span { color: #a0a0a7; font-size: 11px; }
 .skill-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 13px; }
+.agent-card-head { display: flex; align-items: center; gap: 11px; min-height: 38px; }
+.agent-card-head strong { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.agent-card .agent-icon { display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 11px; color: var(--agent-color); background: var(--agent-background); }
+.agent-icon svg { display: block; width: 23px; height: 23px; }
+.agent-disabled .agent-icon { opacity: .45; }
 .skill-use-button { border: 1px solid #e4e4e8; border-radius: 7px; background: #fff; color: #3d3e45; padding: 6px 10px; font-size: 11px; white-space: nowrap; }
 .skill-use-button:hover { background: #f3f3f5; }
 

@@ -7,8 +7,8 @@
  * claudeai-proxy). CCAGENT supports the three that cover the public MCP
  * ecosystem: `stdio` (local subprocess), `http` (Streamable HTTP), and `sse`
  * (legacy SSE-only servers). WebSocket / IDE / SDK / Claude.ai proxy stay
- * out of scope. Streamable HTTP additionally supports Google OAuth for the
- * official Google Workspace remote MCP suite.
+ * out of scope. Streamable HTTP additionally supports registered-client
+ * browser OAuth, including the official Google Workspace remote MCP suite.
  */
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
@@ -37,16 +37,16 @@ export interface McpStdioServerConfig {
  * Streamable HTTP MCP server (the recommended remote transport).
  *
  * Equivalent to source's `McpHTTPServerConfigSchema`. Static `headers` support
- * bearer-token APIs, while `oauth` enables the official Google Workspace MCP
- * browser flow without placing credentials in settings.json.
+ * bearer-token APIs, while `oauth` enables an explicit browser flow without
+ * placing credential values in settings.json.
  */
 export interface McpHTTPServerConfig {
   enabled?: boolean;
   type: "http";
   url: string;
   headers?: Record<string, string>;
-  /** Browser OAuth used by Google's official Workspace MCP servers. */
-  oauth?: McpGoogleOAuthConfig;
+  /** Explicit browser OAuth for a registered MCP client; credentials remain environment-backed. */
+  oauth?: McpOAuthConfig;
   /** Connection/initialize timeout (1000–600000 ms). Overrides MCP_CONNECT_TIMEOUT. */
   connectTimeoutMs?: number;
   toolTimeoutMs?: number;
@@ -62,6 +62,16 @@ export interface McpGoogleOAuthConfig {
   clientSecretEnv: string;
   redirectUri: string;
 }
+
+/** Standards-based browser OAuth, including Canva's registered-client flow. */
+export interface McpBrowserOAuthConfig {
+  provider: "browser";
+  clientIdEnv: string;
+  clientSecretEnv: string;
+  redirectUri: string;
+}
+
+export type McpOAuthConfig = McpGoogleOAuthConfig | McpBrowserOAuthConfig;
 
 /**
  * Legacy SSE MCP server. Many older MCP servers (and most of the public

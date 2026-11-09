@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const usageMetric = z.enum(['input_tokens', 'cached_input_tokens', 'image_input_tokens', 'audio_input_tokens', 'video_input_tokens', 'output_tokens', 'audio_output_tokens', 'requests', 'input_characters', 'search_credits']);
+export const usageMetric = z.enum(['input_tokens', 'cached_input_tokens', 'image_input_tokens', 'audio_input_tokens', 'video_input_tokens', 'input_images', 'output_tokens', 'audio_output_tokens', 'output_images', 'output_images_1k', 'output_images_2k', 'output_images_4k', 'requests', 'input_characters', 'search_credits']);
 export type UsageMetric = z.infer<typeof usageMetric>;
 const decimal = z.string().regex(/^(?:0|[1-9]\d{0,8})(?:\.\d{1,12})?$/);
 const unitQuantity = z.string().regex(/^[1-9]\d{0,9}$/);

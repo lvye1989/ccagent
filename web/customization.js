@@ -19,7 +19,7 @@ function field(parent, label, id, value = "", options = {}) {
 }
 const scopeChoices = [["project", "当前项目"], ["user", "所有工作区"]];
 
-export function createCustomizationUI({ api, toast, navigate, changed, getModel, getSessionId, getBusy }) {
+export function createCustomizationUI({ api, toast, navigate, changed, getModel, getSessionId, getBusy, getWorkspace = () => "" }) {
   function addButton(afterId, id, label) { const b = button(label, () => {}, "plugin-add-button"); b.id = id; $(afterId).after(b); }
   addButton("agent-refresh", "agent-create", "＋ 创建 Agent");
   addButton("mcp-refresh", "mcp-add", "＋ 添加 MCP");
@@ -130,20 +130,81 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     actions("导入完整技能", async () => { await request("local-skill", { path: path.value, scope: scope.value }); await changed("skills"); });
   }
 
-  async function modelEditor(profile) {
-    const body = openDialog(profile ? `编辑 ${profile.id}` : "接入大模型", "保存后模型会出现在首页与对话的模型列表。密钥不会回显到浏览器。");
+  async function modelEditor(profile, preset) {
+    const body = openDialog(profile ? `编辑 ${profile.id}` : preset === "ollama" ? "接入 Ollama" : "接入大模型", "保存后模型会出现在首页与对话的模型列表。密钥不会回显到浏览器。");
+    const generation = modalRequest, workspace = getWorkspace();
+    const initialOllama = profile?.provider === "ollama" || profile?.localModel === true || preset === "ollama";
+    const provider = field(body, "接入方式", "edit-model-provider", initialOllama ? "ollama" : "custom", { choices: [["custom", "服务商 API / 自定义接口"], ["ollama", "Ollama 本地大模型"]] });
     const grid = el("div", "editor-grid"); body.append(grid);
-    const id = field(grid, "配置名称", "edit-model-id", profile?.id, { disabled: Boolean(profile), placeholder: "my-model" });
+    const id = field(grid, "配置名称", "edit-model-id", profile?.id || (initialOllama ? "ollama-local" : ""), { disabled: Boolean(profile), placeholder: "my-model" });
     const protocol = field(grid, "API 协议", "edit-model-protocol", profile?.protocol || "openai-chat", { choices: [["openai-chat", "OpenAI 兼容 Chat Completions"], ["openai-responses", "OpenAI 兼容 Responses"], ["anthropic", "Anthropic 兼容 Messages"], ["gemini", "Gemini"]] });
-    const url = field(body, "API 地址", "edit-model-url", profile?.baseURL, { placeholder: "https://your-provider.example/v1" });
+    const url = field(body, "API 地址", "edit-model-url", profile?.baseURL || (initialOllama ? "http://127.0.0.1:11434" : ""), { placeholder: "https://your-provider.example/v1" });
+    const ollama = el("section", "editor-generator"); ollama.id = "edit-ollama-tools";
+    const detect = button("检测已安装模型", () => { void discover(); }, "editor-generate"); detect.id = "edit-ollama-detect";
+    const installed = field(ollama, "已安装的 Ollama 模型", "edit-ollama-models", "", { choices: [["", "检测后选择模型，也可在下方手动填写"]] });
+    const discoveryStatus = el("p", "editor-hint"); discoveryStatus.id = "edit-ollama-status"; discoveryStatus.setAttribute("role", "status"); discoveryStatus.setAttribute("aria-live", "polite");
+    const instructions = el("p", "editor-hint", "请先安装并启动 Ollama。若没有模型，可在终端运行 ollama pull qwen3:8b，再检测已安装模型。检测只读取模型列表，不会下载模型。");
+    const download = el("a", "", "下载 Ollama"); download.href = "https://ollama.com/download/windows"; download.target = "_blank"; download.rel = "noopener noreferrer";
+    const originHint = el("p", "editor-hint", "服务地址指运行 CCAGENT 后端的电脑；默认使用本机 11434 端口。Ollama 无需 API 密钥。请选择对话模型；Agent 调用工具还需模型支持工具调用，向量模型不能用于对话。");
+    ollama.prepend(detect); ollama.append(discoveryStatus, instructions, download, originHint); body.append(ollama);
     const model = field(body, "模型名称", "edit-model-name", profile?.model, { placeholder: "服务商提供的模型名称" });
     const key = field(body, "API 密钥", "edit-model-key", "", { type: "password", placeholder: profile?.hasKey ? "已配置，留空保留原密钥" : "输入密钥；本地免密服务可留空" });
+    let discoveryRevision = 0, discoveryBusy = false;
+    const active = () => generation === modalRequest && workspace === getWorkspace() && body.isConnected && !$("editor-overlay").classList.contains("hidden");
+    function resetDiscovery(message = "") {
+      discoveryRevision++; discoveryBusy = false; detect.disabled = false; detect.textContent = "检测已安装模型";
+      installed.replaceChildren(); const option = el("option", "", "检测后选择模型，也可在下方手动填写"); option.value = ""; installed.append(option); installed.disabled = true;
+      discoveryStatus.textContent = message;
+    }
+    function syncProvider() {
+      const local = provider.value === "ollama";
+      ollama.hidden = !local; ollama.classList.toggle("hidden", !local); key.closest("label").hidden = local; key.closest("label").classList.toggle("hidden", local); key.disabled = local;
+      protocol.disabled = local; if (local) protocol.value = "openai-chat";
+      url.placeholder = local ? "http://127.0.0.1:11434" : "https://your-provider.example/v1";
+      model.placeholder = local ? "例如 qwen3:8b，需与 Ollama 中的模型名一致" : "服务商提供的模型名称";
+    }
+    async function discover() {
+      if (modalBusy || discoveryBusy || provider.value !== "ollama" || !active()) return;
+      const address = url.value.trim(), revision = ++discoveryRevision;
+      discoveryBusy = true; detect.disabled = true; detect.textContent = "正在检测…"; discoveryStatus.textContent = "正在读取 Ollama 已安装模型…";
+      installed.disabled = true;
+      const current = () => active() && revision === discoveryRevision && provider.value === "ollama" && url.value.trim() === address;
+      try {
+        const result = await request("ollama-models", { baseURL: address });
+        if (!current()) return;
+        installed.replaceChildren(); const off = el("option", "", "选择模型，或在下方手动填写"); off.value = ""; installed.append(off);
+        const names = [...new Set((Array.isArray(result.models) ? result.models : []).map(item => item?.name).filter(name => typeof name === "string" && name.trim()))];
+        for (const name of names) { const option = el("option", "", name); option.value = name; installed.append(option); }
+        installed.disabled = !names.length;
+        if (names.includes(model.value)) installed.value = model.value;
+        if (typeof result.baseURL === "string" && result.baseURL) url.value = result.baseURL;
+        discoveryStatus.textContent = names.length ? `找到 ${names.length} 个已安装模型${result.truncated ? "（列表已截断，可手动填写其他模型名）" : ""}。` : "Ollama 已连接，尚未安装模型。请先运行 ollama pull qwen3:8b，再重新检测。";
+      } catch (error) {
+        if (current()) discoveryStatus.textContent = `无法读取 Ollama 模型：${error.message} 请检查服务地址，并确认 Ollama 已安装且正在运行；也可手动填写模型名称后保存。`;
+      } finally {
+        if (active() && revision === discoveryRevision) { discoveryBusy = false; detect.disabled = false; detect.textContent = "检测已安装模型"; }
+      }
+    }
+    provider.addEventListener("change", () => {
+      key.value = ""; resetDiscovery();
+      url.value = provider.value === "ollama" ? "http://127.0.0.1:11434" : "";
+      model.value = "";
+      if (provider.value === "ollama" && !id.value.trim()) id.value = "ollama-local";
+      syncProvider();
+    });
+    url.addEventListener("input", () => resetDiscovery(provider.value === "ollama" ? "地址已更改，请重新检测模型。" : ""));
+    installed.addEventListener("change", () => { if (installed.value) model.value = installed.value; });
+    model.addEventListener("input", () => { installed.value = [...installed.options].some(option => option.value === model.value) ? model.value : ""; });
+    resetDiscovery(); syncProvider();
     const advanced = el("details", "editor-advanced"); advanced.append(el("summary", "", "Token 限制")); body.append(advanced);
     const maxTokens = field(advanced, "最大输出 Token", "edit-model-max", profile?.maxTokens || "", { type: "number" });
     const contextWindow = field(advanced, "上下文窗口 Token", "edit-model-context", profile?.contextWindow || "", { type: "number" });
     const makeDefault = field(body, "设为新对话的默认模型", "edit-model-default", !profile, { type: "checkbox" });
     actions("保存模型", async () => {
-      await request("models", { id: id.value, protocol: protocol.value, baseURL: url.value, model: model.value, apiKey: key.value, maxTokens: maxTokens.value, contextWindow: contextWindow.value, makeDefault: makeDefault.checked });
+      if (workspace !== getWorkspace()) throw new Error("工作区已切换，请关闭窗口并重新接入模型。");
+      if (discoveryBusy) throw new Error("请等待本地模型检测完成，或修改地址后手动填写模型名称。");
+      const local = provider.value === "ollama";
+      await request("models", { id: id.value, provider: local ? "ollama" : "custom", protocol: local ? "openai-chat" : protocol.value, baseURL: url.value, model: model.value, apiKey: local ? "" : key.value, maxTokens: maxTokens.value, contextWindow: contextWindow.value, makeDefault: makeDefault.checked });
       key.value = ""; await changed("models"); await renderSettings();
     });
   }
@@ -168,7 +229,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       if (selectedSettings === "official") {
         const service = await request("official-services");
         const form = el("form", "settings-form");
-        const money = value => { try { const amount = BigInt(value); return `${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, "0").slice(0, 4)}`; } catch { return "—"; } };
+        const money = value => { try { const amount = BigInt(value), absolute = amount < 0n ? -amount : amount; return `${amount < 0n ? '-' : ''}${absolute / 1000000n}.${(absolute % 1000000n).toString().padStart(6, "0").replace(/0+$/, '').padEnd(2, '0')}`; } catch { return "—"; } };
         if (service.wallet) form.append(el("p", "editor-hint", `余额 ¥${money(service.wallet.available ?? service.wallet.balance)} · 冻结 ¥${money(service.wallet.frozen)}`));
         const links = el("div", "settings-row-actions");
         for (const [label, route] of [["余额与充值", "/account/billing"], ["创建管理平台APIkey", "/account/keys"]]) {
@@ -188,11 +249,11 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         form.append(keyOptions);
         const selections = {};
         if (service.routes.length) {
-          for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"]]) {
+          for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"], ["imageGeneration", "图像生成", "image"]]) {
             selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`])] });
           }
         } else if (service.configured) form.append(el("p", "editor-hint", "暂无已开放且价格配置完整的服务，请联系管理员。"));
-        const auxiliary = field(form, "读图、决策、搜索和语音使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
+        const auxiliary = field(form, "读图、决策、搜索、语音和图像生成使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
         const makeDefault = field(form, "将所选官方主模型设为新对话的默认模型", "official-default", false, { type: "checkbox" });
         auxiliary.disabled = makeDefault.disabled = !service.configured;
         const save = el("button", "settings-primary", service.configured ? "保存选择并刷新目录" : "连接官方服务"); save.type = "submit"; form.append(save);
@@ -210,7 +271,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         for (const route of service.routes) {
           const row = el("article", "settings-row"), copy = el("div");
           copy.append(el("strong", "", route.name), el("p", "", `${route.id} · 价格 v${route.pricing.version}`));
-          const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", search_credits: "搜索 credit" };
+          const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", output_images: "输出图片（张）", output_images_1k: "1K 输出图片（张）", output_images_2k: "2K 输出图片（张）", output_images_4k: "4K 输出图片（张）", search_credits: "搜索 credit" };
           const policy = route.pricing.definition.tariff;
           if (policy.kind === "qwen-input-tiers") copy.append(el("p", "editor-hint", `按整次输入总量（含缓存）选择档位；默认${policy.defaultThinking ? "开启" : "关闭"}思考；预算计入最大思考长度 ${policy.maxThinkingTokens} Token。`));
           for (const rate of route.pricing.definition.rates || []) {
@@ -225,11 +286,12 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       }
       if (selectedSettings === "models") {
         const models = await request("models");
-        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。"), button("＋ 接入大模型", () => modelEditor(), "settings-primary"));
+        head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。"), button("＋ 接入大模型", () => modelEditor(), "settings-primary"), button("接入 Ollama", () => modelEditor(undefined, "ollama"), "settings-secondary"));
         if (!models.models.length) root.append(el("p", "settings-empty", "还没有模型，点击接入大模型开始。"));
         for (const item of models.models) {
           const row = el("article", "settings-row");
-          const copy = el("div"); copy.append(el("strong", "", item.id + (item.id === data.defaultModel ? " · 默认" : "")), el("p", "", `${item.model} · ${item.protocol}`), el("small", "", `${item.baseURL || "协议默认地址"} · ${item.hasKey ? "密钥已配置" : "未配置密钥"}`));
+          const local = item.provider === "ollama" || item.localModel === true;
+          const copy = el("div"); copy.append(el("strong", "", item.id + (item.id === data.defaultModel ? " · 默认" : "")), el("p", "", `${item.model} · ${local ? "Ollama 本地模型" : item.protocol}`), el("small", "", `${item.baseURL || "协议默认地址"} · ${local ? "本地服务，无需密钥" : item.hasKey ? "密钥已配置" : "未配置密钥"}`));
           const controls = el("div", "settings-row-actions");
           if (item.setupRequired) copy.append(el("p", "editor-hint", "从旧数据导入，需补全地址或凭据后保存启用。"));
           controls.append(item.managedByPlatform ? button("官方服务设置", () => { selectedSettings = "official"; void renderSettings(); }) : button("编辑", () => modelEditor(item)));
@@ -244,7 +306,7 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         return;
       }
       const form = el("form", "settings-form"); const settings = data.settings;
-      let language, thinking, effort, retention, motion, mode;
+      let language, thinking, effort, retention, motion, mode, directories;
       if (selectedSettings === "general") {
         language = field(form, "回答语言", "settings-language", settings.language || "中文");
         retention = field(form, "聊天记录保留天数（0 关闭持久化）", "settings-retention", settings.cleanupPeriodDays ?? 30, { type: "number" });
@@ -254,12 +316,21 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         thinking = field(form, "启用模型思考", "settings-thinking", settings.alwaysThinkingEnabled ?? false, { type: "checkbox" });
         effort = field(form, "思考强度", "settings-effort", settings.effortLevel || "high", { choices: [["low", "低"], ["medium", "中"], ["high", "高"], ["max", "最高"]] });
         form.append(el("p", "editor-hint", "权限默认值用于新对话；现有对话可在输入框旁单独修改。模型对思考参数的支持取决于服务商。"));
+        directories = field(form, "额外授权的文件目录", "settings-directories", (settings.additionalDirectories || []).join("\n"), { rows: 4, placeholder: "例如 C:\\Users\\你的用户名\\Desktop\\交付文件\n每行一个完整目录路径" });
+        form.append(button("选择文件夹并加入", async () => {
+          try {
+            const result = await api("/api/workspaces/pick", { method: "POST", body: JSON.stringify({ initialPath: getWorkspace() }) });
+            if (result.path) directories.value = [...new Set([...directories.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean), result.path])].join("\n");
+          } catch (error) { toast(error.message); }
+        }, "settings-secondary"));
+        form.append(el("p", "editor-hint", "授权后，文件工具可在这些目录中读写，并将生成文件直接存入指定路径；保存后立即生效。可填写尚未创建的子目录。清空并保存可取消此处的授权。"));
+        if (data.approvedDirectories?.length) form.append(el("p", "editor-hint", "当前生效的额外目录：" + data.approvedDirectories.join("；")));
       }
       const save = el("button", "settings-primary", "保存设置"); save.type = "submit"; form.append(save);
       form.addEventListener("submit", async (event) => {
         event.preventDefault(); save.disabled = true;
         try {
-          await request("settings", selectedSettings === "general" ? { language: language.value, cleanupPeriodDays: Number(retention.value), prefersReducedMotion: motion.checked } : { mode: mode.value, alwaysThinkingEnabled: thinking.checked, effortLevel: effort.value });
+          await request("settings", selectedSettings === "general" ? { language: language.value, cleanupPeriodDays: Number(retention.value), prefersReducedMotion: motion.checked } : { mode: mode.value, alwaysThinkingEnabled: thinking.checked, effortLevel: effort.value, additionalDirectories: directories.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) });
           await changed("settings"); toast("设置已保存");
         } catch (error) { toast(error.message); } finally { save.disabled = false; }
       });

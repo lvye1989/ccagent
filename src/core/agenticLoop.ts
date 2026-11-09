@@ -16,7 +16,8 @@ import {
   type PermissionSettings,
 } from "../permissions/permissions.js";
 import { streamMessage } from "../services/api/streaming.js";
-import { ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
+import { DEFAULT_MAX_TOKENS, ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
+import { officialModelPrefix } from "../platform/serviceState.js";
 import type { QuerySource } from "../services/api/withRetry.js";
 import { compactMessages } from "../context/compaction.js";
 import { findEnabledToolByName, getEnabledToolManifest, type EnabledToolManifest } from "../tools/index.js";
@@ -52,7 +53,7 @@ import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
 } from "../services/skills/conditional.js";
-import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
+import { estimateSystemPromptTokens, getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
 import { resolveProfile } from "../services/api/providers/profile.js";
 import { fileHistoryTrackEdit } from "../session/fileHistory.js";
 import { setToolStatus } from "../state/toolStatusStore.js";
@@ -116,6 +117,7 @@ export type AgenticLoopEvent =
     }
   | { type: "assistant_message"; message: MessageParam }
   | { type: "tool_result_message"; message: MessageParam }
+  | { type: "messages_updated"; messages: MessageParam[] }
   | { type: "turn_complete"; reason: LoopTerminationReason; turnCount: number }
   | { type: "token_warning"; warning: TokenWarningResult }
   | {
@@ -171,11 +173,15 @@ export interface AgenticLoopResult {
   state: LoopState;
   usage: Usage;
   lastCallUsage: Usage;
+  lastCallUsageAnchorIndex: number;
+  lastCallSystemPromptTokens?: number;
   reason: LoopTerminationReason;
 }
 
 export interface QueryParams {
   messages: MessageParam[];
+  /** Account-bound preparation before every model call, including tool continuations. */
+  prepareMessages?: (messages: MessageParam[]) => Promise<MessageParam[]>;
   /** Raw text from this foreground human turn; never derived from transcript roles. */
   directUserTurnText?: string;
   systemPrompt?: string;
@@ -185,6 +191,10 @@ export interface QueryParams {
   model: string;
   /** Resolved profile window. When omitted the loop resolves it itself. */
   contextWindow?: number;
+  /** The last completed request's usage covers history through this assistant. */
+  initialCallUsage?: Usage;
+  initialUsageAnchorIndex?: number;
+  initialSystemPromptTokens?: number;
   abortSignal?: AbortSignal;
   toolContext: ToolContext;
   maxTurns?: number;
@@ -1268,9 +1278,17 @@ export async function* query(
     input_tokens: 0,
     output_tokens: 0,
   };
-  let lastCallUsage: Usage = {
+  let lastCallUsage: Usage = { ...(params.initialCallUsage ?? {
     input_tokens: 0,
     output_tokens: 0,
+  }) };
+  let lastCallUsageAnchorIndex = params.initialUsageAnchorIndex ?? -1;
+  let lastCallSystemPromptTokens = params.initialSystemPromptTokens;
+  const usageSnapshot = () => ({ lastCallUsage, lastCallUsageAnchorIndex, lastCallSystemPromptTokens });
+  const invalidateUsageAnchor = () => {
+    lastCallUsage = { input_tokens: 0, output_tokens: 0 };
+    lastCallUsageAnchorIndex = -1;
+    lastCallSystemPromptTokens = undefined;
   };
 
   // Stop-hook re-entry guard — see the call site below for context.
@@ -1304,15 +1322,33 @@ export async function* query(
     if (params.abortSignal?.aborted) {
       const abortedState = { ...state, aborted: true };
       yield { type: "turn_complete", reason: "aborted", turnCount: state.turnCount };
-      return { state: abortedState, usage: totalUsage, lastCallUsage, reason: "aborted" };
+      return { state: abortedState, usage: totalUsage, ...usageSnapshot(), reason: "aborted" };
     }
 
     const nextTurnCount = state.turnCount + 1;
 
+    if (params.prepareMessages) {
+      try {
+        const prepared = await params.prepareMessages(state.messages);
+        if (prepared !== state.messages) {
+          state = { ...state, messages: prepared };
+          invalidateUsageAnchor();
+          yield { type: "messages_updated", messages: [...state.messages] };
+        }
+      } catch (error) {
+        const reason = params.abortSignal?.aborted ? "aborted" : "model_error";
+        if (reason !== "aborted") yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
+        yield { type: "turn_complete", reason, turnCount: state.turnCount };
+        return { state, usage: totalUsage, ...usageSnapshot(), reason };
+      }
+    }
+    if (params.abortSignal?.aborted) continue;
+
     // Token budget check and recovery before every API call.
     let estimatedTokens = tokenCountWithEstimation(state.messages, {
-      usage: lastCallUsage.input_tokens > 0 ? lastCallUsage : undefined,
-      usageAnchorIndex: lastCallUsage.input_tokens > 0 ? state.messages.length - 1 : undefined,
+      usage: lastCallUsage,
+      usageAnchorIndex: lastCallUsageAnchorIndex,
+      usageSystemPromptTokens: lastCallSystemPromptTokens,
       systemPrompt: params.systemPrompt,
     });
     let warningState = calculateTokenWarningState(
@@ -1339,7 +1375,7 @@ export async function* query(
         });
         if (compactResult.didCompact) {
           state = { ...state, messages: [...compactResult.messages] };
-          lastCallUsage = { input_tokens: 0, output_tokens: 0 };
+          invalidateUsageAnchor();
           consecutiveProactiveCompactFailures = 0;
           yield {
             type: "context_compacted",
@@ -1379,7 +1415,7 @@ export async function* query(
         ),
       };
       yield { type: "turn_complete", reason: "blocking_limit", turnCount: nextTurnCount };
-      return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, lastCallUsage, reason: "blocking_limit" };
+      return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, ...usageSnapshot(), reason: "blocking_limit" };
     }
 
     await requirePlatformScope(0);
@@ -1410,12 +1446,15 @@ export async function* query(
           return {
             state: { ...state, turnCount: nextTurnCount },
             usage: totalUsage,
-            lastCallUsage,
+            ...usageSnapshot(),
             reason: "model_error",
           };
         }
 
         lastCallUsage = { ...streamResult.usage };
+        // The output is not covered by a history index until it is committed.
+        lastCallUsageAnchorIndex = -1;
+        lastCallSystemPromptTokens = params.systemPrompt ? estimateSystemPromptTokens(params.systemPrompt) : 0;
         totalUsage.input_tokens += streamResult.usage.input_tokens;
         totalUsage.output_tokens += streamResult.usage.output_tokens;
         totalUsage.cache_creation_input_tokens =
@@ -1486,6 +1525,7 @@ export async function* query(
               turnCount: state.turnCount,
               aborted: false,
             };
+            invalidateUsageAnchor();
             // Clear any partially-streamed text and reset token override.
             maxOutputTokensOverride = undefined;
             yield {
@@ -1508,7 +1548,7 @@ export async function* query(
       return {
         state: { ...state, turnCount: nextTurnCount },
         usage: totalUsage,
-        lastCallUsage,
+        ...usageSnapshot(),
         reason: "model_error",
       };
     }
@@ -1516,8 +1556,25 @@ export async function* query(
     // ─── Stage 27: max_output_tokens two-phase recovery ──────────────
     if (stopReason === "max_tokens") {
       // Phase 1 — silent escalation: retry the SAME request at 64K without
-      // touching the message history. Fires once per truncation episode.
-      if (maxOutputTokensOverride === undefined) {
+      // touching the message history only when that can raise the real cap.
+      // Official requests are clamped to their route limit; repeating one
+      // with an equal (or smaller) cap just bills the same truncated work.
+      let canEscalate = true;
+      if (maxOutputTokensOverride === undefined && params.model.startsWith(officialModelPrefix)) {
+        try {
+          const profile = await resolveProfile(params.model, params.toolContext.cwd);
+          if (profile.platformService) {
+            const routeCap = profile.maxTokens ?? DEFAULT_MAX_TOKENS;
+            const currentCap = Math.min(routeCap, maxOutputTokensOverride ?? routeCap);
+            canEscalate = Math.min(routeCap, ESCALATED_MAX_TOKENS) > currentCap;
+          }
+        } catch {
+          // An unavailable official binding cannot establish a higher cap.
+          // Keep the partial response and use the normal continuation path.
+          canEscalate = false;
+        }
+      }
+      if (maxOutputTokensOverride === undefined && canEscalate) {
         maxOutputTokensOverride = ESCALATED_MAX_TOKENS;
         yield { type: "stream_restart", reason: "max_tokens_escalation" };
         continue; // turnCount unchanged — same turn, higher cap
@@ -1535,6 +1592,7 @@ export async function* query(
           turnCount: nextTurnCount,
           aborted: false,
         };
+        lastCallUsageAnchorIndex = state.messages.length - 1;
         yield { type: "assistant_message", message: truncatedAssistant };
         yield {
           type: "turn_usage",
@@ -1576,6 +1634,7 @@ export async function* query(
       turnCount: nextTurnCount,
       aborted: false,
     };
+    lastCallUsageAnchorIndex = state.messages.length - 1;
     yield { type: "assistant_message", message: assistantMessage };
     // Per-turn usage event — let downstream consumers (notably
     // runChildAgent → subAgentProgressStore) update live counters
@@ -1635,7 +1694,7 @@ export async function* query(
       }
 
       yield { type: "turn_complete", reason: "completed", turnCount: state.turnCount };
-      return { state, usage: totalUsage, lastCallUsage, reason: "completed" };
+      return { state, usage: totalUsage, ...usageSnapshot(), reason: "completed" };
     }
 
     const { toolResultsMessage, executions, permissionRequests } = await runTools(
@@ -1682,7 +1741,7 @@ export async function* query(
   return {
     state,
     usage: totalUsage,
-    lastCallUsage,
+    ...usageSnapshot(),
     reason: "max_turns",
   };
   } finally {

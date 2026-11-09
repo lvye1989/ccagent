@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { database, type DatabaseReader } from './db';
 import { audit, settings } from './db/schema';
@@ -84,14 +84,27 @@ function legacyCredential(route: CredentialRoute): string | undefined {
 }
 
 /** API-safe projection only. A broken managed record never falls back to a legacy environment Key. */
-export async function routeCredentialStatus(route: CredentialRoute, reader: DatabaseReader = database().db): Promise<CredentialStatus> {
-  const { key, aad } = binding(route), stored = await storedCredential(key, reader);
+function credentialStatus(route: CredentialRoute, aad: Buffer, stored: { value: unknown } | undefined): CredentialStatus {
   if (stored) {
     try { decrypt(stored.value, aad); return { configured: true, source: 'managed' }; }
     catch (error) { if (error instanceof HttpError) return { configured: false, source: 'managed' }; throw error; }
   }
   try { return legacyCredential(route) ? { configured: true, source: 'environment' } : { configured: false, source: 'none' }; }
   catch (error) { if (error instanceof HttpError) return { configured: false, source: 'environment' }; throw error; }
+}
+
+export async function routeCredentialStatus(route: CredentialRoute, reader: DatabaseReader = database().db): Promise<CredentialStatus> {
+  const { key, aad } = binding(route);
+  return credentialStatus(route, aad, await storedCredential(key, reader));
+}
+
+/** One private read for administrator lists/exports; only non-secret booleans/source leave this helper. */
+export async function routeCredentialStatuses(input: readonly CredentialRoute[], reader: DatabaseReader = database().db): Promise<Map<string, CredentialStatus>> {
+  if (!input.length) return new Map();
+  const bound = input.map(route => ({ route, ...binding(route) }));
+  const rows = await reader.select({ key: settings.key, value: settings.value }).from(settings).where(inArray(settings.key, bound.map(value => value.key)));
+  const stored = new Map(rows.map(row => [row.key, row]));
+  return new Map(bound.map(value => [value.route.id, credentialStatus(value.route, value.aad, stored.get(value.key))]));
 }
 
 /** Server-only. Do not include its result in API responses, errors, audit data or logs. */

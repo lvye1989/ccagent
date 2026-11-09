@@ -693,6 +693,14 @@ export function normalizeMessagesForAPI(
 ): MessageParam[] {
   let normalized = messages.slice();
 
+  // DeepSeek continuation state is not a signed Anthropic thinking block.
+  // Drop only that provider state when a conversation switches to Anthropic.
+  normalized = normalized.map((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+    const content = message.content.filter((block) => (block as unknown as { reasoningProvider?: string }).reasoningProvider !== "deepseek");
+    return content.length === message.content.length ? message : { ...message, content: content.length ? content : [{ type: "text" as const, text: "[No message content]" }] };
+  });
+
   // Detect an endpoint switch: signatures from the previous endpoint are
   // invalid on the new one, so strip them this request.
   const endpointChanged =

@@ -182,3 +182,39 @@
   .composer-context { gap: 14px; }
   .model-chip { max-width: 115px; }
 }
+
+/* One outline icon family for the primary navigation and workspace sidebar. */
+.icon-rail .rail-button .nav-line-icon,
+.sidebar .brand-row .nav-line-icon,
+.sidebar .nav-line-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  overflow: visible;
+  pointer-events: none;
+}
+.icon-rail .rail-button.selected .nav-line-icon path { fill: none; }
+.icon-rail .nav-line-icon > *,
+.sidebar .nav-line-icon > * { vector-effect: non-scaling-stroke; }
+.sidebar .workspace-entry-mark,
+.sidebar .workspace-project .sidebar-item-mark {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 0;
+  line-height: 1;
+}
+.sidebar .cloudtv-entry-arrow { display: grid; place-items: center; }
+.sidebar .cloudtv-entry-arrow .nav-line-icon { width: 14px; height: 14px; flex-basis: 14px; }

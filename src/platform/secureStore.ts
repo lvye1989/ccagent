@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { withFileTransaction } from "../utils/fileTransaction.js";
 
 /** Windows credentials are encrypted for the current OS user with DPAPI. */
 async function dpapi(value: string, decrypt: boolean): Promise<string> {
@@ -73,18 +74,35 @@ export class SecureCredentialStore<T> {
     if (Buffer.byteLength(plain) > 64 * 1024) throw new Error("登录凭据过大。");
     const windows = process.platform === "win32";
     const payload = windows ? await dpapi(Buffer.from(plain).toString("base64"), false) : plain;
-    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-    const temporary = this.file + "." + randomUUID() + ".tmp";
-    try {
-      await writeFile(temporary, JSON.stringify({ version: 1, protection: windows ? "windows-dpapi" : "private-file", payload }), { mode: 0o600, flag: "wx" });
-      await rename(temporary, this.file);
-      if (!windows) await chmod(this.file, 0o600);
-    } finally {
-      await unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-    }
+    // Only the short commit is locked; DPAPI and network operations stay outside.
+    await withFileTransaction(this.file, async () => {
+      await regularFile(this.file);
+      const temporary = this.file + "." + randomUUID() + ".tmp";
+      try {
+        await writeFile(temporary, JSON.stringify({ version: 1, protection: windows ? "windows-dpapi" : "private-file", payload }), { mode: 0o600, flag: "wx" });
+        await rename(temporary, this.file);
+        if (!windows) await chmod(this.file, 0o600);
+      } finally {
+        await unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+      }
+    });
   }
 
   async clear(): Promise<void> {
+    await withFileTransaction(this.file, () => this.clearUnlocked());
+  }
+
+  /** A late rejection can remove only the credential it actually checked. */
+  async clearIfRevision(expected: string | null): Promise<boolean> {
+    if (expected === null) return false;
+    return withFileTransaction(this.file, async () => {
+      if (await this.revision() !== expected) return false;
+      await this.clearUnlocked();
+      return true;
+    });
+  }
+
+  private async clearUnlocked(): Promise<void> {
     this.cached = undefined;
     if (await regularFile(this.file)) await unlink(this.file);
   }

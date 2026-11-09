@@ -21,40 +21,41 @@
   <link rel="stylesheet" href="/cloudtv.css">
   <link rel="stylesheet" href="/whiteboard.css">
   <link rel="stylesheet" href="/whiteboard-ai.css">
+  <link rel="stylesheet" href="/whiteboard-design.css">
   <script src="/app.js" type="module"></script>
   <script src="/account-menu.js" type="module"></script>
 </head>
 <body>
   <div class="app-shell">
     <nav class="icon-rail" aria-label="主要导航">
-      <button class="rail-button selected" data-view="tasks" title="首页" aria-label="首页"><svg viewBox="0 0 24 24"><path d="m3.5 10 8.5-7 8.5 7v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M9 21v-7h6v7"/></svg></button>
-      <button class="rail-button" id="rail-new-task" title="新建任务" aria-label="新建任务"><svg viewBox="0 0 24 24"><path d="M20 11.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6.5"/><path d="m13 11 7.5-7.5a2.1 2.1 0 0 1 3 3L16 14l-4 1z"/></svg></button>
-      <button class="rail-button" data-view="schedules" title="定时任务" aria-label="定时任务"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button>
-      <button class="rail-button" data-view="library" title="资料空间" aria-label="资料空间"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5M8 12h8M8 16h7"/></svg></button>
-      <button class="rail-button" data-view="memory" title="记忆管理" aria-label="记忆管理"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6 6 6 0 0 0 0 10h12a6 6 0 0 0 0-10 6 6 0 0 0-6-6z"/><path d="M8 11h8M9 15h6"/></svg></button>
-      <button class="rail-button" data-view="visualization" title="数据可视化" aria-label="数据可视化"><svg viewBox="0 0 24 24"><path d="M4 3v17h17M8 15v-4M12 15V6M16 15V9M20 15v-2"/></svg></button>
-      <button class="rail-button" data-view="cloudtv" title="cloudTV" aria-label="cloudTV"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="14" rx="3"/><path d="m8 2 4 4 4-4m-6 9 5 3-5 3z"/></svg></button>
-      <button class="rail-button" data-view="whiteboard" title="画布 · Excalidraw" aria-label="画布 Excalidraw"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m7 16 2-5 6-5 3 3-6 5-5 2zM9 11l3 3"/></svg></button>
-      <button class="rail-button" data-view="plugins" title="Plugins" aria-label="Plugins"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 8.5h5a2 2 0 0 1 0 4h-4a2 2 0 0 0 0 4h5"/></svg></button>
+      <button class="rail-button selected" data-view="tasks" title="首页" aria-label="首页"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 21v-7h6v7"/></svg></button>
+      <button class="rail-button" id="rail-new-task" title="新建任务" aria-label="新建任务"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="m16 3 5 5-9 9-5 1 1-5zM14 5l5 5"/></svg></button>
+      <button class="rail-button" data-view="schedules" title="定时任务" aria-label="定时任务"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
+      <button class="rail-button" data-view="library" title="资料空间" aria-label="资料空间"><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7zM3 8h18"/></svg></button>
+      <button class="rail-button" data-view="memory" title="记忆管理" aria-label="记忆管理"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3M18 9h3m-3 6h3M10 10h4v4h-4z"/></svg></button>
+      <button class="rail-button" data-view="visualization" title="数据可视化" aria-label="数据可视化"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 3v17h17M8 16v-5m5 5V7m5 9v-3"/></svg></button>
+      <button class="rail-button" data-view="cloudtv" title="cloudTV" aria-label="cloudTV"><img class="cloudtv-mark" src="/cloudtv-logo.jpg" alt=""></button>
+      <button class="rail-button" data-view="whiteboard" title="画布 · Excalidraw" aria-label="画布 Excalidraw"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m7 16 1-4 7-7 4 4-7 7-5 1zM13 7l4 4"/></svg></button>
+      <button class="rail-button" data-view="plugins" title="Plugins" aria-label="Plugins"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 3v4m8-4v4M6 7h12v5a6 6 0 0 1-12 0V7zM12 18v3"/></svg></button>
       <div class="rail-divider"></div>
-      <button class="rail-button" data-view="settings" title="设置" aria-label="设置"><svg viewBox="0 0 24 24"><path d="m9 3-1 3-3 1v4l2 1-2 3 3 3 3-1 1 3h4l1-3 3-1v-4l-2-1 1-3-3-3-3 1-1-3z"/><circle cx="12" cy="12" r="3"/></svg></button>
-      <button class="rail-button" data-view="changes" title="代码更改" aria-label="代码更改"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a7 7 0 0 0 6 7M18 8v3a7 7 0 0 1-6 7"/></svg></button>
-      <button class="rail-button" data-view="about" title="关于工作区" aria-label="关于工作区"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
+      <button class="rail-button" data-view="settings" title="设置" aria-label="设置"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h7m4 0h5M4 17h3m4 0h9"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>
+      <button class="rail-button" data-view="changes" title="代码更改" aria-label="代码更改"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m12-9v2a5 5 0 0 1-5 5H6"/></svg></button>
+      <button class="rail-button" data-view="about" title="关于工作区" aria-label="关于工作区"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></svg></button>
       <div class="rail-spacer"></div>
       <button class="rail-avatar" id="account-menu" type="button" title="账户与退出登录" aria-label="账户与退出登录">C</button>
     </nav>
     <aside class="sidebar" id="sidebar" aria-label="侧边栏">
       <div class="brand-row">
         <button class="brand-switch" id="brand-home" title="返回首页">CCAGENT</button>
-        <button class="icon-button" id="sidebar-toggle" title="收起侧边栏" aria-label="收起侧边栏"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
-        <button class="icon-button sidebar-close" id="sidebar-close" aria-label="关闭侧边栏">×</button>
+        <button class="icon-button" id="sidebar-toggle" title="收起侧边栏" aria-label="收起侧边栏"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+        <button class="icon-button sidebar-close" id="sidebar-close" aria-label="关闭侧边栏"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
       </div>
-      <button class="new-task" id="new-task"><svg viewBox="0 0 24 24"><path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/><path d="m12 12 7.5-7.5a2 2 0 0 1 2.8 2.8L15 15l-4 1z"/></svg><span>新聊天</span></button>
-      <button class="workspace-entry" id="workspace-entry"><span class="workspace-entry-mark">●</span><span>本地工作区</span><span class="workspace-entry-dot" aria-hidden="true"></span></button>
-      <button class="cloudtv-entry" id="cloudtv-entry" type="button" aria-controls="cloudtv-view"><span class="cloudtv-mark" aria-hidden="true">TV</span><span><strong>cloudTV</strong><small>cjai.pro</small></span><span class="cloudtv-entry-arrow" aria-hidden="true">↗</span></button>
-      <a class="cloudtv-entry city-renewal-entry" id="city-renewal-entry" href="https://cloud.cjai.pro/" title="打开彩云间城市更新主页" aria-label="彩云间城市更新（在新标签页打开）" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"><span class="cloudtv-mark city-renewal-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 21V9h6v12M9 21V3h7v18M16 21V12h5v9M1 21h22M5.5 12v1m0 3v1M12 6h1m-1 4h1m-1 4h1m-1 4h1m5-3v1"/></svg></span><span><strong>彩云间城市更新</strong><small>cloud.cjai.pro</small></span><span class="cloudtv-entry-arrow" aria-hidden="true">↗</span></a>
+      <button class="new-task" id="new-task"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="m16 3 5 5-9 9-5 1 1-5zM14 5l5 5"/></svg><span>新聊天</span></button>
+      <button class="workspace-entry" id="workspace-entry"><span class="workspace-entry-mark" aria-hidden="true"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg></span><span>本地工作区</span><span class="workspace-entry-dot" aria-hidden="true"></span></button>
+      <button class="cloudtv-entry" id="cloudtv-entry" type="button" aria-controls="cloudtv-view"><img class="cloudtv-mark" src="/cloudtv-logo.jpg" alt=""><span><strong>cloudTV</strong><small>cjai.pro</small></span><span class="cloudtv-entry-arrow" aria-hidden="true"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 17 17 7M7 7h10v10"/></svg></span></button>
+      <a class="cloudtv-entry city-renewal-entry" id="city-renewal-entry" href="https://cloud.cjai.pro/" title="打开彩云间城市更新主页" aria-label="彩云间城市更新（在新标签页打开）" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"><img class="cloudtv-mark" src="/caiyunjian-logo.jpg" alt=""><span><strong>彩云间城市更新</strong><small>cloud.cjai.pro</small></span><span class="cloudtv-entry-arrow" aria-hidden="true"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 17 17 7M7 7h10v10"/></svg></span></a>
       <div class="section-heading"><span>项目</span></div>
-      <button class="workspace-project" id="workspace-project"><span aria-hidden="true">▱</span><span id="workspace-project-name">当前工作区</span></button>
+      <button class="workspace-project" id="workspace-project"><span class="sidebar-item-mark" aria-hidden="true"><svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7zM3 8h18"/></svg></span><span id="workspace-project-name">当前工作区</span></button>
       <div class="section-heading recent-heading"><span>最近</span><span id="task-count"></span></div>
       <div id="recent-list" class="recent-list"><div class="sidebar-empty">正在载入任务…</div></div>
       <div class="sidebar-bottom">
@@ -113,14 +114,14 @@
                 </div>
               </div>
             </form>
-            <div class="composer-context"><button id="context-workspace" class="context-workspace" type="button"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h6"/></svg><span id="composer-workspace">工作区</span></button><button id="home-file" class="context-file" type="button"><span aria-hidden="true">▧</span>文件</button><button class="context-plugin" id="home-plugins" type="button"><span aria-hidden="true">⊙</span>插件</button><span class="context-computer"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M1 20h22"/></svg>本地运行</span></div>
+            <div class="composer-context"><button id="context-workspace" class="context-workspace" type="button"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h6"/></svg><span id="composer-workspace">工作区</span></button><button id="home-file" class="context-file" type="button"><svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7zM3 8h18"/></svg>文件</button><button class="context-plugin" id="home-plugins" type="button"><span aria-hidden="true">⊙</span>插件</button><span class="context-computer"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M1 20h22"/></svg>本地运行</span></div>
           </div>
         </section>
 
         <section class="thread-view hidden" id="thread-view" aria-label="任务对话">
           <div class="thread-main">
-            <div class="thread-head"><div class="thread-kicker"><span class="thread-status-dot" id="thread-status-dot"></span><span id="thread-status-label">就绪</span></div><h1 id="thread-title">新任务</h1><div class="thread-meta"><span id="thread-workspace">工作区</span><span class="meta-sep">·</span><span id="thread-model">模型</span></div></div>
-            <div id="timeline" class="timeline" aria-live="polite"></div>
+            <div class="thread-head"><h1 id="thread-title" class="sr-only">对话</h1><span id="thread-privacy" class="thread-privacy hidden">临时对话 · 不保存记录</span></div>
+            <div id="timeline" class="timeline" aria-live="polite"><div id="thread-progress" class="thread-progress hidden" role="status" aria-live="polite" aria-atomic="true"><span class="thread-status-dot" id="thread-status-dot" aria-hidden="true"></span><span id="thread-status-label"></span></div></div>
             <div class="thread-bottom">
               <form class="composer thread-composer" id="thread-form">
                 <label class="sr-only" for="thread-input">继续对话</label><textarea id="thread-input" placeholder="继续提问或补充要求…" rows="2"></textarea>

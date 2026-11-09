@@ -8,7 +8,7 @@ import { HttpError } from './http';
 
 const lifetimeMs = 15 * 60 * 1000;
 const uploadLifetimeMs = 2 * 60 * 1000;
-const limits = { request: 32 * 1024 * 1024, image: 25 * 1024 * 1024, audio: 50 * 1024 * 1024 } as const;
+const limits = { request: 32 * 1024 * 1024, image: 30 * 1024 * 1024, audio: 50 * 1024 * 1024 } as const;
 const types = {
   request: ['application/json'], image: ['image/png', 'image/jpeg', 'image/webp'], audio: ['audio/wav', 'audio/mpeg', 'audio/webm', 'audio/ogg', 'audio/mp4'],
 } as const;

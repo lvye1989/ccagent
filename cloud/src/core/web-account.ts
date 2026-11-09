@@ -2,6 +2,7 @@ import { headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 import { permissionsFor, requireSession } from './auth';
 import { HttpError } from './http';
+import { formatMicroYuan } from './money-display';
 
 export async function webAccount(permission?: string) {
   let current;
@@ -16,7 +17,6 @@ export async function webAccount(permission?: string) {
   return { ...current, permissions };
 }
 export function cny(value: bigint | string) {
-  const amount = BigInt(value), absolute = amount < 0n ? -amount : amount;
-  const decimals = (absolute % 1000000n).toString().padStart(6, '0').replace(/0+$/, '').padEnd(2, '0');
-  return `${amount < 0n ? '-' : ''}¥${(absolute / 1000000n).toLocaleString('zh-CN')}.${decimals}`;
+  const formatted = formatMicroYuan(value);
+  return formatted.startsWith('-') ? `-¥${formatted.slice(1)}` : `¥${formatted}`;
 }

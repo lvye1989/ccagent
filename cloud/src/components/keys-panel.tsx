@@ -1,18 +1,17 @@
 'use client';
 import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import { formatMicroYuan, parseYuanToMicro } from '@/core/money-display';
 
 type KeyEntry = { id: string; name: string; prefix: string; enabled: boolean; limit: string | null; spent: string; frozen: string; createdAt: string; revokedAt: string | null };
-function amount(value: string) { const micro = BigInt(value); return `¥${micro / 1000000n}.${(micro % 1000000n).toString().padStart(6, '0').replace(/0+$/, '').padEnd(2, '0')}`; }
+function amount(value: string) { return `¥${formatMicroYuan(value)}`; }
 export function KeysPanel({ keys }: { keys: KeyEntry[] }) {
   const router = useRouter(), [creating, setCreating] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [secret, setSecret] = useState(''), [copied, setCopied] = useState(false);
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setSecret(''); setCopied(false);
     const data = new FormData(event.currentTarget), text = String(data.get('limit') || '').trim();
-    if (text && !/^(?:0|[1-9]\d{0,8})(?:\.\d{1,2})?$/.test(text)) { setError('额度请输入人民币金额，最多两位小数。'); setBusy(false); return; }
-    const [whole, fraction = ''] = text.split('.');
-    const limit = text ? ((BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'))) * 10000n).toString() : null;
     try {
+      const limit = text ? parseYuanToMicro(text, { maxMicro: 9_000_000_000_000_000n }) : null;
       const response = await fetch('/api/account/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: String(data.get('name') || '').trim(), limit }) });
       const result = await response.json() as { secret?: string; message?: string };
       if (!response.ok || !result.secret) throw new Error(result.message || '创建失败，请重试。');

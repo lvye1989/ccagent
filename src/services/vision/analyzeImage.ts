@@ -34,9 +34,13 @@ function envVisionProfile(): ModelProfile | null {
   };
 }
 
-export async function resolveVisionProfile(cwd: string): Promise<ModelProfile | null> {
+export async function resolveVisionProfile(cwd: string, officialOnly = false): Promise<ModelProfile | null> {
   const official = await officialRole("image");
-  if (official) return (await loadProfiles(cwd)).profiles["ccagent:" + official.id] ?? null;
+  if (official) {
+    if (official.limits.maxImages < 1) throw new Error("所选官方读图路由未开放图片输入，请在官方服务中重新选择。");
+    return (await loadProfiles(cwd)).profiles["ccagent:" + official.id] ?? null;
+  }
+  if (officialOnly) throw new Error("官方读图辅助服务未启用或未配置；不会改用个人供应商 Key。");
   const fromEnv = envVisionProfile();
   if (fromEnv) return fromEnv;
   const roles = await loadModelRoles(cwd);
@@ -52,12 +56,15 @@ export async function analyzeImageFile(
   cwd: string,
   signal?: AbortSignal,
   maxTokens = 2_000,
+  officialOnly = false,
 ): Promise<{ model: string; text: string }> {
-  const profile = await resolveVisionProfile(cwd);
+  signal?.throwIfAborted();
+  const profile = await resolveVisionProfile(cwd, officialOnly);
   if (!profile) {
     throw new Error("No Qwen/vision profile is configured (QWEN_* / DASHSCOPE_* or modelRoles.image).");
   }
   const image = await readImageAsBlock(filePath);
+  signal?.throwIfAborted();
   if (!image.ok) throw new Error(image.error);
   const messages = [{
     role: "user",

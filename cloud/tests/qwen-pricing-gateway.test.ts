@@ -39,7 +39,7 @@ test('Qwen tiered gateway persists exact charges streams fallback snapshots and 
     for (const table of [tables.user, tables.session, tables.account, tables.userRoles, tables.wallets, tables.ledger, tables.apiKeys, tables.routes, tables.prices, tables.orders, tables.reservations, tables.audit, tables.blobs]) {
       const name = getTableConfig(table).name;
       const [row] = await fixture.owner.unsafe<{ digest: string }[]>(`select md5(coalesce(jsonb_agg(to_jsonb(t) order by to_jsonb(t)::text)::text,'[]')) as digest from "${originalSchema}"."${name}" t${name === 'audit' ? ' where t.id = ANY($1::text[])' : ''}`,
-        name === 'audit' ? [fixture.owner.array(baselineAuditIds, 25)] : []);
+        name === 'audit' ? [baselineAuditIds] : []);
       result[name] = row!.digest;
     }
     return result;
@@ -132,7 +132,7 @@ test('Qwen tiered gateway persists exact charges streams fallback snapshots and 
         const [added] = await fixture.owner.unsafe<{ total: string; scheduled: string; unexpected: string }[]>(`select count(*)::text as total,
           count(*) filter (where action='system.maintenance' and object_id='scheduled' and result='success')::text as scheduled,
           count(*) filter (where not (action='system.maintenance' and object_id='scheduled' and result='success'))::text as unexpected
-          from "${originalSchema}"."audit" where not (id = ANY($1::text[]))`, [fixture.owner.array(baselineAuditIds, 25)]);
+          from "${originalSchema}"."audit" where not (id = ANY($1::text[]))`, [baselineAuditIds]);
         assert.equal(added!.unexpected, '0', 'Only successful scheduled maintenance may append development audit rows during this isolated test');
         console.log(JSON.stringify({ developmentTablesChecked: Object.keys(originalFingerprint).length, developmentRowsUnchanged: true,
           baselineAuditRows: baselineAuditIds.length, newAuditRows: Number(added!.total), newScheduledMaintenanceRows: Number(added!.scheduled), unexpectedNewAuditRows: Number(added!.unexpected) }));

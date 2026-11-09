@@ -42,6 +42,31 @@ function iconFor(name, compact = false) {
   return icon;
 }
 
+const agentIcons = {
+  "general-purpose": { color: "#6467bd", paths: ["M7 7h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-7a3 3 0 0 1 3-3Z", "M12 7V3m-2 0h4M8 12h.01M16 12h.01M8 16h8M4 12H2m18 0h2"] },
+  explore: { color: "#27836e", paths: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "m16 8-3 5-5 3 3-5 5-3Z"] },
+  workfriend: { color: "#ad7a2e", paths: ["M9 7V4h6v3M5 7h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z", "M3 12a21 21 0 0 0 18 0M12 11v4"] },
+  rhino_agent: { color: "#3d79ac", paths: ["m12 3 9 5v8l-9 5-9-5V8l9-5Z", "m3 8 9 5 9-5M12 13v8"] },
+  image_reader: { color: "#9562b3", paths: ["M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z", "m4 16 5-5 4 4 3-3 4 4M15.5 8h.01"] },
+};
+
+function agentIcon(name) {
+  const key = String(name || "").toLowerCase();
+  const definition = Object.hasOwn(agentIcons, key) ? agentIcons[key] : { ...agentIcons["general-purpose"], color: accentFor(String(name || "Agent")) };
+  const icon = node("span", "agent-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.style.setProperty("--agent-color", definition.color);
+  icon.style.setProperty("--agent-background", `${definition.color}12`);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [attribute, value] of Object.entries({ viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.7", "stroke-linecap": "round", "stroke-linejoin": "round", focusable: "false" })) svg.setAttribute(attribute, value);
+  for (const data of definition.paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", data); svg.append(path);
+  }
+  icon.append(svg);
+  return icon;
+}
+
 export function createPluginUI({ api, toast, navigate, editAgent }) {
   const state = { view: "plugins", tab: "public", data: null, apps: [], skills: [], skillsEnabled: true, agents: [], mcp: null, query: "", loading: false };
   const apps = createAppCatalog({ api, toast, dialog, closeDialog, state, render: () => { renderSidebar(); renderCatalog(); } });
@@ -453,7 +478,9 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
       .some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(query)));
     if (!agents.length) return empty(list, query ? "没有匹配的 Agent。" : "没有可用的 Agent。");
     for (const agent of agents) {
-      const card = node("article", "skill-card");
+      const card = node("article", `skill-card agent-card${agent.enabled ? "" : " agent-disabled"}`);
+      const heading = node("div", "agent-card-head");
+      heading.append(agentIcon(agent.name), node("strong", "", agent.name));
       const footer = node("div", "skill-card-footer");
       const origin = agent.pluginId ? `插件 ${agent.pluginId}` : ({ "built-in": "内置", user: "用户", project: "当前项目" })[agent.source] || agent.source;
       footer.append(node("span", "", `${origin} · ${agent.enabled ? "已启用" : "已关闭"}`));
@@ -473,7 +500,7 @@ export function createPluginUI({ api, toast, navigate, editAgent }) {
       }, "skill-use-button"));
       const description = node("p", "", agent.description);
       const details = node("small", "agent-details", [agent.model ? `模型：${agent.model}` : "", agent.tools?.length ? `工具：${agent.tools.join("、")}` : ""].filter(Boolean).join(" · "));
-      card.append(node("strong", "", agent.name), description, details, footer);
+      card.append(heading, description, details, footer);
       list.append(card);
     }
   }

@@ -12,9 +12,9 @@ const previous = new Map(globals.map(key => [key, Object.getOwnPropertyDescripto
 for (const key of globals.slice(0, 11)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: key === 'window' ? browser : browser[key] });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true; let refreshes = 0; globalThis.__gatewayRefresh = () => { refreshes++; };
 const React = requireCloud('react'), { act } = React, { createRoot } = requireCloud('react-dom/client');
-const compiled = await build({ absWorkingDir: cloud, stdin: { contents: "export { GatewayPanel } from './src/components/gateway-panel'; export { GatewayConfigPanel } from './src/components/gateway-config-panel';", resolveDir: cloud, loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'], plugins: [{ name: 'local-router', setup(builder) { builder.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: 'router', namespace: 'synthetic' })); builder.onLoad({ filter: /.*/, namespace: 'synthetic' }, () => ({ contents: 'export const useRouter = () => ({refresh: () => globalThis.__gatewayRefresh()});', loader: 'js' })); } }] });
+const compiled = await build({ absWorkingDir: cloud, stdin: { contents: "export { GatewayPanel } from './src/components/gateway-panel'; export { GatewayPriceEditor } from './src/components/gateway-price-editor'; export { GatewayConfigPanel } from './src/components/gateway-config-panel';", resolveDir: cloud, loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'], plugins: [{ name: 'local-router', setup(builder) { builder.onResolve({ filter: /^next\/navigation$/ }, () => ({ path: 'router', namespace: 'synthetic' })); builder.onLoad({ filter: /.*/, namespace: 'synthetic' }, () => ({ contents: 'export const useRouter = () => ({refresh: () => globalThis.__gatewayRefresh()});', loader: 'js' })); } }] });
 const module = { exports: {} }; new Function('require', 'module', 'exports', compiled.outputFiles[0].text)(requireCloud, module, module.exports);
-const { GatewayPanel, GatewayConfigPanel } = module.exports;
+const { GatewayPanel, GatewayPriceEditor, GatewayConfigPanel } = module.exports;
 const reply = (value, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => structuredClone(value) });
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const calls = [], roots = new Set(); let fetcher;
@@ -41,8 +41,8 @@ async function render(Component, props = {}) {
   await act(async () => { root.render(React.createElement(React.StrictMode, null, React.createElement(Component, props))); await tick(); });
   return { host, async unmount() { await act(async () => { root.unmount(); }); roots.delete(root); host.remove(); } };
 }
-async function load(id, root) { await change(control('已有路由编号', root), id); await submit(control('已有路由编号', root).form); await until(() => control('路由编号', root).value === id && !control('路由编号', root).disabled, 'Route loaded: ' + id); }
-const base = id => ({ id, name: id, service: 'chat', protocol: 'openai-responses', provider: 'deepseek', baseUrl: 'https://api.example.com/v1', upstreamModel: 'synthetic-model', credentialEnv: 'CCAGENT_PROVIDER_LEGACY_' + id.toUpperCase(), enabled: false, timeoutMs: 120000, retries: 0, options: { contextWindow: 4096, maxOutputTokens: 128, maxImages: 2, fallbackEnabled: false, fallbackRouteId: null } });
+async function load(id, root) { await change(control('已有路由编号', root), id); await submit(control('已有路由编号', root).form); await until(() => control('路由编号', root).value === id && !button('载入配置', root).disabled, 'Route loaded: ' + id); }
+const base = id => ({ id, name: id, service: 'chat', protocol: 'openai-responses', provider: 'deepseek', baseUrl: 'https://api.example.com/v1', upstreamModel: 'synthetic-model', credentialEnv: 'CCAGENT_PROVIDER_LEGACY_' + id.toUpperCase(), enabled: false, timeoutMs: 120000, retries: 0, updatedAt: '2026-11-08T00:00:00.000Z', options: { contextWindow: 4096, maxOutputTokens: 128, maxImages: 2, fallbackEnabled: false, fallbackRouteId: null } });
 const price = version => ({ version, currency: 'CNY', sourceUrl: 'https://example.com/prices', components: { definition: { rates: [{ metric: 'input_tokens', price: '1', unitQuantity: '1000000' }, { metric: 'cached_input_tokens', price: '0', unitQuantity: '1000000' }, { metric: 'output_tokens', price: '2', unitQuantity: '1000000' }], tariff: { kind: 'constant' } } } });
 const routes = new Map(['a', 'b'].map(id => [id, { route: base(id), routeFingerprint: id.repeat(64), latestPrice: price(1), credentialStatus: { configured: true, source: 'environment' }, ready: false }]));
 let rejectSave = false, holdSave = null, holdLoad = null, holdPrice = null;
@@ -52,12 +52,14 @@ fetcher = call => {
     const id = url.searchParams.get('id'); if (holdLoad) return holdLoad(call);
     return routes.has(id) ? reply(routes.get(id)) : reply({ message: 'Not found' }, 404);
   }
-  if (url.pathname === '/api/admin/routes' && call.options.method === 'PUT') {
+  if (url.pathname === '/api/admin/routes' && ['PUT', 'POST'].includes(call.options.method)) {
     if (holdSave) return holdSave(call);
     if (rejectSave) return reply({ message: 'Never render ' + call.body.apiKey, code: 'INVALID_INPUT' }, 400);
-    const { apiKey, removeApiKey, ...route } = call.body, old = routes.get(route.id);
+    const { apiKey, removeApiKey, expectedUpdatedAt, ...route } = call.body, old = routes.get(route.id);
+    if (call.options.method === 'PUT') assert.equal(expectedUpdatedAt, old.route.updatedAt);
     const credentialStatus = removeApiKey ? { configured: false, source: 'none' } : apiKey ? { configured: true, source: 'managed' } : old?.credentialStatus || { configured: false, source: 'none' };
     route.enabled = removeApiKey ? false : route.enabled;
+    route.updatedAt = '2026-11-08T01:00:00.000Z';
     routes.set(route.id, { route, routeFingerprint: old?.routeFingerprint || 'c'.repeat(64), latestPrice: old?.latestPrice || null, credentialStatus, ready: route.enabled });
     return reply({ saved: true, enabled: route.enabled, repricingRequired: false });
   }
@@ -142,6 +144,63 @@ try {
   await submit(button('追加成本版本', compatibility.host).form); assert.equal(routes.get('a').latestPrice.components.definition.tariff.kind, 'qwen-input-tiers');
   await load('a', compatibility.host); assert.equal(control('缓存输入单价（CNY）', compatibility.host).value, '0'); assert.equal(control('思考输出单价（CNY）', compatibility.host).value, '8'); await compatibility.unmount();
 
+  const legacyPriceEditor = await render(GatewayPriceEditor, { routeId: 'legacy-caller', expectedRouteFingerprint: 'e'.repeat(64), initial: null, onSaved() {} });
+  assert.deepEqual([...legacyPriceEditor.host.querySelectorAll('select')].filter(item => item.closest('label')?.textContent.startsWith('计价项目')).map(item => item.value), ['input_tokens', 'cached_input_tokens', 'output_tokens'], 'Existing callers without service props retain token defaults');
+  await legacyPriceEditor.unmount();
+  const serviceVariants = [
+    { id: 'cost-tavily', service: 'search', protocol: 'tavily', upstreamModel: 'synthetic-search', metrics: ['search_credits'], unit: '1' },
+    { id: 'cost-bocha', service: 'search', protocol: 'bocha', upstreamModel: 'synthetic-search', metrics: ['requests'], unit: '1' },
+    { id: 'cost-image', service: 'image', protocol: 'openai-images', upstreamModel: 'synthetic-image', metrics: ['output_images'], unit: '1' },
+    { id: 'cost-dashscope-image', service: 'image', protocol: 'dashscope-images', upstreamModel: 'synthetic-image', metrics: ['output_images'], unit: '1' },
+    { id: 'cost-qwen-image', service: 'image', protocol: 'dashscope-images', upstreamModel: 'qwen-image-3.0', metrics: ['input_images', 'output_images'], unit: '1' },
+    { id: 'cost-voice', service: 'voice', protocol: 'dashscope-tts', upstreamModel: 'qwen-audio-3.1-tts-flash', metrics: ['input_tokens', 'output_tokens'], unit: '1000000' },
+    { id: 'cost-decision', service: 'decision', protocol: 'jev-decisions', upstreamModel: 'synthetic-decision', metrics: ['input_tokens', 'output_tokens'], unit: '1000000' },
+    { id: 'cost-chat', service: 'chat', protocol: 'openai-chat', upstreamModel: 'synthetic-chat', metrics: ['input_tokens', 'cached_input_tokens', 'output_tokens'], unit: '1000000' },
+    { id: 'cost-vision', service: 'vision', protocol: 'openai-chat', upstreamModel: 'synthetic-vision', metrics: ['input_tokens', 'cached_input_tokens', 'output_tokens'], unit: '1000000' },
+  ];
+  for (const variant of serviceVariants) routes.set(variant.id, { route: { ...base(variant.id), service: variant.service, protocol: variant.protocol, upstreamModel: variant.upstreamModel }, routeFingerprint: 'd'.repeat(64), latestPrice: null, credentialStatus: { configured: false, source: 'none' }, ready: false });
+  const serviceEditor = await render(GatewayPanel, { mode: 'routes', rows: serviceVariants.map(({ id }) => ({ id })) }), serviceRoot = serviceEditor.host;
+  for (const variant of serviceVariants) {
+    await load(variant.id, serviceRoot);
+    assert.deepEqual(variant.metrics.map((_, index) => control('计价项目', serviceRoot, index).value), variant.metrics, 'Unconfigured service uses matching usage metrics: ' + variant.id);
+    assert.equal([...serviceRoot.querySelectorAll('label')].filter(item => item.textContent.startsWith('计价项目')).length, variant.metrics.length);
+    for (let index = 0; index < variant.metrics.length; index++) {
+      assert.equal(control('计价单位数量', serviceRoot, index).value, variant.unit);
+      assert.equal(control('公开单价（CNY）', serviceRoot, index).value, '', 'Unconfigured costs are never invented');
+    }
+    if (variant.service === 'image') {
+      assert.equal(control('开放状态', serviceRoot).disabled, true);
+      assert(![...serviceRoot.querySelectorAll('button')].some(item => item.textContent === '准备连接检测'));
+      for (let index = 0; index < variant.metrics.length; index++) assert.equal(control('计价项目', serviceRoot, index).selectedOptions[0].textContent, variant.metrics[index] === 'input_images' ? '输入图片（张）' : '输出图片（张）');
+      assert.match(serviceRoot.textContent, /执行、计费及连接检测待接入/);
+    }
+    if (variant.service === 'voice') assert.match(serviceRoot.textContent, /输入 Token 对应文本，输出 Token 对应合成音频/);
+    // Distinct synthetic prices and nondefault units exercise loading supplier-cost metadata without making provider calls.
+    const expectedRates = variant.metrics.map((metric, index) => ({ metric, price: variant.upstreamModel === 'qwen-image-3.0' ? index ? '0.18' : '0.02' : index ? '0' : '0.075', unitQuantity: variant.service === 'image' || variant.service === 'search' ? '1' : '10000' }));
+    for (let index = 0; index < expectedRates.length; index++) {
+      await change(control('公开单价（CNY）', serviceRoot, index), expectedRates[index].price);
+      await change(control('计价单位数量', serviceRoot, index), expectedRates[index].unitQuantity);
+    }
+    await change(control('供应商公开价格来源', serviceRoot), 'https://example.invalid/synthetic-cost-metadata');
+    await submit(button('追加成本版本', serviceRoot).form);
+    assert.deepEqual(routes.get(variant.id).latestPrice.components.definition.rates, expectedRates);
+    assert.equal(routes.get(variant.id).route.enabled, false, 'Saving a cost never opens a route');
+    if (variant.service === 'image') assert.match(serviceRoot.textContent, /仅保存图像成本配置/);
+    await load(variant.id, serviceRoot);
+    for (let index = 0; index < expectedRates.length; index++) {
+      assert.equal(control('计价项目', serviceRoot, index).value, expectedRates[index].metric);
+      assert.equal(control('公开单价（CNY）', serviceRoot, index).value, expectedRates[index].price);
+      assert.equal(control('计价单位数量', serviceRoot, index).value, expectedRates[index].unitQuantity, 'Saved units take priority over service defaults');
+    }
+    assert.equal(control('供应商公开价格来源', serviceRoot).value, 'https://example.invalid/synthetic-cost-metadata');
+  }
+  await serviceEditor.unmount();
+  const standaloneImage = await render(GatewayPanel, { mode: 'prices', rows: [{ route_id: 'cost-image' }] }); await load('cost-image', standaloneImage.host);
+  assert.equal(control('计价项目', standaloneImage.host).value, 'output_images');
+  assert.equal(control('公开单价（CNY）', standaloneImage.host).value, '0.075');
+  assert.equal(button('追加成本版本', standaloneImage.host).disabled, false);
+  assert.match(standaloneImage.host.textContent, /当前不可开放/); await standaloneImage.unmount();
+
   let config = { allowedHosts: ['api.example.com'], trustedHosts: ['api.deepseek.com'], version: 2, usdCny: '7.2', fxVersion: 3, fxReadonly: false, fxSource: 'environment' }, conflict = false;
   fetcher = call => {
     assert.equal(call.url, '/api/admin/routes/config');
@@ -165,7 +224,7 @@ try {
   await change(control('额外允许的上游域名', configRoot), 'api.example.com'); await submit(button('保存域名与汇率', configRoot).form); assert.equal(Object.hasOwn(calls.at(-1).body, 'usdCny'), false); assert.equal(Object.hasOwn(calls.at(-1).body, 'fxVersion'), false); await settings.unmount();
   assert.equal(browser.localStorage.length, 1); assert.equal(browser.localStorage.getItem('existing-draft'), 'preserve'); assert.equal(browser.location.href.includes(secret), false);
   assert.equal(calls.every(call => !call.url.includes(secret)), true); assert.equal(calls.some(call => call.url.includes('/routes/test')), false);
-  console.log('Gateway React DOM checks passed: bound password-only Key lifecycle, identity/load/new/failure/unmount cleanup, duplicate and late requests, preserve/remove, inline cost→enable, standalone/Qwen compatibility, host/FX versions/conflict/readonly. Synthetic transport only; no upstream/build/deployment.');
+  console.log('Gateway React DOM checks passed: bound password-only Key lifecycle, identity/load/new/failure/unmount cleanup, duplicate and late requests, preserve/remove, inline cost→enable, service-specific defaults, image input/output cost metadata, saved price/unit/zero reload, legacy/standalone/Qwen compatibility, host/FX versions/conflict/readonly. Synthetic transport only; no upstream/build/deployment.');
 } finally {
   for (const root of roots) await act(async () => { root.unmount(); });
   await browser.happyDOM.close();

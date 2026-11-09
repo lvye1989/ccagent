@@ -18,6 +18,11 @@ export async function ownedCallStatus(request: Request, requestId: string) {
     .where(and(eq(blobs.id, record.resultId), eq(blobs.userId, user.id), eq(blobs.status, 'ready'), gt(blobs.expiresAt, new Date()))).limit(1) : [];
   const { resultId: _privateId, ...publicRecord } = record;
   const usage = record.usage && typeof record.usage === 'object' ? record.usage as Record<string, unknown> : {};
+  // Supplier task handles and finalization leases remain server-private.
+  if (usage.imageTask && typeof usage.imageTask === 'object') {
+    const task = usage.imageTask as Record<string, unknown>;
+    publicRecord.usage = { ...usage, imageTask: { status: task.status, ...(typeof task.code === 'string' ? { code: task.code } : {}) } };
+  }
   return { ...publicRecord, executedRouteId: typeof usage.executedRouteId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,79}$/.test(usage.executedRouteId) ? usage.executedRouteId
     : typeof usage.attempts === 'number' && Number.isSafeInteger(usage.attempts) && usage.attempts > 0 ? record.routeId : null,
     fallbackUsed: usage.fallbackUsed === true, resultAvailable: Boolean(result), resultExpiresAt: result?.expiresAt ?? null };

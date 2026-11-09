@@ -54,6 +54,8 @@ export interface ToolContext {
   cwd: string;
   /** Runtime-only closed tool scope. An empty scope enables no tools; never fall back to the global registry. */
   scopedTools?: readonly Tool[];
+  /** Runtime-only constraint: a text-only official route must not use a personal vision key. */
+  officialVisionOnly?: boolean;
   /** Abort signal for cancellation */
   abortSignal?: AbortSignal;
   /** Callback to switch permission mode at runtime (set by QueryEngine). */
@@ -68,8 +70,10 @@ export interface ToolContext {
    * `agentId ?? getSessionId()` lookup pattern in `appState.todos[todoKey]`.
    */
   sessionId?: string;
-  /** Web frontend's visible side panel. Omitted by the CLI. */
-  openUrlInWebPanel?: (url: string, signal?: AbortSignal) => Promise<boolean>;
+  /** Root conversation receives nested background task completions. */
+  notificationOwnerSessionId?: string;
+  /** Web conversations must never consume legacy unowned notifications. */
+  strictNotificationScope?: boolean;
   /** Temporary Web chat: suppress durable conversation memory. */
   temporaryChat?: boolean;
   /** Web conversation preference; undefined retains the CLI's global default. */

@@ -6,14 +6,15 @@ import { audit, routes, settings } from './db/schema';
 import { publishedRoute } from './catalog';
 import { lockAdministration } from './database-locks';
 import { HttpError } from './http';
+import { activeRouteCondition } from './route-lifecycle';
 
-export const serviceKinds = ['chat', 'vision', 'decision', 'search', 'voice'] as const;
+export const serviceKinds = ['chat', 'vision', 'decision', 'search', 'voice', 'image'] as const;
 export type ServiceKind = typeof serviceKinds[number];
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/).nullable();
-export const defaultRoutes = z.object({ chat: routeId, vision: routeId, decision: routeId, search: routeId, voice: routeId }).strict();
+export const defaultRoutes = z.object({ chat: routeId, vision: routeId, decision: routeId, search: routeId, voice: routeId, image: routeId.default(null) }).strict();
 export const serviceDefaultsInput = z.object({ version: z.number().int().min(0), routes: defaultRoutes }).strict();
 const key = 'service_default_routes';
-const emptyRoutes = () => ({ chat: null, vision: null, decision: null, search: null, voice: null });
+const emptyRoutes = () => ({ chat: null, vision: null, decision: null, search: null, voice: null, image: null });
 
 export async function readServiceDefaults(reader: DatabaseReader = database().db) {
   const [stored] = await reader.select().from(settings).where(eq(settings.key, key)).limit(1);
@@ -31,7 +32,7 @@ export function availableServiceDefaults(configured: z.infer<typeof defaultRoute
 export async function adminServiceDefaults() {
   return database().db.transaction(async tx => {
     const current = await readServiceDefaults(tx);
-    const candidates = await tx.select({ id: routes.id, name: routes.name, service: routes.service, enabled: routes.enabled }).from(routes).orderBy(asc(routes.name), asc(routes.id));
+    const candidates = await tx.select({ id: routes.id, name: routes.name, service: routes.service, enabled: routes.enabled }).from(routes).where(activeRouteCondition()).orderBy(asc(routes.name), asc(routes.id));
     const choices: { id: string; name: string; service: string; ready: boolean }[] = [];
     for (const route of candidates) {
       let ready = false;

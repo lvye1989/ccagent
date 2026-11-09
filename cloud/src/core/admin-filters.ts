@@ -8,7 +8,7 @@ type Choice = readonly [string, string];
 type Definition = { fields: readonly AdminFilterKey[]; statuses?: readonly Choice[]; placeholder: string };
 const dates = ['from', 'to'] as const;
 const callStatuses = [['held', '已授权'], ['pending', '待对账'], ['settled', '已结算'], ['released', '已释放']] as const;
-export const serviceChoices: readonly Choice[] = [['chat', '主模型'], ['vision', '视觉读图'], ['decision', 'Jev 决策'], ['search', '搜索'], ['voice', '语音']];
+export const serviceChoices: readonly Choice[] = [['chat', '主模型'], ['vision', '视觉读图'], ['decision', 'Jev 决策'], ['search', '搜索'], ['voice', '语音'], ['image', '图像生成']];
 const definitions: Record<AdminSection, Definition> = {
   users: { fields: ['q', 'user', ...dates, 'status'], statuses: [['active', '正常'], ['disabled', '已禁用']], placeholder: '按邮箱搜索' },
   roles: { fields: ['q', ...dates], placeholder: '按角色名称搜索' },

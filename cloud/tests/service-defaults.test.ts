@@ -19,7 +19,7 @@ test('platform default routes use real authorization, catalog readiness, atomic 
   const { routeInput, saveRoute, createPriceVersion, priceDefinition } = await import('../src/core/catalog');
   const { availableModels } = await import('../src/core/gateway');
   const { createKey } = await import('../src/core/keys');
-  const adminId = randomUUID(), userId = randomUUID(), empty = { chat: null, vision: null, decision: null, search: null, voice: null };
+  const adminId = randomUUID(), userId = randomUUID(), empty = { chat: null, vision: null, decision: null, search: null, voice: null, image: null };
   const users = [adminId, userId].map(id => ({ id, name: 'Defaults fixture', email: `${id}@example.invalid`, emailVerified: true }));
   const password = randomBytes(24).toString('base64url'); let adminCookie = '', userCookie = '';
   const request = (method = 'GET', value?: unknown, cookie = adminCookie, origin = process.env.AUTH_URL!) => new Request(`${process.env.AUTH_URL}/api/admin/routes/defaults`,

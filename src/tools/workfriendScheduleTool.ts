@@ -19,7 +19,7 @@ export const workfriendScheduleTool: Tool = {
     "Create, list, or cancel a persistent Workfriend end-of-day check-in. " +
     "For schedule, collect today's work, current office mood, and local workday end first. " +
     "The reminder fires one hour before workday_end (or promptly if already inside the last hour), " +
-    "survives app restarts, and starts the progress/bottleneck questionnaire in the active CCAGENT session.",
+    "survives app restarts, and starts the progress/bottleneck questionnaire in its originating CCAGENT conversation.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -67,6 +67,7 @@ export const workfriendScheduleTool: Tool = {
           assessmentSummary: typeof input.assessment_summary === "string" ? input.assessment_summary : undefined,
           contextSummary: typeof input.context_summary === "string" ? input.context_summary : undefined,
           cwd: context.cwd,
+          ownerSessionId: context.notificationOwnerSessionId ?? context.sessionId,
         });
         return {
           content: [

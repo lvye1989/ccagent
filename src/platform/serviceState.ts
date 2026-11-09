@@ -9,26 +9,28 @@ import { SecureCredentialStore } from "./secureStore.js";
 import { priceDefinition } from "./pricingDefinition.js";
 
 export const platformKeyPattern = /^ccagent_[A-Za-z0-9_-]{43}$/;
-export const officialRoles = ["main", "image", "decision", "search", "voice"] as const;
+export const officialRoles = ["main", "image", "decision", "search", "voice", "imageGeneration"] as const;
 export type OfficialRole = typeof officialRoles[number];
 export const officialModelPrefix = "ccagent:";
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/);
-const rolesSchema = z.object({ main: routeId.optional(), image: routeId.optional(), decision: routeId.optional(), search: routeId.optional(), voice: routeId.optional() }).strict();
+const rolesSchema = z.object({ main: routeId.optional(), image: routeId.optional(), decision: routeId.optional(), search: routeId.optional(), voice: routeId.optional(), imageGeneration: routeId.optional() }).strict();
 export const serviceRouteSchema = z.object({
   id: routeId, name: z.string().min(1).max(100),
-  service: z.enum(["chat", "vision", "decision", "search", "voice"]),
-  protocol: z.enum(["openai-chat", "openai-responses", "jev-decisions", "tavily", "bocha", "dashscope-tts"]),
+  service: z.enum(["chat", "vision", "decision", "search", "voice", "image"]),
+  protocol: z.enum(["openai-chat", "openai-responses", "jev-decisions", "tavily", "bocha", "dashscope-tts", "kie-images"]),
+  upstreamModel: z.string().max(200).optional(),
+  provider: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,49}$/).optional(),
   pricing: z.object({ currency: z.enum(["CNY", "USD"]), definition: priceDefinition, markup: z.literal("1.3"),
     usdCny: z.string().nullable().optional(), version: z.number().int().positive(), sourceUrl: z.url().refine(value => new URL(value).protocol === "https:"), fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }),
   limits: z.object({ contextWindow: z.number().int().min(128).max(4000000), maxOutputTokens: z.number().int().min(1).max(1000000), maxImages: z.number().int().min(0).max(600), fallbackRouteId: routeId.nullable().optional(), fallbackEnabled: z.boolean().default(false) }),
 });
 export type OfficialServiceRoute = z.infer<typeof serviceRouteSchema>;
 export type ServiceRoles = z.infer<typeof rolesSchema>;
-const catalogDefaultsSchema = z.object({ chat: routeId.nullable().optional(), vision: routeId.nullable().optional(), decision: routeId.nullable().optional(), search: routeId.nullable().optional(), voice: routeId.nullable().optional() }).strict();
+const catalogDefaultsSchema = z.object({ chat: routeId.nullable().optional(), vision: routeId.nullable().optional(), decision: routeId.nullable().optional(), search: routeId.nullable().optional(), voice: routeId.nullable().optional(), image: routeId.nullable().optional() }).strict();
 export function catalogDefaultRoles(input: unknown, routes: OfficialServiceRoute[]): ServiceRoles {
   if (input === undefined) return {}; // Older services may omit recommendations entirely.
   const defaults = catalogDefaultsSchema.parse(input);
-  const mapping = { main: 'chat', image: 'vision', decision: 'decision', search: 'search', voice: 'voice' } as const;
+  const mapping = { main: 'chat', image: 'vision', decision: 'decision', search: 'search', voice: 'voice', imageGeneration: 'image' } as const;
   return validateServiceRoles(Object.fromEntries(officialRoles.filter(role => defaults[mapping[role]]).map(role => [role, defaults[mapping[role]]])), routes);
 }
 export const serviceConfigurationSchema = z.object({
@@ -96,7 +98,7 @@ export async function readServiceBinding(): Promise<{ configuration: ServiceConf
 
 export function validateServiceRoles(roles: unknown, routes: OfficialServiceRoute[]): ServiceRoles {
   const result = rolesSchema.parse(roles);
-  const services = { main: "chat", image: "vision", decision: "decision", search: "search", voice: "voice" } as const;
+  const services = { main: "chat", image: "vision", decision: "decision", search: "search", voice: "voice", imageGeneration: "image" } as const;
   for (const role of officialRoles) {
     if (result[role] && !routes.some(route => route.id === result[role] && route.service === services[role])) throw new Error("选择的官方服务已不可用，请刷新服务目录。");
   }

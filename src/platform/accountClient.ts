@@ -148,6 +148,10 @@ function validateCredentials(email: string, password: string): void {
   }
 }
 
+// Share only a verification that is still in flight for this exact native store.
+// Never retain a successful login or permission result between requests.
+const sessionChecks = new WeakMap<SecureCredentialStore<StoredAccountSession>, Map<string, Promise<AccountSession>>>();
+
 /** Shared native client: passwords are sent once and never saved. */
 export class PlatformAccountClient {
   readonly origin: string;
@@ -238,7 +242,7 @@ export class PlatformAccountClient {
     method?: string; headers?: Record<string, string>; body?: Uint8Array; signal?: AbortSignal;
     timeoutMs?: number; maximumBytes?: number;
   } = {}): Promise<Response> {
-    if (!/^\/(?:v1\/(?:models|responses|chat\/completions|decisions|search|voice)|api\/(?:account\/(?:me|wallet|calls\/[A-Za-z0-9][A-Za-z0-9._:-]{0,199})|files(?:\/[a-f0-9-]{36})?))$/.test(route)) {
+    if (!/^\/(?:v1\/(?:models|responses|chat\/completions|decisions|search|voice|images\/tasks(?:\/[a-f0-9-]{36})?)|api\/(?:account\/(?:me|wallet|calls\/[A-Za-z0-9][A-Za-z0-9._:-]{0,199})|files(?:\/[a-f0-9-]{36})?))$/.test(route)) {
       throw new AccountError("官方服务接口无效。", "invalid_route");
     }
     // Each destination endpoint performs authoritative session validation. Avoid
@@ -291,22 +295,37 @@ export class PlatformAccountClient {
   }
 
   async requireSession(): Promise<AccountSession> {
+    const revision = await this.store.revision();
     const stored = await this.store.read();
     if (!stored) throw new AccountError("请先使用邮箱和密码登录 CCAGENT。", "unauthorized", 401);
     if (typeof stored.origin !== "string" || typeof stored.cookie !== "string" || !validCookie(stored.cookie) ||
         !stored.user || typeof stored.user.id !== "string" || !stored.user.id) {
-      await this.store.clear();
+      await this.store.clearIfRevision(revision);
       throw new AccountError("登录凭据格式错误，请重新登录。", "unauthorized", 401);
     }
     if (stored.origin !== this.origin) throw new AccountError("服务地址已改变，请明确新服务地址后重新登录。", "origin_changed");
-    try {
-      const session = await this.resolveSession(stored.cookie);
-      if (session.user.id !== stored.user.id) throw new AccountError("登录账户已改变，请重新登录。", "unauthorized", 401);
-      return session;
-    } catch (error) {
-      if (error instanceof AccountError && [401, 403].includes(error.status)) await this.store.clear();
-      throw error;
+    if (await this.store.revision() !== revision) throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    let checks = sessionChecks.get(this.store);
+    if (!checks) { checks = new Map(); sessionChecks.set(this.store, checks); }
+    const key = JSON.stringify([this.origin, revision, stored.user.id, stored.cookie]);
+    let check = checks.get(key);
+    if (!check) {
+      check = (async () => {
+        try {
+          const session = await this.resolveSession(stored.cookie);
+          if (session.user.id !== stored.user.id) throw new AccountError("登录账户已改变，请重新登录。", "unauthorized", 401);
+          // An old response must not restore a login replaced or cleared in flight.
+          if (await this.store.revision() !== revision) throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+          return session;
+        } catch (error) {
+          // A rejected old credential must never clear a newer login.
+          if (error instanceof AccountError && [401, 403].includes(error.status)) await this.store.clearIfRevision(revision);
+          throw error;
+        }
+      })().finally(() => { checks.delete(key); });
+      checks.set(key, check);
     }
+    return structuredClone(await check);
   }
 
   async signOut(): Promise<{ remoteRevoked: boolean }> {

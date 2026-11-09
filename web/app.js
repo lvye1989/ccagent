@@ -12,10 +12,19 @@ import { createComposerTools } from "./composer-tools.js";
 import { createVisualizationUI } from "./visualization.js";
 import { createCloudTVUI } from "./cloudtv.js";
 import { createWhiteboardUI } from "./whiteboard.js";
+import { folderIcon } from "./app-icons.js";
 
 const $ = (id) => document.getElementById(id);
-const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), storageWarningShown: false };
+const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), execution: null, executionNode: null, executionTimer: null, serverClockOffset: 0, storageWarningShown: false };
 let toastTimer;
+let sessionListRequest = 0;
+let openingSession = null;
+const deletingSessions = new Set();
+const STREAM_FLUSH_MS = 30;
+const MAX_STREAM_BUFFER_CHARS = 32 * 1024;
+let streamTextNode = null;
+let streamPendingText = "";
+let streamFlushTimer = null;
 
 function toast(message) {
   const node = $("toast");
@@ -70,13 +79,57 @@ function renderSessions() {
     list.append(empty);
   }
   for (const session of state.sessions) {
+    const row = document.createElement("div");
+    row.className = "recent-row";
+    const title = taskTitle(session);
     const button = document.createElement("button");
+    button.type = "button";
     button.className = `recent-item${session.sessionId === state.sessionId ? " active" : ""}`;
-    button.textContent = taskTitle(session);
-    button.title = `${taskTitle(session)} · ${relativeTime(session.updatedAt)}`;
+    button.textContent = title;
+    button.title = `${title} · ${relativeTime(session.updatedAt)}`;
+    button.disabled = deletingSessions.has(session.sessionId);
     button.addEventListener("click", () => openSession(session.sessionId));
-    list.append(button);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "recent-delete";
+    remove.title = "删除记录";
+    remove.setAttribute("aria-label", `删除记录：${title}`);
+    remove.disabled = button.disabled;
+    remove.innerHTML = '<svg class="nav-line-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg>';
+    remove.addEventListener("click", () => void deleteRecentSession(session, remove, button));
+    row.append(button, remove);
+    list.append(row);
   }
+}
+
+async function deleteRecentSession(session, remove, button) {
+  const id = session.sessionId, workspace = state.workspace;
+  if (deletingSessions.has(id) || !window.confirm(`永久删除「${taskTitle(session)}」的聊天记录？此操作无法撤销。`)) return;
+  deletingSessions.add(id);
+  remove.disabled = button.disabled = true;
+  try {
+    await api(`/api/memory/sessions/${id}`, { method: "POST", body: JSON.stringify({ action: "delete", workspace }) });
+    if (state.workspace === workspace) await onSessionDeleted(id);
+    toast("已删除聊天记录");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    deletingSessions.delete(id);
+    if (remove.isConnected) remove.disabled = button.disabled = false;
+    else if (state.sessions.some((item) => item.sessionId === id)) renderSessions();
+  }
+}
+
+async function onSessionDeleted(id) {
+  sessionListRequest++;
+  state.sessions = state.sessions.filter((item) => item.sessionId !== id);
+  if (openingSession?.id === id) openingSession = null;
+  if (state.sessionId === id) {
+    if (state.view === "thread") await newTask();
+    else clearOpenSession();
+  }
+  renderSessions();
+  void refreshSessions();
 }
 
 function renderChanges() {
@@ -245,11 +298,21 @@ function messageText(message) {
   return (message.content || []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
 }
 
+function appendTimeline(row) {
+  $("timeline").insertBefore(row, $("thread-progress"));
+}
+
 function addUser(text) {
   const node = document.createElement("div");
   node.className = "message user";
   node.textContent = text;
-  $("timeline").append(node);
+  appendTimeline(node);
+  if (state.execution && !state.execution.completedAt) {
+    ensureExecutionNode(node);
+    // An SSE connection can snapshot turn_started before the user message is persisted.
+    // Keep that turn's activity header below its own user bubble when the message arrives.
+    node.after(state.executionNode);
+  }
   scrollTimeline();
 }
 
@@ -475,7 +538,7 @@ async function appendArtifactSummary(body, paths) {
   const heading = document.createElement("strong"); heading.textContent = "成果文件"; section.append(heading);
   for (const file of found) {
     const button = document.createElement("button"); button.type = "button"; button.className = "assistant-artifact";
-    const icon = document.createElement("span"); icon.textContent = "▧";
+    const icon = folderIcon();
     const name = document.createElement("span"); name.textContent = file.name;
     const kind = document.createElement("small"); kind.textContent = file.kind;
     button.append(icon, name, kind);
@@ -500,44 +563,170 @@ function addAssistant(text) {
   const actions = document.createElement("div"); actions.className = "assistant-actions";
   const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "复制回复"; copy.title = "复制完整回复";
   copy.addEventListener("click", () => void copyReply(text, copy)); actions.append(copy);
-  content.append(body, actions); row.append(avatar, content); $("timeline").append(row);
+  content.append(body, actions); row.append(avatar, content); appendTimeline(row);
   if (artifacts.size) void appendArtifactSummary(body, artifacts);
   scrollTimeline();
 }
 
-function addTool(id, name, status = "执行中") {
+const toolLabels = {
+  Read: "读取文件", ReadImage: "查看图片", Glob: "查找文件", Grep: "搜索文件内容",
+  Write: "写入文件", Edit: "编辑文件", MultiEdit: "编辑文件", Bash: "执行命令",
+  WebSearch: "搜索网页", WebFetch: "读取网页", Task: "调用 Agent", Agent: "调用 Agent",
+  WhiteboardRead: "读取画布", WhiteboardDraw: "绘制画布", AskUserQuestion: "询问用户",
+};
+
+function toolLabel(name) { return toolLabels[name] || "调用工具"; }
+
+function toolIcon(name) {
+  if (["Read", "Write", "Edit", "MultiEdit"].includes(name)) return folderIcon();
+  const paths = /Search|Grep|Glob|Fetch/.test(name)
+    ? ["M21 21l-4.3-4.3", "M19 10.5a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0"]
+    : /Bash|Shell|Terminal/.test(name) ? ["M4 5h16v14H4z", "m8 9 3 3-3 3", "M13 15h3"]
+    : /Edit|Write|Draw/.test(name) ? ["m15 5 4 4", "m4 16-1 5 5-1L21 7a2.8 2.8 0 0 0-4-4Z"]
+    : ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z", "M14 2v6h6", "M8 13h8", "M8 17h5"];
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of paths) {
+    const path = document.createElementNS(svg.namespaceURI, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function addTool(id, name, status = "调用中") {
+  if (id && state.toolNodes.has(id)) return state.toolNodes.get(id);
   const row = document.createElement("div");
   row.className = "tool-card";
   const icon = document.createElement("span");
   icon.className = "tool-icon";
-  icon.textContent = "⌘";
+  icon.append(toolIcon(name));
   const title = document.createElement("strong");
-  title.textContent = name;
+  title.textContent = toolLabel(name);
+  const toolName = document.createElement("span");
+  toolName.className = "tool-name";
+  toolName.textContent = name === "BrowserSearch" ? "Jev Browser Search" : name;
   const stateLabel = document.createElement("span");
   stateLabel.className = "tool-state";
   stateLabel.textContent = status;
-  row.append(icon, title, stateLabel);
-  $("timeline").append(row);
+  row.append(icon, title, toolName, stateLabel);
+  appendTimeline(row);
   if (id) state.toolNodes.set(id, row);
   scrollTimeline();
+  return row;
+}
+
+function updateTool(tool) {
+  const status = tool.completedAt ? tool.isError ? "失败" : "已完成"
+    : state.execution?.completedAt ? state.execution.reason === "aborted" ? "已停止" : "未完成" : "调用中";
+  const row = addTool(tool.id, tool.name, status);
+  row.querySelector(".tool-state").textContent = status;
+  row.classList.toggle("error", Boolean(tool.isError) || status === "未完成");
+  row.classList.toggle("tool-running", status === "调用中");
+}
+
+function executionTime(value) {
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function elapsedLabel(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}小时 ${Math.floor(seconds % 3600 / 60)}分 ${seconds % 60}秒`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}分 ${seconds % 60}秒`;
+  return `${seconds}秒`;
+}
+
+function ensureExecutionNode(after) {
+  if (!state.execution || state.executionNode) return;
+  const row = document.createElement("div");
+  row.className = "turn-activity";
+  row.setAttribute("aria-live", "off");
+  row.dataset.turnId = state.execution.id;
+  const elapsed = document.createElement("span");
+  elapsed.className = "turn-elapsed";
+  const status = document.createElement("span");
+  status.className = "turn-outcome";
+  row.append(elapsed, status);
+  if (after) after.after(row);
+  else appendTimeline(row);
+  state.executionNode = row;
+  syncExecutionClock();
+}
+
+function syncExecutionClock() {
+  const execution = state.execution;
+  if (!execution || !state.executionNode) return;
+  const start = executionTime(execution.startedAt);
+  const end = executionTime(execution.completedAt);
+  state.executionNode.querySelector(".turn-elapsed").textContent = start === null ? "本轮执行" : `已处理 ${elapsedLabel((end ?? Date.now() + state.serverClockOffset) - start)}`;
+  const terminal = { aborted: "已停止", completed: "已完成", max_turns: "已达轮数上限" };
+  state.executionNode.querySelector(".turn-outcome").textContent = execution.completedAt ? terminal[execution.reason] || "执行失败" : "执行中";
+  state.executionNode.classList.toggle("turn-active", !execution.completedAt);
+}
+
+function restoreExecution(execution, serverTime) {
+  clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  state.execution = execution ? { ...execution, tools: [...(execution.tools || [])] } : null;
+  const server = executionTime(serverTime);
+  if (server !== null) state.serverClockOffset = server - Date.now();
+  if (!execution) {
+    if (state.executionNode?.classList.contains("turn-active")) {
+      state.executionNode.classList.remove("turn-active");
+      state.executionNode.querySelector(".turn-outcome").textContent = "未完成";
+    }
+    state.executionNode = null;
+    return;
+  }
+  if (state.executionNode?.dataset.turnId !== execution.id) state.executionNode = null;
+  if (!state.executionNode) ensureExecutionNode([...$("timeline").querySelectorAll(".message.user")].at(-1));
+  for (const tool of state.execution.tools) updateTool(tool);
+  syncExecutionClock();
+  if (!execution.completedAt) state.executionTimer = setInterval(syncExecutionClock, 1000);
 }
 
 function addNotice(message, error = false) {
   const row = document.createElement("div");
   row.className = `notice-line${error ? " error" : ""}`;
   row.textContent = message;
-  $("timeline").append(row);
+  appendTimeline(row);
   scrollTimeline();
 }
 
 function scrollTimeline() { const timeline = $("timeline"); timeline.scrollTop = timeline.scrollHeight; }
 
 function clearStream() {
+  clearTimeout(streamFlushTimer);
+  streamFlushTimer = null;
+  streamPendingText = "";
+  streamTextNode = null;
   state.streamNode?.remove();
   state.streamNode = null;
+  syncThreadProgress();
+}
+
+function flushStream() {
+  clearTimeout(streamFlushTimer);
+  streamFlushTimer = null;
+  if (!streamPendingText || !streamTextNode || !state.streamNode) return;
+  streamTextNode.appendData(streamPendingText);
+  streamPendingText = "";
+  syncThreadProgress();
+  scrollTimeline();
+}
+
+function finishStream() {
+  // An interrupted stream may have no assistant_message event. Preserve all
+  // received text, including the final unpainted batch, as a normal reply.
+  const text = (streamTextNode?.data || "") + streamPendingText;
+  clearStream();
+  if (text) addAssistant(text);
 }
 
 function appendStream(text) {
+  if (!text) return;
   if (!state.streamNode) {
     const row = document.createElement("div");
     row.className = "message assistant streaming";
@@ -546,21 +735,41 @@ function appendStream(text) {
     avatar.textContent = "✦";
     const body = document.createElement("div");
     body.className = "assistant-body";
+    streamTextNode = document.createTextNode(text);
+    body.append(streamTextNode);
     row.append(avatar, body);
-    $("timeline").append(row);
+    appendTimeline(row);
     state.streamNode = row;
+    // Show the first chunk immediately; coalesce later chunks like the CLI.
+    syncThreadProgress();
+    scrollTimeline();
+  } else {
+    // Keep the deferred buffer bounded even when timers are throttled in a
+    // background tab. Large individual chunks can go straight into the node.
+    if (streamPendingText.length + text.length >= MAX_STREAM_BUFFER_CHARS) flushStream();
+    if (text.length >= MAX_STREAM_BUFFER_CHARS) {
+      streamTextNode.appendData(text);
+      syncThreadProgress();
+      scrollTimeline();
+    } else streamPendingText += text;
   }
-  state.streamNode.querySelector(".assistant-body").textContent += text;
-  scrollTimeline();
+  if (streamFlushTimer === null) streamFlushTimer = setTimeout(flushStream, STREAM_FLUSH_MS);
 }
 
 function renderStoredMessages(messages) {
-  $("timeline").replaceChildren();
+  clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  state.execution = null;
+  state.executionNode = null;
+  $("timeline").replaceChildren($("thread-progress"));
   clearStream();
   state.toolNodes.clear();
   for (const message of messages) {
     if (message.role === "user") {
-      if (typeof message.content === "string" && message.content.trim()) addUser(message.content);
+      if (typeof message.content === "string" && message.content.trim()) {
+        state.toolNodes.clear();
+        addUser(message.content);
+      }
       continue;
     }
     if (message.role !== "assistant") continue;
@@ -574,14 +783,28 @@ function renderStoredMessages(messages) {
   }
 }
 
+function syncThreadProgress() {
+  const terminal = { model_error: "本轮失败，可重试", error: "本轮失败，可重试", aborted: "已停止", max_turns: "已达执行轮数上限", incomplete: "上次执行未完成，可重试" };
+  const activeTools = (state.execution?.tools || []).filter((tool) => !tool.completedAt);
+  const tools = activeTools.slice(0, 2).map((tool) => `${toolLabel(tool.name)} · ${tool.name}`).join("、");
+  const current = state.pending ? state.pending.kind === "question" ? "等待你的回答" : "等待你的批准"
+    : activeTools.length ? `正在调用：${tools}${activeTools.length > 2 ? ` 等 ${activeTools.length} 项工具` : ""}`
+    : state.streamNode ? "正在生成回复" : state.execution?.tools.length ? "正在整理结果" : "Thinking";
+  const text = state.busy ? current : terminal[state.lastTurnReason] || "";
+  $("thread-status-label").textContent = text;
+  $("thread-progress").classList.toggle("hidden", !text);
+  $("thread-status-dot").classList.toggle("busy", state.busy && Boolean(text));
+  $("thread-status-dot").classList.toggle("hidden", !state.busy);
+  syncExecutionClock();
+}
+
 function setBusy(busy) {
   if (busy) voiceUI.stopDictation();
   state.busy = busy;
   customizationUI.syncBusy(busy);
   if (busy) state.lastTurnReason = null;
-  const terminal = { model_error: "本轮失败，可重试", aborted: "已停止", max_turns: "已达执行轮数上限", incomplete: "上次执行未完成，可重试" };
-  $("thread-status-label").textContent = busy ? "正在执行" : terminal[state.lastTurnReason] || "就绪";
-  $("thread-status-dot").classList.toggle("busy", busy);
+  syncThreadProgress();
+  if (busy) scrollTimeline();
   $("stop-button").classList.toggle("hidden", !busy);
   $("thread-send").disabled = busy;
   $("thread-input").disabled = busy;
@@ -621,7 +844,6 @@ function syncModelSelectors() {
     }
     select.disabled = !state.availableModels.some((item) => item.available) || (id === "thread-model-select" && state.busy);
   }
-  $("thread-model").textContent = modelLabel(state.model);
   $("about-model").textContent = modelLabel(state.model || state.selectedModel);
   renderActivity();
 }
@@ -629,11 +851,12 @@ function syncModelSelectors() {
 async function refreshModels() {
   try {
     const data = await api("/api/models");
-    state.availableModels = data.models;
-    if (!state.selectedModel || !data.models.some((item) => item.id === state.selectedModel && item.available)) {
+    state.availableModels = data.models.filter((item) => item.mainModelSelectable !== false);
+    if (!state.selectedModel || !state.availableModels.some((item) => item.id === state.selectedModel && item.available)) {
       const requested = state.selectedModel || data.defaultModel;
-      state.selectedModel = requested?.startsWith("ccagent:") ? requested : data.models.find((item) => item.id === data.defaultModel && item.available)?.id
-        || data.models.find((item) => item.available)?.id || "";
+      const auxiliary = data.models.some((item) => item.id === requested && item.mainModelSelectable === false);
+      state.selectedModel = requested?.startsWith("ccagent:") && !auxiliary ? requested : state.availableModels.find((item) => item.id === data.defaultModel && item.available)?.id
+        || state.availableModels.find((item) => item.available)?.id || "";
     }
     syncModelSelectors();
   } catch (error) { toast(`无法载入模型：${error.message}`); }
@@ -641,6 +864,7 @@ async function refreshModels() {
 
 function showInteraction(pending) {
   state.pending = pending;
+  syncThreadProgress();
   const request = pending.request;
   const question = pending.kind === "question";
   $("interaction-eyebrow").textContent = question ? "需要你的回答" : "需要你的批准";
@@ -695,6 +919,7 @@ async function answerInteraction(allow) {
   try {
     await api(`/api/sessions/${state.sessionId}/respond`, { method: "POST", body: JSON.stringify(body) });
     state.pending = null;
+    syncThreadProgress();
     $("interaction-overlay").classList.add("hidden");
   } catch (error) { toast(error.message); }
 }
@@ -703,7 +928,20 @@ function handleEvent(event) {
   voiceUI.handleEvent(event);
   browserUI.handleEvent(event);
   switch (event.type) {
-    case "turn_started": setBusy(true); break;
+    case "session_deleted":
+      if (!deletingSessions.has(state.sessionId)) void onSessionDeleted(state.sessionId);
+      break;
+    case "turn_started":
+      finishStream();
+      clearInterval(state.executionTimer);
+      state.toolNodes.clear();
+      state.executionNode = null;
+      state.execution = { id: event.turnId || `live-${state.sessionId}`, startedAt: event.startedAt || event.timestamp, completedAt: null, reason: null, tools: [] };
+      state.pending = null;
+      ensureExecutionNode();
+      state.executionTimer = setInterval(syncExecutionClock, 1000);
+      setBusy(true);
+      break;
     case "user": addUser(event.text); break;
     case "text": appendStream(event.text); break;
     case "stream_restart": clearStream(); break;
@@ -711,45 +949,90 @@ function handleEvent(event) {
     case "model": state.model = event.model; syncModelSelectors(); break;
     case "mode": state.mode = event.mode; $("thread-mode-select").value = event.mode; break;
     case "team": customizationUI.setSessionTeam(event.team); break;
-    case "tool_start": addTool(event.id, event.name); break;
+    case "tool_start": {
+      if (state.execution && !state.execution.tools.some((tool) => tool.id === event.id)) state.execution.tools.push({ id: event.id, name: event.name, startedAt: event.timestamp, completedAt: null });
+      const tool = state.execution?.tools.find((tool) => tool.id === event.id);
+      if (tool) updateTool(tool);
+      else addTool(event.id, event.name);
+      syncThreadProgress();
+      break;
+    }
     case "tool_done": {
+      const tool = state.execution?.tools.find((tool) => tool.id === event.id);
+      if (tool) { tool.completedAt = event.timestamp || new Date(Date.now() + state.serverClockOffset).toISOString(); tool.isError = event.isError; updateTool(tool); }
       const row = state.toolNodes.get(event.id);
       if (row) {
         row.querySelector(".tool-state").textContent = event.isError ? "失败" : "已完成";
         if (event.isError) row.classList.add("error");
       }
+      syncThreadProgress();
       break;
     }
     case "notice": addNotice(event.message, event.tone === "error"); break;
     case "interaction": showInteraction(event); break;
-    case "interaction_resolved": state.pending = null; $("interaction-overlay").classList.add("hidden"); break;
+    case "interaction_resolved": state.pending = null; $("interaction-overlay").classList.add("hidden"); syncThreadProgress(); break;
+    case "execution_state":
+      if (event.execution && state.execution && event.execution.id !== state.execution.id) {
+        // The bounded replay buffer may omit a newer turn's start and user message.
+        void openSession(state.sessionId);
+        break;
+      }
+      restoreExecution(event.execution, event.serverTime);
+      if (event.execution) { state.lastTurnReason = event.execution.reason; setBusy(!event.execution.completedAt); }
+      else {
+        if (state.busy) {
+          state.lastTurnReason = "incomplete";
+          state.pending = null;
+          $("interaction-overlay").classList.add("hidden");
+          for (const row of state.toolNodes.values()) {
+            if (!["执行中", "调用中"].includes(row.querySelector(".tool-state").textContent)) continue;
+            row.querySelector(".tool-state").textContent = "未完成";
+            row.classList.remove("tool-running");
+            row.classList.add("error");
+          }
+        }
+        setBusy(false);
+      }
+      break;
     case "turn_complete":
       state.lastTurnReason = event.reason;
+      clearInterval(state.executionTimer);
+      state.executionTimer = null;
+      if (state.execution) {
+        state.execution.completedAt = event.completedAt || event.timestamp || new Date(Date.now() + state.serverClockOffset).toISOString();
+        state.execution.reason = event.reason;
+        for (const tool of state.execution.tools) updateTool(tool);
+      }
       for (const row of state.toolNodes.values()) {
         const label = row.querySelector(".tool-state");
-        if (label?.textContent === "执行中") { label.textContent = event.reason === "aborted" ? "已停止" : "未完成"; row.classList.add("error"); }
+        if (["执行中", "调用中"].includes(label?.textContent)) { label.textContent = event.reason === "aborted" ? "已停止" : "未完成"; row.classList.add("error"); row.classList.remove("tool-running"); }
       }
-      clearStream(); setBusy(false); refreshSessions(); refreshChanges();
+      state.pending = null;
+      $("interaction-overlay").classList.add("hidden");
+      finishStream(); setBusy(false); refreshSessions(); refreshChanges();
       if (event.reason && event.reason !== "completed") toast(`任务结束：${event.reason}`);
       break;
   }
 }
 
-async function openSession(id) {
+async function openSession(id, initialSnapshot) {
+  if (deletingSessions.has(id)) return false;
+  const request = { id };
+  openingSession = request;
   try {
     if (state.view === "whiteboard" && !await whiteboardUI.beforeLeave()) return false;
+    if (openingSession !== request || deletingSessions.has(id)) return false;
     if (state.sessionId !== id) voiceUI.stop();
     state.source?.close();
     state.source = null;
-    const data = await api(`/api/sessions/${id}`);
+    // Creation already returns the authoritative initial state. Reuse only a
+    // matching snapshot; ordinary navigation/reconnect still reloads state.
+    const data = initialSnapshot?.sessionId === id ? initialSnapshot : await api(`/api/sessions/${id}`);
+    if (openingSession !== request || deletingSessions.has(id)) return false;
     state.sessionId = id;
     state.temporary = data.temporary === true;
     $("thread-view").classList.toggle("temporary-thread", state.temporary);
-    const entry = state.sessions.find((item) => item.sessionId === id);
-    const firstUser = data.messages.find((message) => message.role === "user" && typeof message.content === "string");
-    const title = entry ? taskTitle(entry) : (firstUser?.content || "新任务").slice(0, 80);
-    $("thread-title").textContent = state.temporary ? `临时对话 · ${title}` : title;
-    $("thread-workspace").textContent = shortWorkspace();
+    $("thread-privacy").classList.toggle("hidden", !state.temporary);
     $("thread-composer-workspace").textContent = shortWorkspace();
     state.model = data.model;
     state.mode = data.mode;
@@ -757,13 +1040,17 @@ async function openSession(id) {
     $("thread-mode-select").value = data.mode;
     syncModelSelectors();
     browserUI.restore(data.browserUrl);
+    state.pending = null;
+    $("interaction-overlay").classList.add("hidden");
     renderStoredMessages(data.messages);
+    restoreExecution(data.execution, data.serverTime);
     for (const notice of data.recentNotices || []) addNotice(notice.message, notice.tone === "error");
     const lastContent = data.messages.at(-1)?.content;
     state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || (block.type === "tool_result" && block.is_error)) ? "incomplete" : null);
     setBusy(data.busy);
     if (data.pending) showInteraction(data.pending);
     if (!await setView("thread")) return false;
+    if (openingSession !== request || deletingSessions.has(id)) return false;
     history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
     renderSessions();
     state.source = new EventSource(`/api/sessions/${id}/events?lastEventId=${data.lastEventId || 0}`);
@@ -775,9 +1062,12 @@ async function openSession(id) {
     $("thread-input").focus();
     return true;
   } catch (error) {
+    if (openingSession !== request) return false;
     if (new URLSearchParams(location.search).get("session") === id) history.replaceState(null, "", "/");
     toast(error.message);
     return false;
+  } finally {
+    if (openingSession === request) openingSession = null;
   }
 }
 
@@ -790,7 +1080,7 @@ async function submit(text, mode) {
     if (!state.sessionId || state.view !== "thread") {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ mode, model: state.selectedModel || undefined, team: $("home-team").value }) });
       state.sessionId = created.sessionId;
-      if (!(await openSession(created.sessionId))) return false;
+      if (!(await openSession(created.sessionId, created.snapshot))) return false;
     }
     await api(`/api/sessions/${state.sessionId}/messages`, { method: "POST", body: JSON.stringify({ text: input }) });
     composerTools.clear(inputId);
@@ -810,8 +1100,10 @@ async function submit(text, mode) {
 }
 
 async function refreshSessions() {
+  const request = ++sessionListRequest;
   try {
     const data = await api("/api/bootstrap");
+    if (request !== sessionListRequest) return;
     state.sessions = data.sessions;
     if (state.workspace && state.workspace !== data.workspace) composerTools.workspaceChanged();
     state.workspace = data.workspace;
@@ -847,18 +1139,29 @@ async function refreshChanges() {
   catch (error) { toast(error.message); }
 }
 
-async function newTask() {
-  if (state.view === "whiteboard" && !await setView("tasks")) return false;
+function clearOpenSession() {
+  clearStream();
   composerTools.clear("thread-input");
   voiceUI.stop();
   browserUI.restore(null);
   state.source?.close();
   state.source = null;
+  clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  state.execution = null;
+  state.executionNode = null;
   state.sessionId = null;
   state.temporary = false;
-  history.replaceState(null, "", "/");
   state.pending = null;
   $("interaction-overlay").classList.add("hidden");
+  setBusy(false);
+}
+
+async function newTask() {
+  if (state.view === "whiteboard" && !await setView("tasks")) return false;
+  openingSession = null;
+  clearOpenSession();
+  history.replaceState(null, "", "/");
   renderSessions();
   setView("tasks");
   $("home-input").focus();
@@ -888,7 +1191,7 @@ function installHandlers() {
   $("temporary-chat").addEventListener("click", async () => {
     try {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ temporary: true, mode: "default", model: state.selectedModel || undefined }) });
-      await openSession(created.sessionId);
+      await openSession(created.sessionId, created.snapshot);
     } catch (error) { toast(error.message); }
   });
   $("new-task").addEventListener("click", newTask);
@@ -973,11 +1276,11 @@ function installHandlers() {
 const pluginUI = createPluginUI({ api, toast, navigate: setView, editAgent: (agent) => customizationUI.agentEditor(agent) });
 $("feature-schedule-list").append($("schedule-list"));
 const libraryUI = createLibraryUI({ api, toast });
-const memoryUI = createMemoryUI({ api, toast, onDelete: (id) => { if (state.sessionId === id) { state.source?.close(); state.sessionId = null; } void refreshSessions(); } });
+const memoryUI = createMemoryUI({ api, toast, onDelete: onSessionDeleted });
 const schedulesUI = createSchedulesUI({ api, toast, openSession: (id) => void openSession(id) });
 const browserUI = createBrowserPanel({ api, toast, getSessionId: () => state.sessionId });
 const voiceUI = createVoiceUI({ submit, getBusy: () => state.busy, getMode: () => $(state.view === "thread" ? "thread-mode-select" : "home-mode").value, toast });
-const customizationUI = createCustomizationUI({ api, toast, navigate: setView, getModel: () => state.selectedModel || state.model, getSessionId: () => state.sessionId, getBusy: () => state.busy, changed: async (resource) => {
+const customizationUI = createCustomizationUI({ api, toast, navigate: setView, getWorkspace: () => state.workspace, getModel: () => state.selectedModel || state.model, getSessionId: () => state.sessionId, getBusy: () => state.busy, changed: async (resource) => {
   if (["agents", "skills", "mcp"].includes(resource)) await pluginUI.open(resource);
   else if (resource === "models") { state.selectedModel = ""; await refreshModels(); }
   else if (resource === "session" && state.sessionId) await openSession(state.sessionId);

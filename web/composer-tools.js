@@ -1,3 +1,5 @@
+import { folderIcon } from "./app-icons.js";
+
 export function createComposerTools({ api, toast, getWorkspace, getInput, files, chooseWorkspace, navigate }) {
   const $ = (id) => document.getElementById(id);
   const menu = document.createElement("div");
@@ -32,11 +34,14 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
     function chip(label, remove, open) {
       const wrap = document.createElement("span"); wrap.className = "composer-attachment";
       const name = document.createElement("button"); name.type = "button"; name.textContent = label; name.title = label;
-      if (open) name.addEventListener("click", open); else name.disabled = true;
+      if (open) {
+        name.prepend(folderIcon());
+        name.addEventListener("click", open);
+      } else name.disabled = true;
       const close = document.createElement("button"); close.type = "button"; close.textContent = "×"; close.setAttribute("aria-label", `移除${label}`); close.addEventListener("click", remove);
       wrap.append(name, close); chips.append(wrap);
     }
-    for (const file of draft.files) chip(`▤ ${file.name}`, () => { draft.files = draft.files.filter((item) => item.path !== file.path); render(id); }, () => void files.openPath(file.path));
+    for (const file of draft.files) chip(file.name, () => { draft.files = draft.files.filter((item) => item.path !== file.path); render(id); }, () => void files.openPath(file.path));
     if (draft.search) chip("◎ 网络搜索", () => { draft.search = false; render(id); });
     if (draft.uploading) { const pending = document.createElement("span"); pending.className = "composer-uploading"; pending.textContent = `正在添加 ${draft.uploading} 个文件…`; chips.append(pending); }
     chips.classList.toggle("hidden", !chips.childElementCount);
@@ -56,7 +61,9 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
   }
   function row(label, detail, icon, action) {
     const button = document.createElement("button"); button.type = "button"; button.className = "composer-tool"; button.setAttribute("role", "menuitem");
-    const symbol = document.createElement("span"); symbol.className = "composer-tool-icon"; symbol.textContent = icon;
+    const symbol = document.createElement("span"); symbol.className = "composer-tool-icon";
+    symbol.setAttribute("aria-hidden", "true");
+    symbol.append(icon);
     const content = document.createElement("span"), title = document.createElement("strong"), note = document.createElement("small");
     title.textContent = label; note.textContent = detail; content.append(title, note); button.append(symbol, content);
     button.addEventListener("click", (event) => { event.stopPropagation(); close(); action(); }); menu.append(button); return button;
@@ -76,9 +83,9 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
     close(); anchor = button; inputId = button.closest("form")?.querySelector("textarea")?.id || getInput().id;
     menu.replaceChildren();
     const caption = document.createElement("div"); caption.className = "composer-tools-caption"; caption.textContent = "添加内容与工具"; menu.append(caption);
-    row("添加照片和文件", "上传附件，供当前任务读取 · 每个 10 MB", "↥", () => upload.click());
-    row("引用工作区文件", "在右侧浏览、预览并加入对话", "▤", () => void files.open());
-    row("选择工作文件夹", "切换本次工作的项目目录", "▱", () => void chooseWorkspace());
+    row("添加照片和文件", "上传附件，供当前任务读取 · 每个 10 MB", folderIcon(), () => upload.click());
+    row("引用工作区文件", "在右侧浏览、预览并加入对话", folderIcon(), () => void files.open());
+    row("选择工作文件夹", "切换本次工作的项目目录", folderIcon(), () => void chooseWorkspace());
     row("技能和命令", "选择已启用技能或项目命令", "/", () => void commands());
     row(drafts.get(inputId).search ? "关闭网络搜索" : "网络搜索", "发送时使用 WebSearch 检索并附来源", "◎", () => { const draft = drafts.get(inputId); draft.search = !draft.search; render(inputId); $(inputId).focus(); });
     row("计划模式", "先分析方案，使用现有权限控制", "☷", () => {

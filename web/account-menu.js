@@ -47,7 +47,7 @@ if (button) {
       const response = await fetch('/api/customize/official-services', { headers: { 'x-ccagent-web': '1' }, credentials: 'same-origin' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '账户信息暂时不可用');
-      const format = value => { const amount = BigInt(value); return `${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, '0').slice(0, 4)}`; };
+      const format = value => { const amount = BigInt(value), absolute = amount < 0n ? -amount : amount; return `${amount < 0n ? '-' : ''}${absolute / 1000000n}.${(absolute % 1000000n).toString().padStart(6, '0').replace(/0+$/, '').padEnd(2, '0')}`; };
       if (data.wallet) balance.textContent = `余额 ¥${format(data.wallet.available ?? data.wallet.balance)} · 冻结 ¥${format(data.wallet.frozen)}`;
       admin.href = new URL('/admin', data.origin).href; admin.hidden = !data.permissions.includes('admin.read'); message.textContent = '';
     } catch (error) { message.textContent = error.message; }

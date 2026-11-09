@@ -37,6 +37,7 @@ import {
 } from "../../../config/sources.js";
 import { officialModelPrefix, readServiceBinding } from "../../../platform/serviceState.js";
 import { getPlatformAccountClient } from "../../../platform/account.js";
+import { normalizeOllamaBaseURL } from "../../ollama.js";
 
 export type ModelProtocol =
   | "anthropic"
@@ -45,6 +46,10 @@ export type ModelProtocol =
   | "gemini";
 
 export interface ModelProfile {
+  /** Supplier identity from the authenticated official catalog; not project metadata. */
+  upstreamProvider?: string;
+  /** Dedicated local Ollama preset, transported through the shared OpenAI adapter. */
+  provider?: "ollama";
   /** Only synthesized from the authenticated account's official catalog. Never read from project settings. */
   platformService?: string;
   /** The map key / user-facing handle. */
@@ -65,6 +70,7 @@ export interface ModelProfile {
 }
 
 interface RawProfile {
+  provider?: unknown;
   disabled?: unknown;
   protocol?: unknown;
   model?: unknown;
@@ -204,7 +210,7 @@ export async function loadProfiles(cwd: string = process.cwd()): Promise<LoadedP
       for (const route of binding?.configuration.routes ?? []) {
         if (!["chat", "vision"].includes(route.service) || !["openai-chat", "openai-responses"].includes(route.protocol)) continue;
         const id = officialModelPrefix + route.id;
-        profiles[id] = { id, platformService: route.id, protocol: route.protocol as ModelProtocol, model: route.id,
+        profiles[id] = { id, platformService: route.id, upstreamProvider: route.provider, protocol: route.protocol as ModelProtocol, model: route.id,
           baseURL: binding!.configuration.origin + "/v1", maxTokens: route.limits.maxOutputTokens, contextWindow: route.limits.contextWindow };
       }
     } catch { warnings.push("官方服务配置需要重新验证；不会切换到其他供应商密钥。"); }
@@ -234,10 +240,18 @@ function buildProfile(
 
   const profile: ModelProfile = { id, protocol: protocol as ModelProtocol, model };
 
-  if (typeof raw.baseURL === "string" && raw.baseURL.trim()) {
+  const ollama = raw.provider === "ollama";
+  if (ollama) {
+    if (protocol !== "openai-chat") { warnings.push(`models.${id}: Ollama requires openai-chat — ignored`); return null; }
+    try { profile.baseURL = normalizeOllamaBaseURL(typeof raw.baseURL === "string" ? interpolateEnv(raw.baseURL.trim()) : undefined); }
+    catch { warnings.push(`models.${id}: invalid Ollama service address — ignored`); return null; }
+    profile.provider = "ollama";
+  }
+
+  if (!ollama && typeof raw.baseURL === "string" && raw.baseURL.trim()) {
     profile.baseURL = interpolateEnv(raw.baseURL.trim());
   }
-  if (typeof raw.apiKey === "string" && raw.apiKey.trim()) {
+  if (!ollama && typeof raw.apiKey === "string" && raw.apiKey.trim()) {
     const key = interpolateEnv(raw.apiKey.trim());
     if (key) profile.apiKey = key;
   }
@@ -251,7 +265,7 @@ function buildProfile(
   ) {
     profile.contextWindow = Math.floor(raw.contextWindow);
   }
-  if (raw.headers && typeof raw.headers === "object" && !Array.isArray(raw.headers)) {
+  if (!ollama && raw.headers && typeof raw.headers === "object" && !Array.isArray(raw.headers)) {
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(raw.headers as Record<string, unknown>)) {
       if (typeof v === "string") out[k] = interpolateEnv(v);

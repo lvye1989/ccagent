@@ -1,6 +1,9 @@
-// Brand glyphs from Simple Icons (CC0), plus locally drawn Photoshop, ComfyUI and SketchUp tiles.
+// Brand glyphs from Simple Icons (CC0), plus locally drawn application tiles.
 // Bundled locally; no third-party image requests.
 const icons = {
+  "canva": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><defs><linearGradient id="canva" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#00c4cc"/><stop offset="1" stop-color="#7d2ae8"/></linearGradient></defs><rect width="32" height="32" rx="16" fill="url(#canva)"/><text x="16" y="24" text-anchor="middle" font-family="Georgia, serif" font-size="25" font-style="italic" font-weight="bold" fill="#fff">C</text></svg>')}`,
+  "figma": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 36"><path d="M16 4h-5a5 5 0 0 0 0 10h5Z" fill="#f24e1e"/><path d="M16 4h5a5 5 0 0 1 0 10h-5Z" fill="#ff7262"/><path d="M16 14h-5a5 5 0 0 0 0 10h5Z" fill="#a259ff"/><circle cx="21" cy="19" r="5" fill="#1abcfe"/><path d="M16 24h-5a5 5 0 1 0 5 5Z" fill="#0acf83"/></svg>')}`,
+  "autocad": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#b62035"/><path d="m16 4 12 24h-7l-2-5h-8l-2 5H3L14 4Zm-1 9-2.5 6h5Z" fill="#fff" fill-rule="evenodd"/><path d="m16 4 12 24h-4L15 8Z" fill="#f5bac4"/></svg>')}`,
   "sketchup": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#173c62"/><path d="m16 5 10 6v11l-10 6-10-6V11Z" fill="#3275a6" stroke="#e1effb" stroke-width="1.7" stroke-linejoin="round"/><path d="m6 11 10 6 10-6M16 17v11M11 8l10 6v5l-5 3-5-3v-5l5-3" fill="none" stroke="#e1effb" stroke-width="1.5" stroke-linejoin="round"/></svg>')}`,
   "comfyui": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#172b25"/><g fill="none" stroke="#b8f390" stroke-width="2"><path d="M10 9h5c3 0 2 14 5 14h2M10 23h5c3 0 2-14 5-14h2"/><rect x="4" y="5" width="7" height="8" rx="2" fill="#32553d"/><rect x="4" y="19" width="7" height="8" rx="2" fill="#32553d"/><rect x="21" y="5" width="7" height="8" rx="2" fill="#32553d"/><rect x="21" y="19" width="7" height="8" rx="2" fill="#32553d"/></g></svg>')}`,
   "photoshop": `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#001e36"/><text x="16" y="23" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="600" fill="#31a8ff">Ps</text></svg>')}`,
@@ -18,4 +21,16 @@ export function appIcon(id, compact = false) {
  const holder = document.createElement('span'); holder.className = compact ? 'installed-sidebar-icon app-brand-icon compact' : 'app-brand-icon';
  const image = document.createElement('img'); image.src = icons[id]; image.alt = ''; image.width = compact ? 16 : 28; image.height = compact ? 16 : 28;
  holder.setAttribute('aria-hidden', 'true'); holder.append(image); return holder;
+}
+
+export function folderIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "folder-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS(svg.namespaceURI, "path");
+  path.setAttribute("d", "M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7zM3 8h18");
+  svg.append(path);
+  return svg;
 }

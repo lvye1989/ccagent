@@ -34,7 +34,7 @@ import type {
 import { debugLog, logWarn } from "../../utils/log.js";
 import { CLIENT_NAME, USER_AGENT, VERSION } from "../../version.js";
 import { resolveMcpEnvironment } from "./environment.js";
-import { GoogleWorkspaceOAuthProvider } from "./googleOAuth.js";
+import { createMcpOAuthProvider } from "./browserOAuth.js";
 import { isMcpServerEnabled, loadMcpPreferences } from "./preferences.js";
 import { abortable } from "./cancellation.js";
 import { resolveMcpConnectTimeoutMs } from "./connectTimeout.js";
@@ -237,7 +237,7 @@ function createStdioTransport(
 
 function createHttpTransport(config: McpHTTPServerConfig & { scope: string }, options: McpAuthOptions): TransportBundle {
   const oauthProvider = config.oauth
-    ? new GoogleWorkspaceOAuthProvider(new URL(config.url).hostname, config.oauth)
+    ? createMcpOAuthProvider(config.url, config.oauth)
     : undefined;
   const transport = new StreamableHTTPClientTransport(new URL(config.url), {
     ...(oauthProvider ? { authProvider: oauthProvider } : {}),

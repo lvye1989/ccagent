@@ -11,6 +11,7 @@ import { accountHome } from "../platform/account.js";
 const root = path.resolve(import.meta.dirname, "../..");
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ccagent-customization-")));
 const workspace = path.join(temp, "workspace"), platformBase = path.join(temp, "home");
+const authorizedOutput = path.join(temp, "授权 输出", "多级", "结果.txt");
 const accountFixture = await startAccountFixture(platformBase);
 await accountFixture.nativeClient.signIn(accountFixture.users[0]!.email, accountFixture.password);
 const home = accountHome(platformBase, accountFixture.users[0]!.id);
@@ -80,6 +81,10 @@ const mock = createServer(async (req, res) => {
   } else if (history.includes("RUN_RAG_CASE")) {
     if (!has("KnowledgeSearch")) tool = { name: "KnowledgeSearch", args: { query: "fixture question" } };
     else output = "RAG_FINISHED SOURCE_EVIDENCE";
+  } else if (history.includes("RUN_OUTPUT_ROOT_CASE")) {
+    if (!has("Write")) tool = { name: "Write", args: { file_path: authorizedOutput, content: "AUTHORIZED_OUTPUT_OK" } };
+    else if (!has("Read")) tool = { name: "Read", args: { file_path: authorizedOutput } };
+    else output = "OUTPUT_ROOT_DONE";
   } else if (history.includes("RUN_WRITE_EXEC_CASE")) {
     const shell = process.platform === "win32" ? "PowerShell" : "Bash";
     if (!has("Write")) tool = { name: "Write", args: { file_path: "嵌套 输出/写入 验证.txt", content: "FIRST_WRITE\n" } };
@@ -148,6 +153,30 @@ async function turn(id: string, message: string, until?: string) {
 }
 try {
   await start();
+  const deniedOutputSession = await post("/api/sessions", { mode: "full" }, 201);
+  const deniedOutput = await turn(deniedOutputSession.sessionId, "RUN_OUTPUT_ROOT_CASE", "OUTPUT_ROOT_DONE");
+  assert(deniedOutput.execution.tools.every((tool: any) => tool.isError), "Full mode still cannot write to an unapproved directory");
+  assert.equal(await fs.stat(authorizedOutput).then(() => true, () => false), false);
+  const beforeInvalidDirectories = await fs.readFile(path.join(home, "settings.json"), "utf8");
+  await post("/api/customize/settings", { additionalDirectories: ["relative-output"] }, 400);
+  await post("/api/customize/settings", { additionalDirectories: [path.join(workspace, "image fixture.png")] }, 400);
+  assert.equal(await fs.readFile(path.join(home, "settings.json"), "utf8"), beforeInvalidDirectories, "Invalid directory grants leave all settings untouched");
+  const approvedOutputSession = await post("/api/sessions", { mode: "full" }, 201);
+  const externalDirectory = path.join(temp, "授权 输出");
+  await post("/api/customize/settings", { additionalDirectories: [externalDirectory, `"${externalDirectory}"`] });
+  assert.equal(await fs.stat(externalDirectory).then(() => true, () => false), false, "Granting does not create folders before a task writes");
+  assert.deepEqual((await get("/api/customize/settings")).settings.additionalDirectories, [externalDirectory]);
+  const approvedOutput = await turn(approvedOutputSession.sessionId, "RUN_OUTPUT_ROOT_CASE", "OUTPUT_ROOT_DONE");
+  assert(approvedOutput.execution.tools.every((tool: any) => !tool.isError), "Saved grants immediately reach existing sessions without restart");
+  assert.equal(await fs.readFile(authorizedOutput, "utf8"), "AUTHORIZED_OUTPUT_OK");
+  await post("/api/customize/settings", { language: "中文" });
+  assert.deepEqual((await get("/api/customize/settings")).settings.additionalDirectories, [externalDirectory], "Other settings preserve directory grants");
+  const revokedOutputSession = await post("/api/sessions", { mode: "full" }, 201);
+  await post("/api/customize/settings", { additionalDirectories: [] });
+  const revokedOutput = await turn(revokedOutputSession.sessionId, "RUN_OUTPUT_ROOT_CASE", "OUTPUT_ROOT_DONE");
+  assert(revokedOutput.execution.tools.every((tool: any) => tool.isError), "Revocation immediately blocks reads and writes without deleting output");
+  assert.equal(await fs.readFile(authorizedOutput, "utf8"), "AUTHORIZED_OUTPUT_OK");
+  console.log("Authorized output directories: validation, no implicit creation, immediate existing-session use, persistence and revocation passed.");
   const imageSession = await post("/api/sessions", { mode: "full" }, 201);
   await turn(imageSession.sessionId, 'RUN_WEB_IMAGE_CASE @"image fixture.png"', "WEB_IMAGE_FINISHED");
   assert(requests.some((request) => JSON.stringify(request.messages).includes("RUN_WEB_IMAGE_CASE") && JSON.stringify(request.messages).includes("data:image/png;base64,")), "Web image references reach the model as pixels");

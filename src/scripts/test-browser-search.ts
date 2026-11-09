@@ -130,16 +130,18 @@ async function main(): Promise<void> {
 
   console.log("\n[3] One-time central grant and hermetic execution");
   const opened: string[] = [];
+  const nativeCalls: string[] = [];
   let indicators = 0;
   let listCalls = 0;
   const runtime: BrowserSearchRuntime = {
-    openExternalUrl: async (url) => { opened.push(url); return true; },
+    openExternalUrl: async (url) => { nativeCalls.push("open:" + url); opened.push(url); return true; },
     listWindows: async () => {
+      nativeCalls.push("listWindows");
       listCalls++;
       return [{ id: "1", processId: 1, processName: "chrome", title: "fixture" }];
     },
-    ensureIndicator: async () => { indicators++; },
-    wait: async () => {},
+    ensureIndicator: async () => { nativeCalls.push("ensureIndicator"); indicators++; },
+    wait: async (ms) => { nativeCalls.push("wait:" + ms); },
   };
   const tool = createBrowserSearchTool(runtime);
   const input = { action: "search", engine: "baidu", query: "黄仁勋 最新消息" };
@@ -159,27 +161,35 @@ async function main(): Promise<void> {
   assert.equal(indicators, 1);
   assert.equal(listCalls, 1);
   assert.match(String(executed.content), /launch_status=accepted/);
+  assert.match(String(executed.content), /browser_surface=os_default_browser/);
   assert.match(String(executed.content), /page_load=not independently verified/);
   pass("A granted call performs one opener call and one local window-metadata check only");
 
-  let panelUrl = "";
-  grantBrowserSearchExecution("call-web-panel", input, ordinaryDecision(), {
+  const cliNativeCalls = [...nativeCalls];
+  let legacyPanelCalls = 0;
+  grantBrowserSearchExecution("call-web-native", input, ordinaryDecision(), {
     finalPermission: "auto_allowed", sessionId: context.sessionId,
   });
-  const webPanelResult = await tool.call(input, {
-    ...context, toolUseId: "call-web-panel",
-    openUrlInWebPanel: async (url) => { panelUrl = url; return true; },
-  });
-  assert.equal(webPanelResult.isError, undefined);
-  assert.equal(panelUrl, prepareBrowserSearchInput(input).canonicalUrl);
-  assert.match(String(webPanelResult.content), /browser_surface=web_side_panel/);
-  assert.equal(opened.length, 1, "Web sessions must not launch an OS browser");
-  assert.equal(indicators, 1, "Web panel is already the visible indicator");
-  pass("A granted Web call opens the side panel without launching the OS browser");
+  // A stale runtime object from an older Web caller must not replace native
+  // execution even if it still carries the removed callback at runtime.
+  const webContextWithLegacyHook = {
+    ...context, toolUseId: "call-web-native",
+    requestUserQuestion: async () => null,
+    openUrlInWebPanel: async (_url: string) => { legacyPanelCalls++; return true; },
+  };
+  const webResult = await tool.call(input, webContextWithLegacyHook);
+  assert.equal(webResult.isError, undefined);
+  assert.equal(legacyPanelCalls, 0, "Legacy Web callbacks cannot short-circuit the native launcher");
+  assert.equal(webResult.content, executed.content, "Both frontends receive the same native execution receipt");
+  assert.deepEqual(nativeCalls.slice(cliNativeCalls.length), cliNativeCalls);
+  assert.equal(opened.length, 2);
+  assert.equal(indicators, 2);
+  assert.equal(listCalls, 2);
+  pass("Web and CLI contexts execute the same native path and ignore legacy side-panel callbacks");
 
   const replay = await tool.call(input, context);
   assert.equal(replay.isError, true);
-  assert.equal(opened.length, 1);
+  assert.equal(opened.length, 2);
   pass("The exact-input grant is single-use and cannot be replayed");
 
   grantBrowserSearchExecution("call-tamper", input, ordinaryDecision(), {
@@ -188,7 +198,7 @@ async function main(): Promise<void> {
   });
   const tampered = await tool.call({ ...input, query: "different query" }, { ...context, toolUseId: "call-tamper" });
   assert.equal(tampered.isError, true);
-  assert.equal(opened.length, 1);
+  assert.equal(opened.length, 2);
   revokeBrowserSearchExecution("call-tamper");
   pass("Changing the input after review invalidates the grant");
 
@@ -214,7 +224,7 @@ async function main(): Promise<void> {
   });
   const fallback = await tool.call(input, { ...context, toolUseId: "fallback-reviewed" });
   assert.equal(fallback.isError, undefined);
-  assert.equal(opened.length, 2);
+  assert.equal(opened.length, 3);
   pass("Jev outage keeps the operation intact but requires an explicit independent review");
 
   for (const invalidPermission of ["ask", "user_denied"] as const) {
@@ -238,10 +248,10 @@ async function main(): Promise<void> {
     toolUseId: "cross-session",
   });
   assert.equal(wrongSession.isError, true);
-  assert.equal(opened.length, 2);
+  assert.equal(opened.length, 3);
   const rightSession = await tool.call(input, { ...context, toolUseId: "cross-session" });
   assert.equal(rightSession.isError, undefined);
-  assert.equal(opened.length, 3);
+  assert.equal(opened.length, 4);
   pass("A different session cannot consume or invalidate another session's grant");
 
   const abortController = new AbortController();
@@ -256,10 +266,10 @@ async function main(): Promise<void> {
     toolUseId: "abort-before-consume",
   });
   assert.equal(cancelled.isError, true);
-  assert.equal(opened.length, 3);
+  assert.equal(opened.length, 4);
   const afterCancellation = await tool.call(input, { ...context, toolUseId: "abort-before-consume" });
   assert.equal(afterCancellation.isError, undefined);
-  assert.equal(opened.length, 4);
+  assert.equal(opened.length, 5);
   pass("Cancellation is checked before the one-time grant is consumed");
 
   const secretInput = { action: "search", engine: "bing", query: "token=super-private-value" };
@@ -310,6 +320,10 @@ async function main(): Promise<void> {
   }
   assert.ok(BROWSER_SEARCH_FAST_PATH_GUIDANCE.includes("MUST use BrowserSearch first"));
   assert.ok(BROWSER_SEARCH_FAST_PATH_GUIDANCE.includes("Use WebSearch instead"));
+  assert.ok(BROWSER_SEARCH_FAST_PATH_GUIDANCE.includes("OS default browser"));
+  assert.ok(BROWSER_SEARCH_FAST_PATH_GUIDANCE.includes("same browser tool and execution path"));
+  assert.ok(!BROWSER_SEARCH_FAST_PATH_GUIDANCE.includes("side panel"));
+  assert.ok(!browserSearchTool.description.includes("side panel"));
   assert.equal(browserSearchTool.isReadOnly(), false);
   assert.equal(browserSearchTool.decisionPolicy, "specialized_jev");
   const summary = summarizeTool("BrowserSearch", input, String(executed.content));

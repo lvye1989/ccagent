@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@excalidraw/excalidraw/index.css";
 import { reconcileWhiteboardBindings } from "../web/whiteboard-ai.js";
+import { DESIGN_BASE_MAX_EDGE, validateDesignImage, designMetadata, selectDesignBase, buildDesignImageSkeleton, designExportPlan, assertDesignSceneSize } from "../web/whiteboard-design-canvas.js";
 
 // Excalidraw reads this when its module initializes. Fonts and code remain local.
 window.EXCALIDRAW_ASSET_PATH = "/whiteboard-assets/";
@@ -107,10 +108,12 @@ function mergePatch(elements, patch) {
 }
 async function applyElements(elements) {
   applying = true; userInteracted = true;
+  const boardKey = currentKey, boardApi = api;
   try {
-    api.updateScene({ elements, captureUpdate: library.CaptureUpdateAction.IMMEDIATELY });
+    boardApi.updateScene({ elements, captureUpdate: library.CaptureUpdateAction.IMMEDIATELY });
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     await document.fonts?.ready;
+    if (currentKey !== boardKey || api !== boardApi) throw new Error("画布已切换，本次操作未应用到新画布。");
     const result = snapshot(); lastJson = result.json; clearTimeout(publishTimer); return result;
   } finally { applying = false; }
 }
@@ -130,6 +133,90 @@ async function undoDrawing(payload) {
   const result = await applyElements(restored); lastOperation = undefined;
   return { scene: result.scene, token: currentToken, canvasVersion: result.canvasVersion };
 }
+function requireDesignContext(payload, checkVersion = false) {
+  if (!api || loading || applying || !currentToken || payload?.token !== currentToken) throw new Error("画布已切换，请在当前画布重试。");
+  const current = snapshot();
+  if (checkVersion && payload.expectedCanvasVersion !== current.canvasVersion) throw new Error("画布已经变化，本次图片未导入，请重新操作。");
+  return current;
+}
+function decodeDesignImage(image) {
+  return new Promise((resolve, reject) => {
+    const decoded = new Image();
+    const timer = setTimeout(() => { decoded.src = ""; reject(new Error("图片解码超时，请缩小图片后重试。")); }, 15000);
+    decoded.onload = () => {
+      clearTimeout(timer);
+      if (decoded.naturalWidth !== image.width || decoded.naturalHeight !== image.height) reject(new Error("图片方向或尺寸不符，请重新导出图片后再导入。"));
+      else resolve();
+    };
+    decoded.onerror = () => { clearTimeout(timer); reject(new Error("图片无法解码，请重新导出图片后再导入。")); };
+    decoded.src = image.dataURL;
+  });
+}
+async function importDesignImage(payload) {
+  requireDesignContext(payload, true);
+  const requestId = payload.requestId ?? crypto.randomUUID();
+  if (typeof requestId !== "string" || !requestId || requestId.length > 160) throw new Error("图片请求编号无效。");
+  if (appliedRequests.has(`design:${requestId}`)) throw new Error("这张图片已经导入，无需重复操作。");
+  const image = validateDesignImage(payload.image);
+  if (payload.role === "base" && Math.max(image.width, image.height) > DESIGN_BASE_MAX_EDGE) throw new Error("原图边长不能超过 2048 像素，请缩小图片后重新导入。");
+  await decodeDesignImage(image);
+  const current = requireDesignContext(payload, true);
+  if (appliedRequests.has(`design:${requestId}`)) throw new Error("这张图片已经导入，无需重复操作。");
+  const imageId = `design_${crypto.randomUUID()}`, fileId = `design_file_${crypto.randomUUID()}`;
+  const skeleton = buildDesignImageSkeleton(api.getSceneElementsIncludingDeleted(), image, payload.role, { imageId, fileId, baseImageId: payload.baseImageId, requestId });
+  const converted = library.convertToExcalidrawElements([skeleton], { regenerateIds: false });
+  if (converted.length !== 1 || converted[0].id !== imageId || converted[0].type !== "image") throw new Error("图片元素未能创建，画布未修改。");
+  const file = { id: fileId, mimeType: image.mimeType, dataURL: image.dataURL, created: Date.now() };
+  const elements = [...api.getSceneElementsIncludingDeleted(), converted[0]];
+  assertDesignSceneSize(JSON.parse(library.serializeAsJSON(elements, api.getAppState(), { ...api.getFiles(), [fileId]: file }, "local")));
+  api.addFiles([file]);
+  const result = await applyElements(elements);
+  api.scrollToContent(converted, { fitToContent: true, maxZoom: 1 });
+  appliedRequests.add(`design:${requestId}`); lastOperation = undefined;
+  return { scene: result.scene, token: currentToken, canvasVersion: result.canvasVersion, imageId, fileId };
+}
+async function blobDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("勾画图片读取失败，请重试。")); reader.readAsDataURL(blob);
+  });
+}
+async function designSnapshot(payload) {
+  const current = requireDesignContext(payload);
+  const plan = designExportPlan(current.scene.elements, current.scene.files, payload.baseImageId);
+  const [convertedFrame] = library.convertToExcalidrawElements([plan.frame], { regenerateIds: false });
+  // 0.18.1's skeleton converter treats x/y = 0 as absent and adds frame padding.
+  // Restore exact bounds explicitly so markup and original pixels stay aligned.
+  const frame = { ...convertedFrame, x: plan.frame.x, y: plan.frame.y, width: plan.frame.width, height: plan.frame.height, angle: 0 };
+  const blob = await library.exportToBlob({
+    elements: plan.elements, files: current.scene.files,
+    appState: { ...api.getAppState(), exportBackground: true, viewBackgroundColor: "#ffffff", exportWithDarkMode: false, exportEmbedScene: false, exportScale: 1 },
+    exportingFrame: frame, exportPadding: 0, mimeType: "image/png",
+    getDimensions: () => ({ width: plan.width, height: plan.height, scale: plan.scale }),
+  });
+  const dataURL = await blobDataURL(blob);
+  const after = requireDesignContext(payload);
+  if (after.canvasVersion !== current.canvasVersion) throw new Error("导出期间画布已变化，请重新生成以使用最新勾画。");
+  const annotated = validateDesignImage({ dataURL, mimeType: "image/png", width: plan.width, height: plan.height });
+  return { token: current.token, canvasVersion: current.canvasVersion, base: plan.base, annotated: { dataURL: annotated.dataURL, mimeType: annotated.mimeType, width: annotated.width, height: annotated.height }, references: plan.references, hasMarkup: plan.hasMarkup };
+}
+function designSketch(payload) {
+  const current = requireDesignContext(payload);
+  const base = selectDesignBase(api.getSceneElements(), payload.baseImageId);
+  api.scrollToContent([base], { fitToContent: true, maxZoom: 1 });
+  api.updateScene({ appState: { currentItemStrokeColor: "#e03131", currentItemStrokeWidth: 2, currentItemOpacity: 100, currentItemRoughness: 0, selectedElementIds: {} }, captureUpdate: library.CaptureUpdateAction.NEVER });
+  api.setActiveTool({ type: "freedraw", locked: true });
+  return { token: current.token, canvasVersion: current.canvasVersion };
+}
+async function removeDesignImage(payload) {
+  requireDesignContext(payload, true);
+  const image = api.getSceneElements().find((element) => element.id === payload.imageId && !element.isDeleted && element.type === "image");
+  if (!["reference", "result"].includes(designMetadata(image)?.role)) throw new Error("只能通过此入口移除参考图或生成结果，原图不会被删除。");
+  const deleted = api.getSceneElementsIncludingDeleted().map((element) => element.id === image.id ? library.newElementWith(element, { isDeleted: true }) : element);
+  const elements = reconcileWhiteboardBindings(deleted, [image.id], (element, changes) => library.newElementWith(element, changes));
+  const result = await applyElements(elements); lastOperation = undefined;
+  return { scene: result.scene, token: currentToken, canvasVersion: result.canvasVersion };
+}
 window.addEventListener("message", async (event) => {
   if (event.origin !== origin || event.source !== window.parent || !channel) return;
   const message = event.data;
@@ -141,6 +228,10 @@ window.addEventListener("message", async (event) => {
     if (message.method === "export") { response(message.id, await exportImage(message.payload?.format)); return; }
     if (message.method === "applyDrawing") { response(message.id, await applyDrawing(message.payload)); return; }
     if (message.method === "undoDrawing") { response(message.id, await undoDrawing(message.payload)); return; }
+    if (message.method === "importDesignImage") { response(message.id, await importDesignImage(message.payload)); return; }
+    if (message.method === "designSnapshot") { response(message.id, await designSnapshot(message.payload)); return; }
+    if (message.method === "designSketch") { response(message.id, designSketch(message.payload)); return; }
+    if (message.method === "removeDesignImage") { response(message.id, await removeDesignImage(message.payload)); return; }
     throw new Error("不支持的白板操作。");
   } catch (error) { response(message.id, undefined, error?.message || "白板操作未完成。"); }
 });

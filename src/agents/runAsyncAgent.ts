@@ -267,6 +267,7 @@ export async function runAsyncAgentLifecycle(
 
     enqueuePendingNotification({
       mode: "task-notification",
+      ownerSessionId: params.parentToolContext.notificationOwnerSessionId ?? params.parentToolContext.sessionId,
       text: formatTaskNotification({
         agentId: entry.agentId,
         agentType: entry.agentType,
@@ -299,6 +300,7 @@ export async function runAsyncAgentLifecycle(
 
     enqueuePendingNotification({
       mode: "task-notification",
+      ownerSessionId: params.parentToolContext.notificationOwnerSessionId ?? params.parentToolContext.sessionId,
       text: formatTaskNotification({
         agentId: entry.agentId,
         agentType: entry.agentType,

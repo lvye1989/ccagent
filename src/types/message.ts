@@ -43,6 +43,9 @@ export interface ThinkingBlock {
   type: "thinking";
   thinking: string;
   signature?: string;
+  /** Provider state for a matching DeepSeek continuation, never Anthropic input. */
+  reasoningProvider?: "deepseek";
+  reasoningEndpoint?: string;
 }
 
 /**

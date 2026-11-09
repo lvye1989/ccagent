@@ -14,6 +14,7 @@ import { availableServiceDefaults, readServiceDefaults } from './service-default
 import { callIdentifierPattern } from './call-identifiers';
 import { resolveRouteCredential } from './provider-credentials';
 import { requestUpstream } from './upstream-hosts';
+import { activeRouteCondition } from './route-lifecycle';
 
 const id = z.string().regex(callIdentifierPattern);
 const maximumResult = 64 * 1024 * 1024;
@@ -308,13 +309,13 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
 
 export async function availableModels(request: Request) {
   await requireServiceIdentity(request);
-  const candidates = await database().db.select({ id: routes.id }).from(routes).where(eq(routes.enabled, true));
+  const candidates = await database().db.select({ id: routes.id }).from(routes).where(and(eq(routes.enabled, true), activeRouteCondition()));
   const data = [];
   for (const item of candidates) {
     try {
       const selected = await publishedRoute(item.id);
       data.push({ id: selected.route.id, object: 'model', owned_by: 'ccagent', name: selected.route.name, service: selected.route.service,
-        protocol: selected.route.protocol, pricing: publicPricing(selected), limits: routeInput.shape.options.parse(selected.route.options) });
+        protocol: selected.route.protocol, provider: selected.route.provider, upstreamModel: selected.route.upstreamModel, pricing: publicPricing(selected), limits: routeInput.shape.options.parse(selected.route.options) });
     } catch { /* Unready services are never sold through discovery. */ }
   }
   const configured = await readServiceDefaults();

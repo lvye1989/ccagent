@@ -15,7 +15,7 @@
 
 import type {
   McpHTTPServerConfig,
-  McpGoogleOAuthConfig,
+  McpOAuthConfig,
   McpSSEServerConfig,
   McpServerConfig,
   McpStdioServerConfig,
@@ -28,6 +28,7 @@ import { isProjectTrusted } from "../../config/globalState.js";
 import { readJsonSettingsFile } from "../../utils/settings.js";
 import { isValidGoogleMcpRedirectUri } from "./googleWorkspace.js";
 import { isValidMcpConnectTimeoutMs } from "./connectTimeout.js";
+import { isValidBrowserMcpRedirectUri } from "./browserOAuth.js";
 
 interface RawSettings {
   mcpServers?: unknown;
@@ -153,12 +154,12 @@ function validateRemoteConfig(
       }
     }
   }
-  let oauth: McpGoogleOAuthConfig | undefined;
+  let oauth: McpOAuthConfig | undefined;
   if (obj.oauth !== undefined) {
     if (type !== "http") {
       return { ok: false, error: `mcpServers.${name} (${scope}): OAuth is supported only for 'http' transport` };
     }
-    const result = validateGoogleOAuthConfig(name, obj.oauth, scope);
+    const result = validateOAuthConfig(name, obj.oauth, scope);
     if (!result.ok) return result;
     oauth = result.value;
   }
@@ -177,17 +178,17 @@ function validateRemoteConfig(
   };
 }
 
-function validateGoogleOAuthConfig(
+function validateOAuthConfig(
   name: string,
   raw: unknown,
   scope: string,
-): { ok: true; value: McpGoogleOAuthConfig } | { ok: false; error: string } {
+): { ok: true; value: McpOAuthConfig } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, error: `mcpServers.${name} (${scope}): 'oauth' must be an object` };
   }
   const obj = raw as Record<string, unknown>;
-  if (obj.provider !== "google") {
-    return { ok: false, error: `mcpServers.${name} (${scope}): oauth.provider must be 'google'` };
+  if (obj.provider !== "google" && obj.provider !== "browser") {
+    return { ok: false, error: `mcpServers.${name} (${scope}): oauth.provider must be 'google' or 'browser'` };
   }
   const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
   for (const field of ["clientIdEnv", "clientSecretEnv"] as const) {
@@ -201,7 +202,7 @@ function validateGoogleOAuthConfig(
   if (typeof obj.redirectUri !== "string") {
     return { ok: false, error: `mcpServers.${name} (${scope}): oauth.redirectUri is required` };
   }
-  if (!isValidGoogleMcpRedirectUri(obj.redirectUri)) {
+  if (!(obj.provider === "browser" ? isValidBrowserMcpRedirectUri(obj.redirectUri) : isValidGoogleMcpRedirectUri(obj.redirectUri))) {
     return {
       ok: false,
       error: `mcpServers.${name} (${scope}): oauth.redirectUri must be a loopback HTTP URL with an explicit port`,
@@ -210,7 +211,7 @@ function validateGoogleOAuthConfig(
   return {
     ok: true,
     value: {
-      provider: "google",
+      provider: obj.provider,
       clientIdEnv: obj.clientIdEnv as string,
       clientSecretEnv: obj.clientSecretEnv as string,
       redirectUri: obj.redirectUri,

@@ -11,6 +11,7 @@ import { errorResponse, HttpError, json, readJson, requireSameOrigin } from './h
 import { measuredUsage, object, prepareUpstream, voiceDownloadUrl, type GatewayEndpoint } from './upstream';
 import { resolveRouteCredential } from './provider-credentials';
 import { requestUpstream } from './upstream-hosts';
+import { createKieClient, imageTaskInput, kieBaseUrl, kieBody, type KieTransport } from './kie-images';
 
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/), fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 const submission = z.object({ routeId, testId: z.string().uuid(), confirmationFingerprint: fingerprint, confirmPlatformCost: z.literal(true) }).strict();
@@ -28,6 +29,11 @@ type StoredStart = { hash: string; result: RouteTestResult };
 
 function requestFor(selection: Selection) {
   const { createdAt, updatedAt, ...stored } = selection.route, route = routeInput.parse(stored), limit = Math.min(64, route.options.maxOutputTokens);
+  if (route.protocol === 'kie-images') {
+    const input = imageTaskInput.parse({ model: route.id, prompt: 'A small blue circle on a plain white background.', resolution: '1K', aspect_ratio: '1:1', ...(route.upstreamModel.endsWith('-image-to-image') ? { input_images: ['ccagent-file:00000000-0000-4000-8000-000000000000'] } : {}) });
+    if (input.input_images.length && route.options.maxImages < 1) throw new HttpError(409, 'TEST_IMAGE_LIMIT', '图生图检测需要允许至少一张参考图。');
+    return { route, input, prepared: { url: `${kieBaseUrl}/jobs/createTask`, body: kieBody(route.upstreamModel, input, []), streaming: false }, endpoint: 'images' as const };
+  }
   let endpoint: GatewayEndpoint, input: Record<string, unknown>;
   if (route.service === 'chat' || route.service === 'vision') {
     const vision = route.service === 'vision';
@@ -41,20 +47,22 @@ function requestFor(selection: Selection) {
     endpoint = 'decisions'; input = { state: { test: 'CCAGENT connectivity' }, questions: { connectivity: { type: 'choice', instructions: 'Choose ok for this connectivity test.', criteria: { ok: 'The test input is valid.', failed: 'The test input is invalid.' } } } };
   } else if (route.service === 'search') {
     endpoint = 'search'; input = { query: 'Vercel documentation', max_results: 1, search_depth: 'basic' };
-  } else { endpoint = 'voice'; input = { text: '连接测试。' }; }
+  } else if (route.service === 'voice') { endpoint = 'voice'; input = { text: '连接测试。' }; }
+  else throw new HttpError(409, 'TEST_PROTOCOL_UNSUPPORTED', '此图像协议尚未开放连接检测。');
   const prepared = prepareUpstream(endpoint, input, route);
   prepared.body = applyRequestPricing(selection.definition, prepared.body);
   return { route, input, prepared, endpoint };
 }
 function planFor(selection: Selection, at: Date) {
   const request = requestFor(selection), pricing = publicPricing(selection);
-  const estimate = quoteDefinition(selection.definition, selection.currency, maximumQuantities(selection, request.input, request.prepared.body), at, selection.usdCny || undefined, true, request.prepared.body);
+  const estimate = quoteDefinition(selection.definition, selection.currency, request.endpoint === 'images' ? { output_images_1k: 1n, output_images_2k: 0n, output_images_4k: 0n } : maximumQuantities(selection, request.input, request.prepared.body), at, selection.usdCny || undefined, true, request.prepared.body);
   const confirmationFingerprint = createHash('sha256').update(JSON.stringify({ templateVersion: 1, route: request.route, pricing, body: request.prepared.body })).digest('hex');
-  const timeoutMs = Math.min(request.route.timeoutMs, 30000);
+  const timeoutMs = Math.min(request.route.timeoutMs, request.endpoint === 'images' ? 180000 : 30000);
   return { selection, ...request, confirmationFingerprint, timeoutMs, estimatedPublicCostMicro: estimate.publicCostMicro.toString(),
     quote: { routeId: selection.route.id, name: selection.route.name, provider: selection.route.provider, upstreamModel: selection.route.upstreamModel, service: selection.route.service,
       protocol: selection.route.protocol, enabled: selection.route.enabled, pricing, confirmationFingerprint, estimatedPublicCostMicro: estimate.publicCostMicro.toString(), platformPaid: true as const,
-      userChargeMicro: '0' as const, timeoutMs, singleAttempt: true, fallback: false, description: selection.route.service === 'vision' ? '一张内置 64×64 纯色图片及简短描述请求'
+      userChargeMicro: '0' as const, timeoutMs, singleAttempt: true, fallback: false, description: request.endpoint === 'images' ? '生成一张 1K 测试图，图生图会先上传内置纯色参考图；成功后核验图片并丢弃，费用由平台承担'
+        : selection.route.service === 'vision' ? '一张内置 64×64 纯色图片及简短描述请求'
         : selection.route.service === 'decision' ? '一个固定状态与一项类型化选择问题' : selection.route.service === 'search' ? '一次基础搜索，最多一条结果'
         : selection.route.service === 'voice' ? '合成“连接测试。”，核对 WAV 响应后丢弃音频' : `一条固定简短提示，${selection.definition.tariff.kind === 'qwen-input-tiers' ? '回答' : '输出'}上限 ${Math.min(64, request.route.options.maxOutputTokens)} Token` } };
 }
@@ -93,8 +101,42 @@ function rejection(status: number, payload: unknown) {
   return { code: Object.hasOwn(known, code) ? code : `UPSTREAM_HTTP_${status}`, message: known[code] || (status === 401 || status === 403 ? '供应商拒绝凭据或模型权限。' : status === 429 ? '供应商限流或配额不足，请核对后再主动检测。' : '供应商返回失败状态，请核对供应商服务和配置。') };
 }
 
-export function createRouteTests(options: { fetch?: typeof fetch; keepAlive?: (work: Promise<void>) => void; now?: () => Date } = {}) {
+export function createRouteTests(options: { fetch?: typeof fetch; imageTransport?: KieTransport; keepAlive?: (work: Promise<void>) => void; now?: () => Date } = {}) {
   const fetcher = options.fetch ?? fetch, now = options.now ?? (() => new Date());
+  async function executeImage(actorId: string, plan: ReturnType<typeof planFor>, initial: RouteTestResult, secret: string) {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), plan.timeoutMs), startedAt = now();
+    let sent = false, result: RouteTestResult = initial, phase = 'prepare';
+    try {
+      const client = createKieClient(secret, options.imageTransport), input = imageTaskInput.parse(plan.input), urls: string[] = [];
+      if (plan.route.upstreamModel.endsWith('-image-to-image')) { phase = 'upload'; urls.push(await client.upload(Buffer.from(image.split(',')[1]!, 'base64'), 'image/png', `ccagent/admin-tests/${initial.id}`, controller.signal)); }
+      sent = true;
+      phase = 'create';
+      const created = await client.create(plan.route.upstreamModel, input, urls, controller.signal);
+      if (created.rejected) result = { ...initial, status: 'failed', publicCostMicro: '0', code: 'IMAGE_SUPPLIER_REJECTED', message: '供应商拒绝测试请求，未自动重试。' };
+      else if (!created.taskId) throw new Error('IMAGE_CREATE_UNCONFIRMED');
+      else {
+        // Keep the provider handle server-side for audit/reconciliation, outside the returned test object.
+        phase = 'record'; await database().db.insert(audit).values({ id: initial.id + ':image-task', actorId, action: 'routes.test.image-task', objectId: initial.routeId,
+          result: 'submitted', metadata: { testId: initial.id, upstreamTaskId: created.taskId } }).onConflictDoNothing();
+        while (true) {
+          controller.signal.throwIfAborted();
+          phase = 'query'; const task = await client.query(created.taskId, controller.signal, { model: plan.route.upstreamModel, resolution: '1K' });
+          if (task.state === 'fail') { result = { ...initial, status: 'failed', publicCostMicro: '0', code: 'IMAGE_GENERATION_FAILED', message: '供应商确认测试任务失败，未自动重试。' }; break; }
+          if (task.state === 'success') {
+            if (task.credits !== undefined && task.credits !== 6) throw new Error('IMAGE_USAGE_UNCONFIRMED');
+            phase = 'download'; await client.download(task.urls[0]!, controller.signal);
+            phase = 'cost';
+            const quantities = { output_images_1k: 1n, output_images_2k: 0n, output_images_4k: 0n }, quote = quoteDefinition(plan.selection.definition, plan.selection.currency, quantities, startedAt, plan.selection.usdCny ?? undefined);
+            result = { ...initial, status: 'succeeded', responseValidated: true, usageVerified: true, quantities: { output_images_1k: '1', output_images_2k: '0', output_images_4k: '0' }, publicCostMicro: quote.publicCostMicro.toString(), estimateExceeded: quote.publicCostMicro > BigInt(initial.estimatedPublicCostMicro), message: '图像任务、图片内容与一张 1K 用量已核实；费用由平台承担。' }; break;
+          }
+          await new Promise<void>((resolve, reject) => { const pause = setTimeout(() => { controller.signal.removeEventListener('abort', stop); resolve(); }, 2500); const stop = () => { clearTimeout(pause); reject(new Error('ABORTED')); }; controller.signal.addEventListener('abort', stop, { once: true }); });
+        }
+      }
+    } catch { result = { ...initial, status: sent ? 'unknown' : 'failed', ...(!sent ? { publicCostMicro: '0' } : {}), code: controller.signal.aborted ? 'TEST_TIMEOUT' : `TEST_IMAGE_${phase.toUpperCase()}_UNCONFIRMED`, message: '图像检测结果尚未确认；请核对原任务，不会自动重试创建。' }; }
+    finally { clearTimeout(timer); }
+    result = { ...result, requestSent: sent, ...(sent ? { executionStartedAt: startedAt.toISOString() } : {}), completedAt: now().toISOString(), durationMs: Math.max(0, now().getTime() - startedAt.getTime()) };
+    await database().db.insert(audit).values({ id: initial.id + ':result', actorId, action: resultAction, objectId: initial.routeId, result: result.status, metadata: result }).onConflictDoNothing();
+  }
   async function execute(actorId: string, plan: ReturnType<typeof planFor>, initial: RouteTestResult, secret: string) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), plan.timeoutMs);
     const startedAt = now(); let sent = false, status: number | undefined, result: RouteTestResult = initial;
@@ -159,7 +201,7 @@ export function createRouteTests(options: { fetch?: typeof fetch; keepAlive?: (w
         return { plan, result, secret };
       });
       if ('existing' in claimed && claimed.existing) { const result = await resultFor(claimed.existing, now()); return json({ test: result, replay: true }, result.status === 'running' ? 202 : 200); }
-      const work = execute(current.user.id, claimed.plan!, claimed.result!, claimed.secret!);
+      const work = claimed.plan!.endpoint === 'images' ? executeImage(current.user.id, claimed.plan!, claimed.result!, claimed.secret!) : execute(current.user.id, claimed.plan!, claimed.result!, claimed.secret!);
       void work.catch(() => { console.error('ROUTE_TEST_FINALIZATION_FAILED'); }); options.keepAlive?.(work);
       return json({ test: claimed.result, replay: false }, 202);
     } catch (error) { return errorResponse(error); }

@@ -4,11 +4,15 @@ import * as tables from './db/schema';
 import { HttpError, pagination } from './http';
 import { parseAdminFilters, type AdminFilterValues, type AdminSection } from './admin-filters';
 import { inspectDatabaseStructure, type AppliedMigration } from './db/migration-state';
+import { displayMoneyValue, moneyColumnLabel, presentMoneyDetails } from './money-display';
+import { activeRouteCondition } from './route-lifecycle';
+import { routeCredentialStatuses } from './provider-credentials';
 
 export type { AdminSection } from './admin-filters';
 type View = { table: SQL; columns: SQL; filter: SQL; order: SQL; permission: string; title: string };
 const views: Record<AdminSection, View> = {
-  users: { table: sql`${tables.user}`, columns: sql`id,name,email,email_verified,banned,(select coalesce(jsonb_agg(ur.role_id),'[]'::jsonb) from ${tables.userRoles} ur where ur.user_id="user".id) as roles,created_at`, filter: sql`email`, order: sql`created_at desc,id`, permission: 'admin.read', title: '用户管理' },
+  users: { table: sql`${tables.user}`, columns: sql`id,name,email,email_verified,banned,(select coalesce(jsonb_agg(ur.role_id),'[]'::jsonb) from ${tables.userRoles} ur where ur.user_id="user".id) as roles,
+    coalesce((select uw.balance from ${tables.wallets} uw where uw.user_id="user".id),0)::text as user_balance,created_at`, filter: sql`email`, order: sql`created_at desc,id`, permission: 'admin.read', title: '用户管理' },
   roles: { table: sql`${tables.roles}`, columns: sql`id,name,created_at`, filter: sql`name`, order: sql`id`, permission: 'admin.read', title: '角色管理' },
   permissions: { table: sql`${tables.permissions}`, columns: sql`id,name`, filter: sql`name`, order: sql`id`, permission: 'admin.read', title: '权限目录' },
   keys: { table: sql`${tables.apiKeys} k join ${tables.user} u on u.id=k.user_id`, columns: sql`k.id,k.user_id,u.email,k.name,k.prefix,k.enabled,k."limit",k.spent,k.frozen,k.created_at,k.revoked_at`, filter: sql`k.name`, order: sql`k.created_at desc,k.id`, permission: 'keys.write', title: 'API Key 管理' },
@@ -49,7 +53,12 @@ export async function adminRows(section: string, url: URL, exportCsv = false) {
     const rows = await tx.execute<Record<string, unknown>>(sql`select ${view.columns} from ${relation} ${outerWhere} order by ${view.order} limit ${exportCsv ? 10000 : paging.pageSize} offset ${exportCsv ? 0 : paging.offset}`);
     const [total] = await tx.execute<Record<string, string>>(sql`select count(*)::text as count ${sum ? sql`,${sum}` : sql``} from ${relation} ${outerWhere}`);
     const { count, ...summary } = total;
-    return { title: view.title, rows: Array.from(rows), total: Number(count), page: paging.page, pageSize: paging.pageSize, q: filters.q || '', filters, summary };
+    let safeRows = Array.from(rows);
+    if (section === 'routes') {
+      const statuses = await routeCredentialStatuses(safeRows.map(row => ({ id: String(row.id), provider: String(row.provider), baseUrl: String(row.base_url), credentialEnv: String(row.credential_env) })), tx);
+      safeRows = safeRows.map(row => ({ ...row, credential_configured: statuses.get(String(row.id))?.configured ?? false }));
+    }
+    return { title: view.title, rows: safeRows, total: Number(count), page: paging.page, pageSize: paging.pageSize, q: filters.q || '', filters, summary };
   }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
 }
 
@@ -62,6 +71,7 @@ function filteredConditions(section: AdminSection, view: View, values: AdminFilt
     ledger: sql`${tables.ledger.createdAt}`, audit: sql`${tables.audit.createdAt}`, routes: sql`${tables.routes.updatedAt}`, prices: sql`${tables.prices.effectiveAt}` };
   const route = ['usage', 'tasks'].includes(section) ? sql`${tables.reservations.routeId}` : section === 'prices' ? sql`${tables.prices.routeId}` : undefined;
   const result: SQL[] = [];
+  if (section === 'routes') result.push(activeRouteCondition());
   if (values.q) result.push(sql`${view.filter}::text ilike ${contains(values.q)} escape '!'`);
   const owner = userColumns[section];
   if (values.user && owner) result.push(sql`(${owner}=${values.user} or exists(select 1 from ${tables.user} filter_user where filter_user.id=${owner} and filter_user.email ilike ${contains(values.user)} escape '!'))`);
@@ -105,8 +115,8 @@ export async function databaseOverview(permissions: readonly string[] = []) {
     (select count(*) from (select user_id,task_id from ${tables.reservations} group by user_id,task_id) task_groups)::text as tasks,
     (select count(*) from ${tables.ledger})::text as ledger,
     (select count(*) from ${tables.audit})::text as audit,
-    (select count(*) from ${tables.routes})::text as routes,
-    (select count(*) from ${tables.routes} where enabled)::text as enabled_routes,
+    (select count(*) from ${tables.routes} where ${activeRouteCondition()})::text as routes,
+    (select count(*) from ${tables.routes} where enabled and ${activeRouteCondition()})::text as enabled_routes,
     (select count(*) from ${tables.prices})::text as prices,
     (select count(*) from ${tables.blobs} where status not in ('deleted','purged'))::text as files,
     (select count(*) from ${tables.orders} where status = 'pending')::text as pending_orders,
@@ -128,10 +138,10 @@ export async function databaseOverview(permissions: readonly string[] = []) {
 export function csvResponse(rows: Record<string, unknown>[], section: string): Response {
   const columns = rows.length ? Object.keys(rows[0]) : ['无记录'];
   const cell = (value: unknown) => {
-    let text = value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+    let text = value == null ? '' : typeof value === 'object' ? JSON.stringify(presentMoneyDetails(value), (_key, item: unknown) => typeof item === 'bigint' ? item.toString() : item) : String(value);
     if (/^[=+@\-\t\r]/.test(text)) text = `'${text}`;
     return `"${text.replaceAll('"', '""')}"`;
   };
-  const body = '\uFEFF' + [columns.map(cell).join(','), ...rows.map(row => columns.map(column => cell(row[column])).join(','))].join('\r\n');
+  const body = '\uFEFF' + [columns.map(column => cell(moneyColumnLabel(column) || column)).join(','), ...rows.map(row => columns.map(column => cell(displayMoneyValue(column, row[column]))).join(','))].join('\r\n');
   return new Response(body, { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="ccagent-${section}.csv"`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }

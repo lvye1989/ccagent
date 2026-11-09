@@ -1,4 +1,4 @@
-/** Offline UI behavior with simulated replies; this does not verify live Photoshop, ComfyUI or SketchUp instances. */
+/** Offline UI behavior with simulated replies; this does not verify live third-party services. */
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { Window } from "happy-dom";
@@ -11,7 +11,7 @@ const calls = [], messages = [];
 let photoshopReply, releasePhotoshopTest, delayPhotoshopTest = false;
 let comfyReply, releaseComfyTest, delayComfyTest = false;
 let sketchupReply, releaseSketchupTest, delaySketchupTest = false;
-let apps = COMMON_APPS.map((app) => ({ ...app, state: "available", installed: false, tools: 0, googleConfigured: false }));
+let apps = COMMON_APPS.map((app) => ({ ...app, state: "available", installed: false, tools: 0, googleConfigured: false, oauthConfigured: false }));
 const api = async (route, options) => {
   const body = options?.body ? JSON.parse(options.body) : null; calls.push({ route, body });
   if (route === "/api/plugins") return { installed: [], available: [], marketplaces: [] };
@@ -22,7 +22,12 @@ const api = async (route, options) => {
     else Object.assign(app, { installed: false, state: "available", tools: 0 });
     return { apps: structuredClone(apps) };
   }
-  if (route === "/api/mcp/action") { const app = apps.find((row) => row.serverName === body.name); app.state = body.op === "close" ? "disabled" : "connected"; app.tools = 3; return {}; }
+  if (route === "/api/mcp/action") {
+    const app = apps.find((row) => row.serverName === body.name);
+    app.state = body.op === "close" ? "disabled" : app.auth === "oauth" && body.op === "auth" ? "pending" : "connected";
+    app.tools = app.state === "connected" ? 3 : 0;
+    return {};
+  }
   if (route === "/api/apps/photoshop/test") {
     if (delayPhotoshopTest) await new Promise((resolve) => { releasePhotoshopTest = resolve; });
     if (photoshopReply instanceof Error) throw photoshopReply;
@@ -52,8 +57,9 @@ try {
   const { createPluginUI } = await import("../web/plugins.js");
   const pluginUI = createPluginUI({ api, toast: (message) => messages.push(message), navigate() {} });
   await pluginUI.open("plugins");
-  assert.equal(document.querySelectorAll(".app-card").length, 12);
-  assert.equal(document.querySelectorAll(".app-card img[src^='data:image/svg+xml,']").length, 12);
+  assert.equal(document.querySelectorAll(".app-card").length, COMMON_APPS.length);
+  assert.equal(document.querySelectorAll(".app-card img[src^='data:image/svg+xml,']").length, COMMON_APPS.length);
+  for (const id of ["canva", "figma", "autocad"]) assert.ok(document.querySelector(`[data-app-id="${id}"] img[src^='data:image/svg+xml,']`), `${id} has a locally bundled icon`);
   document.querySelector('[data-app-id="github"]').click();
   assert.equal(document.activeElement, $("plugin-dialog-close"));
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, cancelable: true }));
@@ -301,6 +307,116 @@ try {
   assert.ok(!$("installed-sidebar-list").textContent.includes("SketchUp"));
   assert.equal(calls.filter((call) => call.route === "/api/apps/action" && call.body.id === "sketchup").at(-1).body.op, "uninstall");
 
+  document.querySelector('[data-app-id="canva"]').click();
+  assert.equal(document.querySelector('input[name="clientId"]').type, "password");
+  assert.equal(document.querySelector('input[name="clientSecret"]').type, "password");
+  assert.equal(document.querySelector('input[name="redirectUri"]').value, "http://127.0.0.1:53683/oauth/callback");
+  assert.match($("plugin-dialog-body").textContent, /Canva 开发者平台/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("获取令牌"));
+  clickAction("添加并连接"); await flush();
+  assert.match(messages.at(-1), /同时填写 Canva/);
+  assert.ok(!calls.some((call) => call.route === "/api/apps/action" && call.body.id === "canva"));
+  document.querySelector('input[name="clientId"]').value = " fixture-canva-client ";
+  document.querySelector('input[name="clientSecret"]').value = " fixture-canva-secret ";
+  clickAction("添加并连接"); await flush();
+  assert.deepEqual(calls.find((call) => call.route === "/api/apps/action" && call.body.id === "canva").body, {
+    id: "canva", op: "install", credentials: { clientId: "fixture-canva-client", clientSecret: "fixture-canva-secret", redirectUri: "http://127.0.0.1:53683/oauth/callback" },
+  });
+  assert.equal($("plugin-dialog-body").querySelectorAll("input").length, 0, "Canva client secrets disappear after installation");
+  assert.match($("plugin-dialog-body").textContent, /待授权 \/ 连接中/);
+  assert.match(messages.at(-1), /授权连接/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("fixture-canva-secret"));
+  clickAction("授权连接"); await flush();
+  assert.deepEqual(calls.filter((call) => call.route === "/api/mcp/action").at(-1).body, { name: "app-canva", op: "auth" });
+  assert.match($("plugin-dialog-body").textContent, /待授权 \/ 连接中/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("连接状态：已连接"), "Starting browser authorization alone does not claim Canva connectivity");
+  apps.find((app) => app.id === "canva").state = "failed";
+  await pluginUI.open("plugins"); document.querySelector('[data-app-id="canva"]').click();
+  assert.match($("plugin-dialog-body").textContent, /待授权 \/ 连接失败/);
+  assert.match($("plugin-dialog-body").textContent, /点击‘授权连接’/);
+  clickAction("重新检测"); await flush();
+  assert.match($("plugin-dialog-body").textContent, /已连接/);
+  clickAction("断开连接"); await flush(); assert.match($("plugin-dialog-body").textContent, /已断开/);
+  assert.ok(![...$("plugin-dialog-actions").querySelectorAll("button")].some((button) => button.textContent === "授权连接"));
+  clickAction("重新连接"); await flush();
+  clickAction("卸载"); assert.match($("plugin-dialog-body").textContent, /远端资料不会删除/);
+  clickAction("确认卸载"); await flush();
+  assert.ok(!$("installed-sidebar-list").textContent.includes("Canva"));
+
+  document.querySelector('[data-app-id="figma"]').click();
+  assert.equal($("plugin-dialog-body").querySelectorAll("input").length, 1);
+  assert.equal(document.querySelector('input[name="localUrl"]').value, "http://127.0.0.1:3845/mcp");
+  assert.match($("plugin-dialog-body").textContent, /Figma 桌面版/);
+  assert.match($("plugin-dialog-body").textContent, /读取设计上下文/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("获取令牌"));
+  for (const url of ["", "https://127.0.0.1:3845/mcp", "http://remote.example:3845/mcp", "http://localhost:0/mcp", "http://0x7f000001:3845/mcp", "http://127.0.0.1:3845/", "http://user:secret@localhost:3845/mcp", "http://localhost:3845/mcp?token=secret", "javascript:alert(1)"]) {
+    document.querySelector('input[name="localUrl"]').value = url; clickAction("添加并连接"); await flush();
+    assert.match(messages.at(-1), /本机 Figma MCP 地址/);
+    assert.ok(!calls.some((call) => call.route === "/api/apps/action" && call.body.id === "figma"));
+  }
+  document.querySelector('input[name="localUrl"]').value = " http://127.0.0.1:3845/mcp ";
+  clickAction("添加并连接"); await flush();
+  assert.deepEqual(calls.find((call) => call.route === "/api/apps/action" && call.body.id === "figma").body, { id: "figma", op: "install", credentials: { localUrl: "http://127.0.0.1:3845/mcp" } });
+  assert.ok(!document.querySelector(".app-test-actions"), "Figma does not promise a nonexistent separate readiness test");
+  assert.ok(![...$("plugin-dialog-actions").querySelectorAll("button")].some((button) => button.textContent === "授权连接"), "Local Figma is not treated as an OAuth service");
+  clickAction("重新检测"); await flush(); assert.match($("plugin-dialog-body").textContent, /MCP 已连接/);
+  clickAction("断开连接"); await flush(); assert.match($("plugin-dialog-body").textContent, /已断开/);
+  clickAction("重新连接"); await flush();
+  clickAction("卸载"); assert.match($("plugin-dialog-body").textContent, /本机 Figma、设计文件/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("Photoshop"));
+  clickAction("确认卸载"); await flush();
+  assert.ok(!$("installed-sidebar-list").textContent.includes("Figma"));
+
+  document.querySelector('[data-app-id="autocad"]').click();
+  assert.equal($("plugin-dialog-body").querySelectorAll("input").length, 3);
+  assert.equal(document.querySelector('input[name="workingDirectory"]').value, "");
+  assert.equal(document.querySelector('input[name="progId"]').value, "AutoCAD.Application.25");
+  assert.equal(document.querySelector('input[name="mcpExecutable"]').type, "text");
+  assert.match($("plugin-dialog-body").textContent, /社区 AutoCAD MCP/);
+  assert.match($("plugin-dialog-body").textContent, /uvx.*Python 3\.11/);
+  assert.match($("plugin-dialog-body").textContent, /关闭自动启动和 Lisp/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("获取令牌"));
+  clickAction("添加并连接"); await flush();
+  assert.match(messages.at(-1), /专用 CAD 工作目录/);
+  assert.ok(!calls.some((call) => call.route === "/api/apps/action" && call.body.id === "autocad"));
+  document.querySelector('input[name="workingDirectory"]').value = " C:\\CAD 工作区 ";
+  for (const progId of ["AutoCAD.Application", "Excel.Application.25", "AutoCAD.Application.25;anything", "AutoCAD.Application.25.1.1"]) {
+    document.querySelector('input[name="progId"]').value = progId; clickAction("添加并连接"); await flush();
+    assert.match(messages.at(-1), /有效的 AutoCAD COM 标识/);
+    assert.ok(!calls.some((call) => call.route === "/api/apps/action" && call.body.id === "autocad"));
+  }
+  document.querySelector('input[name="progId"]').value = " AutoCAD.Application.23.1 ";
+  document.querySelector('input[name="mcpExecutable"]').value = " C:\\Tools\\autocad-mcp.exe ";
+  clickAction("添加并连接"); await flush();
+  assert.deepEqual(calls.find((call) => call.route === "/api/apps/action" && call.body.id === "autocad").body, { id: "autocad", op: "install", credentials: { workingDirectory: "C:\\CAD 工作区", progId: "AutoCAD.Application.23.1", mcpExecutable: "C:\\Tools\\autocad-mcp.exe" } });
+  assert.ok(!document.querySelector(".app-test-actions"), "AutoCAD only exposes implemented controls");
+  assert.match(messages.at(-1), /准备本机运行环境/);
+  apps.find((app) => app.id === "autocad").state = "failed";
+  await pluginUI.open("plugins"); document.querySelector('[data-app-id="autocad"]').click();
+  assert.match($("plugin-dialog-body").textContent, /请检查 AutoCAD 与 MCP 运行环境/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("实机测试会分别显示结果"), "AutoCAD does not point users to an unimplemented separate test");
+  clickAction("重新检测"); await flush(); assert.match($("plugin-dialog-body").textContent, /MCP 已连接/);
+  clickAction("断开连接"); await flush();
+  clickAction("重新连接"); await flush();
+  clickAction("卸载"); assert.match($("plugin-dialog-body").textContent, /AutoCAD、MCP 程序及 DWG \/ DXF 图纸会保留/);
+  assert.ok(!$("plugin-dialog-body").textContent.includes("Photoshop"));
+  clickAction("确认卸载"); await flush();
+  assert.ok(!$("installed-sidebar-list").textContent.includes("AutoCAD"));
+
+  const canvaApp = apps.find((app) => app.id === "canva");
+  Object.assign(canvaApp, { url: "javascript:alert(1)", help: "https://user:secret@unsafe.example/", note: "<img src=x onerror=alert(1)>" });
+  await pluginUI.open("plugins"); document.querySelector('[data-app-id="canva"]').click();
+  assert.equal($("plugin-dialog-body").querySelectorAll("a").length, 0, "Catalog links reject unsafe schemes and URL credentials");
+  assert.ok($("plugin-dialog-body").textContent.includes("<img src=x onerror=alert(1)>"));
+  assert.equal($("plugin-dialog-body").querySelectorAll("img").length, 1, "Notes remain text, while the bundled brand icon remains an image");
+  Object.assign(canvaApp, COMMON_APPS.find((app) => app.id === "canva"));
+  await pluginUI.open("plugins");
+  for (const id of ["canva", "figma", "autocad"]) {
+    document.querySelector(`[data-app-id="${id}"]`).click();
+    const links = [...$("plugin-dialog-body").querySelectorAll("a")]; assert.equal(links.length, 2);
+    for (const link of links) { assert.equal(new URL(link.href).protocol, "https:"); assert.equal(link.target, "_blank"); assert.equal(link.rel, "noopener noreferrer"); assert.equal(link.referrerPolicy, "no-referrer"); }
+  }
+
   document.querySelector('[data-app-id="google-drive"]').click(); clickAction("安装并连接"); await flush();
   assert.match(messages.at(-1), /同时填写/);
   $("plugin-dialog-body").querySelector("input").value = "discarded-client";
@@ -335,5 +451,5 @@ try {
   assert.equal(await promotion.tryShow(), true); promotion.dismiss(); assert.equal(await promotion.tryShow(), false); promotion.destroy();
   promotion = createHomePromotion({ ...opts, campaign: { ...HOME_PROMOTION, url: "javascript:alert(1)" } }); await promotion.start(); assert.equal(await promotion.tryShow(), false); promotion.destroy();
   promotion = createHomePromotion({ ...opts, campaign: { ...HOME_PROMOTION, enabled: false } }); await promotion.start(); assert.equal(await promotion.tryShow(), false); promotion.destroy();
-  console.log("Offline app catalog UI: 12 icons, token/local installation, MCP state distinction, simulated Photoshop connection/export/error/busy replies, safe file links, workspace invalidation, ComfyUI and SketchUp forms/readonly readiness/error/busy/reconnect/uninstall, loopback links, filtering; promotion safe destination, focus, daily cap and idle gating passed. No live Photoshop, ComfyUI or SketchUp connectivity was tested by this suite.");
+  console.log(`Offline app catalog UI: ${COMMON_APPS.length} icons, token/local installation, Canva client configuration/browser authorization/pending state, Figma loopback context connection, AutoCAD dedicated workspace configuration and preservation, safe catalog links, MCP state distinction, simulated Photoshop connection/export/error/busy replies, safe file links, workspace invalidation, ComfyUI and SketchUp forms/readonly readiness/error/busy/reconnect/uninstall, loopback links, filtering; promotion safe destination, focus, daily cap and idle gating passed. No live third-party connectivity was tested by this suite.`);
 } finally { globalThis.setInterval = savedInterval; await window.happyDOM.close(); }

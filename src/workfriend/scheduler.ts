@@ -15,6 +15,8 @@ export interface WorkfriendSchedule {
   assessmentSummary?: string;
   contextSummary?: string;
   cwd: string;
+  /** Originating conversation; absent on schedules created by older clients. */
+  ownerSessionId?: string;
   status: "pending" | "fired" | "cancelled";
 }
 
@@ -50,6 +52,7 @@ async function readSchedules(): Promise<WorkfriendSchedule[]> {
       typeof item.id !== "string" || typeof item.cwd !== "string" || typeof item.workdayEnd !== "string" ||
       typeof item.workSummary !== "string" || typeof item.moodSummary !== "string" ||
       typeof item.checkInAt !== "string" || !Number.isFinite(Date.parse(item.checkInAt)) ||
+      (item.ownerSessionId !== undefined && (typeof item.ownerSessionId !== "string" || !item.ownerSessionId.trim())) ||
       !["pending", "fired", "cancelled"].includes(item.status)) || new Set(raw.schedules.map(item => item.id)).size !== raw.schedules.length) {
       throw new Error("Invalid schedules");
     }
@@ -108,6 +111,7 @@ async function fireSchedule(id: string): Promise<void> {
   if (!schedule) return;
   enqueuePendingNotification({
     mode: "workfriend-notification",
+    ...(schedule.ownerSessionId ? { ownerSessionId: schedule.ownerSessionId } : {}),
     text: formatCheckIn(schedule),
   });
 }
@@ -146,6 +150,7 @@ export async function createWorkfriendSchedule(input: {
   assessmentSummary?: string;
   contextSummary?: string;
   cwd: string;
+  ownerSessionId?: string;
   now?: Date;
 }): Promise<WorkfriendSchedule> {
   schedulerStarted = true;
@@ -167,6 +172,7 @@ export async function createWorkfriendSchedule(input: {
     ...(input.assessmentSummary?.trim() ? { assessmentSummary: input.assessmentSummary.trim() } : {}),
     ...(input.contextSummary?.trim() ? { contextSummary: input.contextSummary.trim() } : {}),
     cwd: input.cwd,
+    ...(input.ownerSessionId ? { ownerSessionId: input.ownerSessionId } : {}),
     status: "pending",
   };
   await withSchedules(schedules => { schedules.push(schedule); });

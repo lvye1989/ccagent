@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "mode": "connection",
+  "message": "真实 Photoshop 脚本响应正常，已读取运行版本和文档状态。",
+  "testedAt": "2026-11-09T17:08:06.412Z",
+  "toolCount": 128,
+  "reportPath": "output/photoshop-mcp-tests/2026-11-09T17-08-06-411Z-56a45bb5/report.json",
+  "workspace": "C:\\Users\\Windows11\\Desktop\\ccagent.src\\ccagent-0.1.1",
+  "version": "27.2.0",
+  "documents": {
+    "count": 1,
+    "activeDocumentId": 60
+  },
+  "events": [
+    {
+      "tool": "photoshop_ping",
+      "ok": true,
+      "ms": 2170
+    },
+    {
+      "tool": "photoshop_execute_script",
+      "ok": true,
+      "ms": 1678
+    }
+  ]
+}

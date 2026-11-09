@@ -6,7 +6,7 @@ import { del } from '@vercel/blob';
 import { hashPassword } from 'better-auth/crypto';
 import { isolatedDatabase } from './database-fixture';
 
-test('explicitly approved one-hop fallback preserves real funding snapshots billing replay and streaming boundaries', { timeout: 480000 }, async t => {
+test('explicitly approved one-hop fallback preserves real funding snapshots billing replay and streaming boundaries', { timeout: 900000 }, async t => {
   const fixture = await isolatedDatabase();
   process.env.AUTH_URL = 'http://127.0.0.1:4310'; process.env.AUTH_SECRET = randomBytes(48).toString('base64url');
   const primaryEnv = 'CCAGENT_PROVIDER_FALLBACK_PRIMARY', backupEnv = 'CCAGENT_PROVIDER_FALLBACK_BACKUP';

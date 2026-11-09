@@ -431,7 +431,7 @@ export function createBrowserSearchTool(runtime: BrowserSearchRuntime): Tool {
     name: "BrowserSearch",
     decisionPolicy: "specialized_jev",
     description:
-      "Fast one-shot path for an ordinary public search or direct URL. It needs no ComputerObserve snapshot: CCAGENT validates a fixed search-engine/HTTPS destination and Jev reviews the complete operation once. In a Web conversation the page opens in the conversation side panel; in the CLI it opens in the OS default browser. Use WebSearch instead when the user needs facts, sources, or a summary. Use ComputerObserve/ComputerActionGroup/ComputerAction only when interaction is needed after the page opens. Never use this tool for login, CAPTCHA, forms, uploads, communication, purchases, account changes, or secret-bearing queries.",
+      "Fast one-shot path for an ordinary public search or direct URL. It needs no ComputerObserve snapshot: CCAGENT validates a fixed search-engine/HTTPS destination and Jev reviews the complete operation once. Web conversations and CLI sessions both open the OS default browser through the same execution path. Use WebSearch instead when the user needs facts, sources, or a summary. Use ComputerObserve/ComputerActionGroup/ComputerAction only when interaction is needed after the page opens. Never use this tool for login, CAPTCHA, forms, uploads, communication, purchases, account changes, or secret-bearing queries.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -483,24 +483,6 @@ export function createBrowserSearchTool(runtime: BrowserSearchRuntime): Tool {
       }
 
       try {
-        if (context.openUrlInWebPanel) {
-          const accepted = await context.openUrlInWebPanel(plan.canonicalUrl, context.abortSignal);
-          if (!accepted) throw new Error("No Web conversation is connected to receive the page.");
-          return {
-            content: [
-              "[BrowserSearch]",
-              `action=${plan.action}`,
-              ...(plan.engine ? [`engine=${plan.engine}`] : []),
-              `destination_host=${plan.destinationHost}`,
-              `requested_url=${resultUrl(plan)}`,
-              "launch_status=accepted",
-              "browser_surface=web_side_panel",
-              "page_load=not independently verified; the destination may prevent framing",
-              `gate=${grant.decisionSummary}`,
-              `final_permission=${grant.finalPermission}`,
-            ].join("\n"),
-          };
-        }
         await runtime.ensureIndicator(context.sessionId, `BrowserSearch: ${plan.destinationHost}`);
         const accepted = await runtime.openExternalUrl(plan.canonicalUrl, context.abortSignal);
         if (!accepted) throw new Error("The operating system did not accept the browser launch request.");
@@ -515,6 +497,7 @@ export function createBrowserSearchTool(runtime: BrowserSearchRuntime): Tool {
             `destination_host=${plan.destinationHost}`,
             `requested_url=${resultUrl(plan)}`,
             "launch_status=accepted",
+            "browser_surface=os_default_browser",
             `browser_window=${detected ? `${detected.processName} detected` : "not independently detected"}`,
             "page_load=not independently verified; no screenshot, accessibility scan, or vision model was used",
             `gate=${grant.decisionSummary}`,

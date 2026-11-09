@@ -17,15 +17,18 @@ export function requireMaintenanceIdentity(request: Request): void {
 /** One autocommit settlement per call acquires the account lock before key, wallet and reservation locks. */
 export async function releaseExpiredUsage(options: { limit?: number; deadline?: number } = {}) {
   const db = database().db;
-  const expired = await db.select({ id: reservations.id, userId: reservations.userId }).from(reservations)
+  const expired = await db.select({ id: reservations.id, userId: reservations.userId, usage: reservations.usage }).from(reservations)
     .where(and(inArray(reservations.status, ['held', 'pending']), lte(reservations.reconcileAt, new Date())))
     .orderBy(reservations.reconcileAt).limit(Math.min(Math.max(options.limit ?? 100, 1), 200));
   let released = 0, deferred = 0, completed = 0;
   for (const item of expired) {
     if (Date.now() >= (options.deadline ?? Infinity)) { deferred += expired.length - completed; break; }
     try {
+      const usage = item.usage && typeof item.usage === 'object' ? item.usage as Record<string, unknown> : {};
+      const imageTask = usage.imageTask && typeof usage.imageTask === 'object' ? usage.imageTask as Record<string, unknown> : undefined;
       await finishUsage({ userId: item.userId, reservationId: item.id, charged: 0n, release: true,
-        usage: { reason: 'unmeasured_after_24h', platformAbsorbed: true, automatic: true } });
+        usage: { reason: 'unmeasured_after_24h', platformAbsorbed: true, automatic: true,
+          ...(imageTask ? { imageTask: { ...imageTask, status: 'unknown', code: 'IMAGE_CALL_CLOSED', leaseId: undefined, leaseUntil: undefined } } : {}) } });
       released++;
     } catch (error) {
       // A measured settlement may have won the race; it must never be overwritten or charged again.

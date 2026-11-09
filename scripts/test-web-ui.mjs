@@ -13,7 +13,11 @@ Object.defineProperty(globalThis, "navigator", { value: window.navigator, config
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 globalThis.setInterval = () => 0;
 globalThis.EventSource = class { constructor() { globalThis.lastEventSource = this; } close() {} };
-const calls = [], models = [{ id: "fixture", label: "Fixture", model: "fixture", available: true }];
+const calls = [], models = [
+  { id: "fixture", label: "Fixture", model: "fixture", available: true },
+  { id: "ccagent:qwen-vision", label: "Qwen vision tool", model: "qwen-vision", available: true, mainModelSelectable: false },
+  { id: "ccagent:backup", label: "Official backup", model: "backup", available: true, mainModelSelectable: false },
+];
 const accountPopups = [];
 let accountGesture = false;
 window.open = (url, name) => { const popup = { url, name, inGesture: accountGesture, closed: false, sent: [], postMessage(value, targetOrigin) { this.sent.push({ value, targetOrigin }); } }; accountPopups.push(popup); return popup; };
@@ -22,7 +26,10 @@ const skill = { name: "test-skill", description: "Skill", source: "project", ena
 const teams = [{ id: "qa-team", name: "QA Team", description: "Evidence", enabled: true, roles: [{ name: "reviewer", agentType: "qa", prompt: "Check facts" }] }];
 let teamEnabled = true;
 const sessionId = "11111111-1111-4111-8111-111111111111";
-let sessionMode = "default", failUpload = false, failSubmit = false, effortLevel = "";
+const removableSessionId = "33333333-3333-4333-8333-333333333333";
+let recentSessions = [{ sessionId, firstPrompt: "保留的历史任务" }, { sessionId: removableSessionId, firstPrompt: "待删除任务" }];
+let sessionMode = "default", failUpload = false, failSubmit = false, effortLevel = "", useCreationSnapshot = true;
+let additionalDirectories = [], pickedDirectory = "E:\\选择的 输出目录";
 const recognizers = [];
 window.SpeechRecognition = class {
   constructor() { recognizers.push(this); }
@@ -49,8 +56,13 @@ globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
   calls.push({ route, payload });
   let data;
-  if (route === "/api/bootstrap") data = { sessions: [{ sessionId, firstPrompt: "保留的历史任务" }], workspace: "C:\\offline-project", version: "test", model: "fixture", defaultMode: "plan" };
-  else if (route === "/api/sessions") data = { sessionId };
+  if (route === "/api/bootstrap") data = { sessions: recentSessions, workspace: "C:\\offline-project", version: "test", model: "fixture", defaultMode: "plan" };
+  else if (route === `/api/memory/sessions/${removableSessionId}` && payload?.action === "delete") {
+    assert.equal(payload.workspace, "C:\\offline-project");
+    recentSessions = recentSessions.filter((item) => item.sessionId !== removableSessionId);
+    data = { deleted: true };
+  }
+  else if (route === "/api/sessions") data = { sessionId, ...(useCreationSnapshot ? { snapshot: { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false, lastEventId: 0 } } : {}) };
   else if (route === `/api/sessions/${sessionId}`) data = { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false };
   else if (route === `/api/sessions/${sessionId}/mode`) { sessionMode = payload.mode; data = {}; }
   else if (route === `/api/sessions/${sessionId}/messages`) { if (failSubmit) throw new Error("Fixture submit failure"); data = { accepted: true }; }
@@ -63,19 +75,20 @@ globalThis.fetch = async (route, options = {}) => {
     else data = { path: dir, entries: dir ? [{ path: "资料/中文.md", name: "中文.md", size: 12, format: "text" }] : files, nextOffset: null, total: dir ? 1 : files.length };
   }
   else if (route === "/api/workspaces") data = { current: "C:\\offline-project", recent: [], locations: [], nativePickerAvailable: false };
+  else if (route === "/api/workspaces/pick") data = { path: pickedDirectory };
   else if (route.startsWith("/api/visualization?")) data = { workspace: "C:\\offline-project", datasets: [] };
   else if (route.startsWith("/api/workspaces/browse")) data = { path: "C:\\offline-project", parent: null, breadcrumbs: [], folders: [], total: 0 };
   else if (route === "/api/changes") data = { files: [] };
-  else if (route === "/api/models") data = { defaultModel: "fixture", models };
+  else if (route === "/api/models") data = { defaultModel: "ccagent:qwen-vision", models };
   else if (route === '/api/customize/official-services') {
     if (payload) {
       if (!officialConfigured) { officialConfigured = true; selectedOfficialRoles = { main: defaultOfficialRoute.id }; }
       else if (payload.roles !== undefined) selectedOfficialRoles = payload.roles;
       if (payload.fallbackEnabled !== undefined) officialFallback = payload.fallbackEnabled;
     }
-    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute] : [] };
+    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute] : [], wallet: { available: '1', balance: '100001', frozen: '100000' } };
   }
-  else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
+  else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; if (payload?.additionalDirectories) additionalDirectories = payload.additionalDirectories; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel, additionalDirectories }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
   else if (route === "/api/customize/models") { if (payload) models.push({ id: payload.id, label: payload.id, model: payload.model, available: true }); data = payload ? { id: payload.id } : { models: models.map((m) => ({ ...m, protocol: "openai-chat", baseURL: "https://example.test/v1" })) }; }
   else if (route === "/api/customize/model-test") data = { ok: true, reply: "OK" };
   else if (route === "/api/customize/teams") { if (payload?.op === "global") teamEnabled = payload.enabled; data = { teams, enabled: teamEnabled, activeTeam: null }; }
@@ -106,6 +119,10 @@ const click = async (selector) => { const n = typeof selector === "string" ? doc
 const close = () => click("#editor-close");
 function action(label) { return [...$("editor-actions").querySelectorAll("button")].find((b) => b.textContent === label); }
 try {
+  for (const id of ["home-model", "thread-model-select"]) {
+    assert.deepEqual([...$(id).options].map(option => option.value), ["fixture"], "Only main models appear; auxiliary and backup profiles remain outside the chat picker");
+    assert.equal($(id).value, "fixture", "A stale auxiliary default must not become the next chat's main model");
+  }
   for (const prefix of ["home", "thread"]) {
     const form = $(`${prefix}-form`), options = form.querySelector(".composer-options"), actions = form.querySelector(".composer-actions");
     assert(options.contains($(prefix === "home" ? "insert-command" : "thread-insert-tool")));
@@ -130,6 +147,18 @@ try {
   assert.equal($("home-mode").value, "full", "Changing effort preserves the user's selected permission mode"); $("home-mode").value = "plan";
   assert.equal($("search-tasks"), null); assert.equal($("rail-history"), null); assert.equal($("task-search-box"), null);
   assert.match($("recent-list").textContent, /保留的历史任务/, "Removing task search preserves history");
+  assert.equal($("cloudtv-entry").querySelector("img").getAttribute("src"), "/cloudtv-logo.jpg");
+  assert.equal($("city-renewal-entry").querySelector("img").getAttribute("src"), "/caiyunjian-logo.jpg");
+  for (const selector of ["#home-file", "#workspace-files-toggle", '[data-view="library"]']) assert(document.querySelector(`${selector} .folder-icon`));
+  const removeRecent = '[aria-label="删除记录：待删除任务"]';
+  window.confirm = () => false;
+  await click(removeRecent);
+  assert(!calls.some((call) => call.route === `/api/memory/sessions/${removableSessionId}`));
+  window.confirm = () => true;
+  await click(removeRecent);
+  assert.equal(document.querySelector(removeRecent), null);
+  assert.equal($("task-count").textContent, "1");
+  assert.match($("recent-list").textContent, /保留的历史任务/);
   assert(!$("workspace-files").classList.contains("hidden"), "Desktop home exposes the selected workspace on the right");
   const fileRow = (name) => [...$("files-list").querySelectorAll("button")].find((node) => node.dataset.path === name);
   await click(fileRow("资料")); assert.match($("files-list").textContent, /中文.md/); await click("#files-up");
@@ -150,17 +179,47 @@ try {
   await click("#insert-command"); await click(tool("选择工作文件夹")); assert(!$("workspace-overlay").classList.contains("hidden")); await click("#workspace-cancel");
   await click("#insert-command"); await click(tool("网络搜索")); assert.match($("home-input-attachments").textContent, /网络搜索/);
   await click("#insert-command"); await click(tool("技能和命令")); assert(!$("composer-tools").classList.contains("hidden")); await click(tool("/test-skill")); assert.match($("home-input").value, /^\/test-skill /);
+  const beforeFirstSubmit = calls.length;
   $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
+  assert.equal(calls.slice(beforeFirstSubmit).filter(call => call.route === `/api/sessions/${sessionId}`).length, 0, "First send reuses the authenticated creation snapshot instead of requesting the session again");
   const submitted = calls.find((call) => call.route === `/api/sessions/${sessionId}/messages`);
   assert.match(submitted.payload.text, /^\/test-skill\s/); assert.match(submitted.payload.text, /code.ts/); assert.match(submitted.payload.text, /WebSearch/); assert.match(submitted.payload.text, /Office 正文摘录/); assert.match(submitted.payload.text, /<img src=x>/);
   assert.match(submitted.payload.text, /@"image\.png"/, "Images use the shared CLI attachment grammar");
   assert($("home-input-attachments").classList.contains("hidden"), "Successful submission clears consumed references");
-  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  const executionId = "22222222-2222-4222-8222-222222222222";
+  const startedAt = new Date(Date.now() - 125000).toISOString();
+  const emit = (event) => lastEventSource.onmessage({ data: JSON.stringify(event) });
+  emit({ type: "turn_started", turnId: executionId, startedAt });
+  assert.equal(document.querySelectorAll(".turn-active").length, 1, "A team continuation without a user event still shows its real elapsed time");
+  emit({ type: "execution_state", execution: { id: executionId, startedAt, completedAt: null, reason: null, tools: [] }, serverTime: new Date().toISOString() });
+  emit({ type: "user", text: "展示真实执行状态" });
+  assert.equal(document.querySelector(".turn-activity").previousElementSibling?.textContent, "展示真实执行状态", "An early execution snapshot keeps the header below the arriving user bubble");
+  assert.match(document.querySelector(".turn-elapsed").textContent, /已处理 2分/);
+  emit({ type: "tool_start", id: "read-state", name: "Read", timestamp: startedAt });
+  assert.match($("thread-status-label").textContent, /正在调用.*读取文件.*Read/);
+  const runningExecution = { id: executionId, startedAt, completedAt: null, reason: null, tools: [{ id: "read-state", name: "Read", startedAt, completedAt: null }] };
+  emit({ type: "execution_state", execution: runningExecution, serverTime: new Date(Date.now() + 60000).toISOString() });
+  assert.equal(document.querySelectorAll(".turn-activity").length, 1, "Reconnect updates the existing turn header");
+  assert.equal(document.querySelectorAll(".tool-card").length, 1, "Reconnect does not duplicate a tool call");
+  assert.match(document.querySelector(".turn-elapsed").textContent, /已处理 3分/, "Elapsed uses the server clock");
+  emit({ type: "tool_done", id: "read-state", name: "Read", isError: false, timestamp: new Date().toISOString() });
+  assert.match($("thread-status-label").textContent, /正在整理结果/);
   lastEventSource.onmessage({ data: JSON.stringify({ type: "tool_start", id: "failed-image", name: "ReadImage" }) });
-  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "model_error" }) }); await settle();
-  assert.match($("thread-status-label").textContent, /失败/); assert(![...document.querySelectorAll(".tool-state")].some((node) => node.textContent === "执行中"), "Failed turns leave no tool card looking active");
+  const completedAt = new Date(Date.parse(startedAt) + 125000).toISOString();
+  emit({ type: "turn_complete", reason: "model_error", completedAt }); await settle();
+  assert.match($("thread-status-label").textContent, /失败/); assert(![...document.querySelectorAll(".tool-state")].some((node) => ["执行中", "调用中"].includes(node.textContent)), "Failed turns leave no tool card looking active");
+  const finishedExecution = { ...runningExecution, completedAt, reason: "model_error", tools: [{ ...runningExecution.tools[0], completedAt, isError: false }, { id: "failed-image", name: "ReadImage", startedAt, completedAt: null }] };
+  emit({ type: "execution_state", execution: finishedExecution, serverTime: new Date(Date.now() + 3600000).toISOString() });
+  assert.equal(document.querySelector(".turn-elapsed").textContent, "已处理 2分 5秒", "Completed elapsed stays frozen across reconnect and server clock changes");
+  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("ReadImage")).querySelector(".tool-state").textContent, "未完成", "An interrupted tool is not marked as completed");
+  console.log("Execution DOM: early-snapshot ordering, server-clock elapsed, current tools, reconnect deduplication, terminal tool state and frozen duration passed.");
   lastEventSource.onmessage({ data: JSON.stringify({ type: "model", model: "ccagent:fixture" }) });
   lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  emit({ type: "tool_start", id: "read-state", name: "Read" });
+  assert.equal([...document.querySelectorAll(".tool-card")].filter(row => row.querySelector(".tool-name").textContent === "Read").length, 2, "A reused tool ID in a new turn creates a new row and preserves history");
+  emit({ type: "tool_start", id: "browser-parity", name: "BrowserSearch" });
+  assert.equal([...document.querySelectorAll(".tool-name")].find(node => node.textContent === "Jev Browser Search")?.textContent, "Jev Browser Search", "The canonical BrowserSearch event uses the CLI display name");
+  emit({ type: "tool_done", id: "browser-parity", name: "BrowserSearch", isError: false });
   const beforeStop = calls.length;
   await click("#stop-button");
   assert.equal(calls.slice(beforeStop).filter(call => call.route.endsWith('/interrupt')).length, 1);
@@ -169,14 +228,81 @@ try {
   assert.equal($("stop-button").disabled, false);
   lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "aborted" }) });
   lastEventSource.onmessage({ data: JSON.stringify({ type: "model", model: "fixture" }) });
+  emit({ type: "turn_started", turnId: "worker-recovery", startedAt: new Date().toISOString() });
+  emit({ type: "user", text: "模拟执行中连接恢复" });
+  emit({ type: "tool_start", id: "lost-tool", name: "Read" });
+  emit({ type: "execution_state", execution: null, serverTime: new Date().toISOString() });
+  assert.equal($("thread-input").disabled, false, "An empty recovery snapshot releases stale busy controls");
+  assert.equal(document.querySelectorAll(".turn-active").length, 0);
+  assert.equal([...document.querySelectorAll(".turn-outcome")].at(-1).textContent, "未完成", "Worker recovery does not invent a completed execution");
+  assert.match($("thread-status-label").textContent, /上次执行未完成/);
   await click("#thread-insert-tool"); await click(tool("计划模式")); assert.equal(sessionMode, "plan");
+
+  const streamingBody = () => document.querySelector(".streaming .assistant-body");
+  emit({ type: "turn_started", turnId: "stream-batching", startedAt: new Date().toISOString() });
+  emit({ type: "text", text: "首段 <img src=x>" });
+  const streamText = streamingBody().firstChild;
+  assert.equal(streamText.nodeType, Node.TEXT_NODE);
+  assert.equal(streamText.data, "首段 <img src=x>", "The first chunk is visible immediately and remains literal text");
+  assert.equal(streamingBody().querySelector("img"), null);
+  const burst = Array.from({ length: 100 }, (_, i) => `|${i}`).join("");
+  for (let i = 0; i < 100; i++) emit({ type: "text", text: `|${i}` });
+  assert.equal(streamText.data, "首段 <img src=x>", "Rapid chunks wait for a single batch instead of repainting per token");
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(streamingBody().firstChild, streamText, "Streaming keeps one text node instead of replacing the whole reply");
+  assert.equal(streamText.data, `首段 <img src=x>${burst}`);
+  emit({ type: "text", text: "最后一批" });
+  const fullReply = `首段 <img src=x>${burst}最后一批`;
+  emit({ type: "assistant", message: { role: "assistant", content: fullReply } });
+  assert.equal(streamingBody(), null);
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal([...document.querySelectorAll(".assistant-body")].at(-1).textContent, fullReply, "Assistant commit consumes the final batch exactly once");
+  emit({ type: "turn_complete", reason: "completed" });
+
+  emit({ type: "turn_started", turnId: "stream-restart", startedAt: new Date().toISOString() });
+  emit({ type: "text", text: "discarded draft" });
+  emit({ type: "text", text: "discarded pending" });
+  emit({ type: "stream_restart" });
+  emit({ type: "text", text: "fresh draft" });
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(streamingBody().textContent, "fresh draft", "A retry cannot repaint chunks from the abandoned stream");
+  const largeChunk = "x".repeat(4096);
+  for (let i = 0; i < 20; i++) emit({ type: "text", text: largeChunk });
+  const expectedLargeReply = "fresh draft" + largeChunk.repeat(20);
+  assert(streamingBody().textContent.length > expectedLargeReply.length - 32768, "Pending chunks remain below the 32 KiB cap without waiting for a timer");
+  emit({ type: "text", text: "末尾" });
+  emit({ type: "turn_complete", reason: "aborted" });
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(streamingBody(), null);
+  assert.equal([...document.querySelectorAll(".assistant-body")].at(-1).textContent, expectedLargeReply + "末尾", "Interrupted turns retain every received chunk, including unpainted text");
+
+  emit({ type: "turn_started", turnId: "stream-old-turn", startedAt: new Date().toISOString() });
+  emit({ type: "text", text: "old turn" });
+  emit({ type: "text", text: " pending" });
+  emit({ type: "turn_started", turnId: "stream-new-turn", startedAt: new Date().toISOString() });
+  emit({ type: "text", text: "new turn" });
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(streamingBody().textContent, "new turn", "Turn boundaries cannot append old pending chunks into a newer turn");
+  assert.equal([...document.querySelectorAll(".message.assistant:not(.streaming) .assistant-body")].at(-1)?.textContent, "old turn pending");
+  emit({ type: "text", text: " pending before navigation" });
   await click("#new-task");
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(streamingBody(), null, "Leaving a session cancels its pending stream flush");
+  const beforeHistoryOpen = calls.length;
+  await click("#recent-list .recent-item");
+  assert.equal(calls.slice(beforeHistoryOpen).filter(call => call.route === `/api/sessions/${sessionId}`).length, 1, "Opening history still reloads the authoritative session state");
+  await click("#new-task");
+  console.log("Streaming DOM: immediate first text, batched text-node appends, bounded deferred buffer, exact final chunks, retry and navigation isolation passed.");
   await click("#insert-command"); await click(tool("添加照片和文件"));
   Object.defineProperty($("composer-upload"), "files", { value: [new window.File([new Uint8Array([0, 1, 255, 48])], "upload.bin")], configurable: true });
   $("composer-upload").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
   assert(calls.some((call) => call.route === "/api/files/upload" && call.payload.base64 === "AAH/MA==")); assert.match($("home-input-attachments").textContent, /upload.bin/);
+  useCreationSnapshot = false;
+  const beforeLegacySubmit = calls.length;
   failSubmit = true; $("home-input").value = "Read attachment";
   $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); assert.match($("thread-input-attachments").textContent, /upload.bin/, "Failed send keeps the reference in the visible composer"); assert.equal($("thread-input").value, "Read attachment");
+  assert.equal(calls.slice(beforeLegacySubmit).filter(call => call.route === `/api/sessions/${sessionId}`).length, 1, "Older creation responses without snapshots still load the session normally");
+  useCreationSnapshot = true;
   failSubmit = false;
   $("thread-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); assert($("thread-input-attachments").classList.contains("hidden"), "Retry consumes the preserved reference");
   await click("#new-task");
@@ -215,8 +341,20 @@ try {
   $("edit-model-id").value = "new-ui-model"; $("edit-model-name").value = "new-model"; $("edit-model-url").value = "https://example.test/v1"; $("edit-model-key").value = "fake-ui-key";
   await click(action("保存模型")); assert([...$("home-model").options].some((o) => o.value === "new-ui-model"), "Saved model updates home selector");
   await click('[data-setting="execution"]'); $("settings-mode").value = "auto";
+  assert.equal($("settings-directories").tagName, "TEXTAREA");
+  $("settings-directories").value = "C:\\交付 文件\\桌面输出\n\nD:\\项目\\验收";
   $("settings-content").querySelector("form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
   assert(calls.some((c) => c.route === "/api/customize/settings" && c.payload?.mode === "auto"));
+  assert(calls.some((c) => c.route === "/api/customize/settings" && JSON.stringify(c.payload?.additionalDirectories) === JSON.stringify(["C:\\交付 文件\\桌面输出", "D:\\项目\\验收"])));
+  const savesBeforePicker = calls.filter(call => call.route === "/api/customize/settings" && call.payload).length;
+  const pickDirectoryButton = [...$("settings-content").querySelectorAll("button")].find(control => control.textContent === "选择文件夹并加入");
+  pickDirectoryButton.click(); await settle();
+  pickDirectoryButton.click(); await settle();
+  assert.equal($("settings-directories").value.split("\n").filter(value => value === pickedDirectory).length, 1, "Folder picker deduplicates selected destinations");
+  const directoriesBeforeCancel = $("settings-directories").value; pickedDirectory = null;
+  pickDirectoryButton.click(); await settle();
+  assert.equal($("settings-directories").value, directoriesBeforeCancel, "Cancel preserves typed directory grants");
+  assert.equal(calls.filter(call => call.route === "/api/customize/settings" && call.payload).length, savesBeforePicker, "Picking a folder does not grant access until Save");
 
   await click('[data-setting="official"]');
   assert.equal(accountPopups.length, 0, 'Rendering official services never opens an account window');
@@ -227,6 +365,7 @@ try {
   assert(!$('settings-content').textContent.includes('开启前请核对下方'));
   assert.equal($('settings-content').querySelector('a[href$="/account/usage"]'), null);
   assert.equal($('settings-content').querySelector('a[href$="/account/keys"]').textContent, '创建管理平台APIkey');
+  assert($('settings-content').textContent.includes('余额 ¥0.000001 · 冻结 ¥0.10'), 'Official settings preserve a single micro-yuan as exact yuan');
   for (const [route, type, extra] of [['/account/billing', 'click', {}], ['/account/keys', 'auxclick', { button: 1 }]]) {
     const link = [...$('settings-content').querySelectorAll('a')].find(item => new URL(item.href).pathname === route);
     assert.equal(link.href, 'https://ccagent.example.invalid' + route, 'Account links keep their static destinations');

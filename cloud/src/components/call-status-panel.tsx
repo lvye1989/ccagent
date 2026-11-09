@@ -1,14 +1,14 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { callIdentifierPattern } from '@/core/call-identifiers';
+import { formatMicroYuan } from '@/core/money-display';
 
 type CallStatus = { requestId: string; taskId: string; routeId: string; status: 'held' | 'pending' | 'settled' | 'released';
   authorized: string; charged: string; resultAvailable: boolean; resultExpiresAt: string | null; updatedAt: string };
 const statusNames = { held: '正在执行', pending: '用量待核实', settled: '已结算', released: '已释放授权' };
 class CallStatusError extends Error {}
 function money(value: string) {
-  const amount = BigInt(value);
-  return `¥${amount / 1000000n}.${(amount % 1000000n).toString().padStart(6, '0')}`;
+  return `¥${formatMicroYuan(value)}`;
 }
 function date(value: string | null) {
   return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + '（北京时间）' : '—';

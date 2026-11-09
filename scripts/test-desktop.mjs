@@ -32,6 +32,15 @@ await fs.writeFile(path.join(home, 'settings.json'), JSON.stringify({ env: { CCA
 const env = { ...process.env, CCAGENT_HOME: platformBase, CCAGENT_PLATFORM_HOME: platformBase, CCAGENT_ENV_FILE: envFile };
 delete env.CCAGENT_ACCOUNT_ID; delete env.CCAGENT_AUTH_SESSION_FILE;
 const manifest = JSON.parse(await fs.readFile(path.join(backendRoot, 'desktop-manifest.json'), 'utf8'));
+assert.equal(manifest.environmentGuideVersion, 1);
+assert.equal(manifest.platform, 'win32'); assert.equal(manifest.architecture, 'x64');
+assert.equal(manifest.minimumWindowsMajor, 10);
+assert(manifest.desktop.some(file => file.path === 'desktop/prerequisites.cjs'));
+for (const file of manifest.desktop) {
+  assert.match(file.path, /^desktop\/[a-z.-]+\.(?:cjs|js|html|css)$/);
+  const preparedFile = path.join(path.dirname(backendRoot), 'app', file.path);
+  assert.equal(createHash('sha256').update(await fs.readFile(preparedFile)).digest('hex'), file.sha256, 'Prepared desktop code matches the release manifest');
+}
 for (const file of manifest.payload) {
   assert(!/(^|\/)\.(?:ccagent|git)(\/|$)|(^|\/)\.env$|sessions/i.test(file.path));
   assert.equal(createHash('sha256').update(await fs.readFile(path.join(backendRoot, file.path))).digest('hex'), file.sha256);

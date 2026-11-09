@@ -357,9 +357,12 @@ async function main(): Promise<void> {
   console.log("\n[3] taskOutput — paths + JSONL append");
 
   await withTempDir(async (tmpHome) => {
-    // Override HOME so getProjectsRoot writes inside tmpHome.
+    // Select the fixture explicitly; HOME alone does not override a configured
+    // CCAGENT_HOME (or the Windows USERPROFILE used by os.homedir()).
     const prevHome = process.env.HOME;
+    const prevCCAgentHome = process.env.CCAGENT_HOME;
     process.env.HOME = tmpHome;
+    process.env.CCAGENT_HOME = path.join(tmpHome, ".ccagent");
     try {
       const sessionId = "test-session/with/slashes";
       const agentId = "abc-123";
@@ -401,6 +404,8 @@ async function main(): Promise<void> {
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
+      if (prevCCAgentHome === undefined) delete process.env.CCAGENT_HOME;
+      else process.env.CCAGENT_HOME = prevCCAgentHome;
     }
   });
 

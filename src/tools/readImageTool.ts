@@ -4,7 +4,7 @@ import { analyzeImageFile } from "../services/vision/analyzeImage.js";
 
 export const readImageTool: Tool = {
   name: "ReadImage",
-  description: "Read text (OCR) or analyze a local image with the configured vision model (modelRoles.image / QWEN_*). Returns text evidence to the current model, including text-only models. Prefer this over writing OCR/API scripts. Uses the same model configuration in CLI and Web; never requires API keys in tool arguments.",
+  description: "Read text (OCR), colors, or other visual details from a local image using the selected official vision auxiliary, or the configured personal vision model (modelRoles.image / QWEN_*). Returns text evidence to the current main model, including routes without image input. Prefer this over writing OCR/API scripts. Uses the same model configuration in CLI and Web; never requires API keys in tool arguments.",
   inputSchema: {
     type: "object", properties: {
       file_path: { type: "string", description: "Absolute or workspace-relative image path" },
@@ -18,7 +18,7 @@ export const readImageTool: Tool = {
       const file = resolveWorkspacePath(input.file_path, context.cwd);
       await ensureRealPathInsideAllowedRoots(file, context.cwd);
       const prompt = typeof input.prompt === "string" && input.prompt.trim() ? input.prompt : "Extract all visible text in reading order, preserving line breaks. Describe relevant visual details only if needed. Mark unclear text explicitly; do not invent missing characters.";
-      const evidence = await analyzeImageFile(file, prompt, context.cwd, context.abortSignal, 8_000);
+      const evidence = await analyzeImageFile(file, prompt, context.cwd, context.abortSignal, 8_000, context.officialVisionOnly);
       return { content: `Image: ${input.file_path}\nVision model: ${evidence.model}\n\n${evidence.text}` };
     } catch (error) {
       return { content: `ReadImage error: ${error instanceof Error ? error.message : String(error)}. Check the shared vision profile; do not repeat an unchanged failed request or generate shell OCR scripts.`, isError: true };

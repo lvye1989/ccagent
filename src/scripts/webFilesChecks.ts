@@ -71,9 +71,14 @@ export async function checkWebFiles(base: string, workspace: string, headers: Re
   for (const bad of ["../outside.txt", path.join(workspace, "draft file.txt"), "中文 文件/.env.local", ".git/config"]) assert.equal((await fetch(fileUrl("/preview", bad))).status, 400, bad);
   assert.equal((await fetch(`${base}/api/files?workspace=old-workspace`)).status, 409);
   const outside = path.join(path.dirname(workspace), "outside-files"); await fs.mkdir(outside); await fs.writeFile(path.join(outside, "file.txt"), "outside");
-  await fs.symlink(outside, path.join(directory, "external"), process.platform === "win32" ? "junction" : "dir");
-  assert(!(await get("", "中文 文件")).entries.some((item: { name: string }) => item.name === "external"));
-  assert.equal((await fetch(fileUrl("/preview", "中文 文件/external/file.txt"))).status, 400);
+  const external = path.join(directory, "external");
+  await fs.symlink(outside, external, process.platform === "win32" ? "junction" : "dir");
+  try {
+    assert(!(await get("", "中文 文件")).entries.some((item: { name: string }) => item.name === "external"));
+    assert.equal((await fetch(fileUrl("/preview", "中文 文件/external/file.txt"))).status, 400);
+  } finally {
+    await fs.unlink(external);
+  }
   const pages = path.join(workspace, "many-files"); await fs.mkdir(pages); await Promise.all(Array.from({ length: 252 }, (_, index) => fs.writeFile(path.join(pages, `item-${index}.txt`), "")));
   const first = await get("", "many-files"), second = await (await fetch(fileUrl("", "many-files") + `&offset=${first.nextOffset}`)).json();
   assert.equal(first.entries.length, 250); assert.equal(second.entries.length, 2); assert.equal(second.nextOffset, null);

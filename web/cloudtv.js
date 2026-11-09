@@ -7,7 +7,7 @@ export function createCloudTVUI({ onBack }) {
   view.setAttribute("aria-label", "cloudTV 网页");
   view.innerHTML = `
     <header class="cloudtv-toolbar">
-      <div class="cloudtv-brand"><span class="cloudtv-mark" aria-hidden="true">TV</span><div><h1>cloudTV</h1><span>cjai.pro</span></div></div>
+      <div class="cloudtv-brand"><img class="cloudtv-mark" src="/cloudtv-logo.jpg" alt=""><div><h1>cloudTV</h1><span>cjai.pro</span></div></div>
       <div class="cloudtv-actions">
         <button id="cloudtv-back" type="button">返回对话</button>
         <button id="cloudtv-refresh" type="button" aria-label="刷新 cloudTV 网页">刷新</button>

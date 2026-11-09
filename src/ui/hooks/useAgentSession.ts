@@ -80,6 +80,7 @@ import {
 } from "../../state/asyncAgentStore.js";
 import {
   pendingNotificationCount,
+  notificationScopeForContext,
   subscribePendingNotifications,
 } from "../../state/notificationStore.js";
 import { loadSettingsDiagnostics } from "../../utils/settings.js";
@@ -409,7 +410,7 @@ export function useAgentSession({
       queueMicrotask(() => {
         if (isLoadingRef.current) return;
         if (permissionPromptRef.current) return;
-        if (pendingNotificationCount() === 0) return;
+        if (pendingNotificationCount(notificationScopeForContext(toolContext)) === 0) return;
         const fn = submitRef.current;
         if (!fn) return;
         void fn("");
@@ -424,7 +425,7 @@ export function useAgentSession({
   useEffect(() => {
     if (isLoading) return;
     if (permissionPrompt) return;
-    if (pendingNotificationCount() === 0) return;
+    if (pendingNotificationCount(notificationScopeForContext(toolContext)) === 0) return;
     const fn = submitRef.current;
     if (!fn) return;
     void fn("");
@@ -674,7 +675,7 @@ export function useAgentSession({
     // which prepends the queued <task-notification> blocks as the
     // turn's user content. Reject empty input only when there's also
     // nothing in the queue.
-    if (!trimmed && pendingNotificationCount() === 0) {
+    if (!trimmed && pendingNotificationCount(notificationScopeForContext(toolContext)) === 0) {
       return { handled: false };
     }
 

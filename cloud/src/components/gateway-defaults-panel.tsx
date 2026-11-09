@@ -2,7 +2,7 @@
 import { useState, type FormEvent } from 'react';
 import type { ServiceDefaultsView, ServiceKind } from '@/core/service-defaults';
 
-const names: Record<ServiceKind, string> = { chat: '主模型', vision: '视觉读图', decision: 'Jev 决策', search: '联网搜索', voice: '语音合成' };
+const names: Record<ServiceKind, string> = { chat: '主模型', vision: '视觉读图', decision: 'Jev 决策', search: '联网搜索', voice: '语音合成', image: '图像生成' };
 export function GatewayDefaultsPanel({ initial }: { initial: ServiceDefaultsView }) {
   const [view, setView] = useState(initial), [selected, setSelected] = useState(initial.routes);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('');

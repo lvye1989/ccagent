@@ -21,15 +21,16 @@
  *   to drain in the order they were enqueued so the model sees them in
  *   completion order.
  *
- * Why no per-session segregation:
- *   CCAGENT currently runs one QueryEngine per process. If we ever
- *   support concurrent sessions in the same process this would need to
- *   be keyed by session id; until then a single global queue is fine.
+ * Notifications belong to their originating conversation. Web workers host
+ * several QueryEngines, so execution consumers must pass an explicit scope.
+ * Unscoped entries remain readable by the legacy single-session CLI only.
  */
 
 import { isAgentEnabled, onAgentStatesChanged } from "../agents/preferences.js";
 
 export interface PendingNotification {
+  /** Root conversation that launched the task; omitted only by legacy reminders. */
+  ownerSessionId?: string;
   /** Discriminator for future modes (compaction reminder, plan summary, ...). */
   mode: "task-notification" | "workfriend-notification";
   /** Pre-formatted XML/text message body — gets injected as a user message verbatim. */
@@ -39,6 +40,30 @@ export interface PendingNotification {
 }
 
 const queue: PendingNotification[] = [];
+
+export interface PendingNotificationScope {
+  sessionId?: string;
+  /** Single-session CLI compatibility; Web must always leave this false. */
+  includeUnscoped?: boolean;
+}
+
+export function notificationScopeForContext(context: {
+  sessionId?: string;
+  notificationOwnerSessionId?: string;
+  strictNotificationScope?: boolean;
+}): PendingNotificationScope {
+  return {
+    sessionId: context.notificationOwnerSessionId ?? context.sessionId,
+    includeUnscoped: context.strictNotificationScope !== true,
+  };
+}
+
+function matchesScope(notification: PendingNotification, scope?: PendingNotificationScope): boolean {
+  if (!scope) return true; // Global inspection/cleanup and existing tests only.
+  return notification.ownerSessionId !== undefined
+    ? notification.ownerSessionId === scope.sessionId
+    : scope.includeUnscoped === true;
+}
 
 // ─── Signal subscription ─────────────────────────────────────────────
 //
@@ -69,6 +94,9 @@ export function subscribePendingNotifications(listener: Listener): () => void {
 export function enqueuePendingNotification(
   notification: Omit<PendingNotification, "enqueuedAt">,
 ): void {
+  if (notification.ownerSessionId !== undefined && !notification.ownerSessionId.trim()) {
+    throw new Error("A notification owner session id must not be empty.");
+  }
   queue.push({ ...notification, enqueuedAt: Date.now() });
   notifyListeners();
 }
@@ -78,8 +106,8 @@ export function enqueuePendingNotification(
  * the QueryEngine when it wants to peek (e.g. to decide whether to
  * surface a "you have N pending notifications" hint in the UI).
  */
-export function peekPendingNotifications(): readonly PendingNotification[] {
-  return queue.filter(isDeliverable);
+export function peekPendingNotifications(scope?: PendingNotificationScope): readonly PendingNotification[] {
+  return queue.filter(item => isDeliverable(item) && matchesScope(item, scope));
 }
 
 function isDeliverable(notification: PendingNotification): boolean {
@@ -94,20 +122,23 @@ onAgentStatesChanged(() => { if (isAgentEnabled("workfriend")) notifyListeners()
  * caller MUST inject every returned entry into the conversation — there
  * is no way to put them back.
  */
-export function drainPendingNotifications(): PendingNotification[] {
-  const out = queue.filter(isDeliverable);
-  const held = queue.filter((item) => !isDeliverable(item));
+export function drainPendingNotifications(scope?: PendingNotificationScope): PendingNotification[] {
+  const selected = (item: PendingNotification) => isDeliverable(item) && matchesScope(item, scope);
+  const out = queue.filter(selected);
+  const held = queue.filter((item) => !selected(item));
   queue.splice(0, queue.length, ...held);
   return out;
 }
 
-export function pendingNotificationCount(): number {
-  return queue.filter(isDeliverable).length;
+export function pendingNotificationCount(scope?: PendingNotificationScope): number {
+  return peekPendingNotifications(scope).length;
 }
 
 /** Drop everything — used by tests and `/clear`. */
-export function clearPendingNotifications(): void {
-  queue.length = 0;
+export function clearPendingNotifications(scope?: PendingNotificationScope): void {
+  if (!scope) { queue.length = 0; return; }
+  const held = queue.filter(item => !matchesScope(item, scope));
+  queue.splice(0, queue.length, ...held);
 }
 
 // ─── XML builder for task notifications ─────────────────────────────

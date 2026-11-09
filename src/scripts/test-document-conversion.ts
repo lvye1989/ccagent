@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     );
     assert(invalid.isError === true, "invalid output extension is rejected before conversion");
 
-    const outsidePath = path.join(path.dirname(dir), "outside-source.md");
+    const outsidePath = path.join(path.dirname(dir), path.basename(dir) + "-outside-source.md");
     await fs.writeFile(outsidePath, "outside", "utf-8");
     try {
       const outside = await markdownToPdfTool.call(

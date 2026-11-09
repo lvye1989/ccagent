@@ -8,7 +8,7 @@ import { currentPlatformTaskId } from "./taskScope.js";
 import { platformKeyPattern, readServiceBinding, readServiceConfiguration, serviceConfigurationSchema, serviceCredentialStore, servicePaths, serviceRouteSchema,
   validateServiceRoles, catalogDefaultRoles, type OfficialRole, type ServiceConfiguration, type ServiceCredential, type OfficialServiceRoute, type ServiceRoles } from "./serviceState.js";
 
-type Endpoint = "responses" | "chat/completions" | "decisions" | "search" | "voice";
+type Endpoint = "responses" | "chat/completions" | "decisions" | "search" | "voice" | "images/tasks";
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export function authorizedPrivateUploadUrl(url: URL, expected: string, accountOrigin: string): boolean {
@@ -34,6 +34,9 @@ async function checked(response: Response): Promise<Response> {
     410: "调用结果或临时文件已过期，请查看调用记录。", 413: "请求超过官方服务允许的大小。", 429: "官方服务请求过于频繁，请稍后重试。",
   };
   const specific: Record<string, string> = { PRICE_CHANGED: "官方服务价格、限制或汇率已更新，请刷新服务目录并核对后再调用。", ACCOUNT_DISABLED: "账户已被禁用，请联系管理员。",
+    TOO_MANY_IMAGES: "本次图片数量超出所选官方路由的限制，请减少图片，或使用已配置的读图工具处理。",
+    PROTOCOL_MISMATCH: "所选官方模型与本次请求协议不匹配，请刷新服务目录并重新选择模型。",
+    UNPRICED_CAPABILITY: "本次请求使用了官方服务尚未开放的能力，请使用本地工具或普通文本请求。",
     FALLBACK_CHANGED: "管理员备用配置已改变，请刷新目录并重新确认备用价格。", FALLBACK_PRICE_CHANGED: "备用价格或汇率已更新，请刷新目录并重新开启备用。", FALLBACK_NOT_READY: "已确认的备用服务暂不可用，请刷新目录核对或关闭备用。" };
   throw new PlatformServiceError(specific[code] ?? messages[response.status] ?? "官方服务暂未完成请求，请查看调用状态后再重试。", code, response.status);
 }
@@ -77,7 +80,7 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
     if (!(typeof input.apiKey === "string" && input.apiKey.trim()) && current?.credential.apiKey !== apiKey) {
       throw new PlatformServiceError("其他窗口已更新平台 Key，请重新载入后再保存。", "SERVICE_CONFIGURATION_CHANGED");
     }
-    const kinds = { main: "chat", image: "vision", decision: "decision", search: "search", voice: "voice" };
+    const kinds = { main: "chat", image: "vision", decision: "decision", search: "search", voice: "voice", imageGeneration: "image" };
     const retained = Object.fromEntries(Object.entries(current?.configuration.roles ?? {}).filter(([role, id]) => routes.some(route => route.id === id && route.service === kinds[role as OfficialRole])));
     const roles = validateServiceRoles(input.roles ?? (current ? retained : defaults), routes);
     const sameCatalog = !!current && catalogConsent(current.configuration.routes) === catalogConsent(routes);
@@ -248,19 +251,30 @@ export class PlatformGatewayClient {
     return await (await checked(response)).json() as Record<string, unknown>;
   }
 
-  private async upload(bytes: Uint8Array, signal?: AbortSignal): Promise<string> {
-    const response = await checked(await this.request("/api/files", { method: "POST", body: Buffer.from(JSON.stringify({ purpose: "request", contentType: "application/json", size: bytes.byteLength })), headers: { "content-type": "application/json" }, maximumBytes: 128 * 1024, signal }));
+  private async upload(bytes: Uint8Array, signal?: AbortSignal, purpose: "request" | "image" = "request", contentType = "application/json"): Promise<string> {
+    const response = await checked(await this.request("/api/files", { method: "POST", body: Buffer.from(JSON.stringify({ purpose, contentType, size: bytes.byteLength })), headers: { "content-type": "application/json" }, maximumBytes: 128 * 1024, signal }));
     const value = await response.json() as { id: string; upload: { url: string; method: string; validUntil: number; headers: Record<string, string> } };
-    const url = new URL(value.upload.url), expected = `/ccagent/users/${digest(this.configuration.userId).slice(0, 32)}/request/${value.id}.json`;
+    const extension = ({ "application/json": "json", "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<string, string>)[contentType];
+    const url = new URL(value.upload.url), expected = `/ccagent/users/${digest(this.configuration.userId).slice(0, 32)}/${purpose}/${value.id}.${extension}`;
     if (!uuid.test(value.id) || !authorizedPrivateUploadUrl(url, expected, this.account.origin) ||
       value.upload.method !== "PUT" || !Number.isFinite(value.upload.validUntil) || value.upload.validUntil <= Date.now() || value.upload.validUntil > Date.now() + 3 * 60_000 ||
       Object.keys(value.upload.headers).some(name => !["content-type", "x-content-type"].includes(name)) ||
-      value.upload.headers["content-type"] !== "application/json" || value.upload.headers["x-content-type"] !== "application/json") {
+      !extension || value.upload.headers["content-type"] !== contentType || value.upload.headers["x-content-type"] !== contentType) {
       throw new PlatformServiceError("私有文件上传授权无效。", "INVALID_UPLOAD_AUTHORIZATION");
     }
     await (await checked(await platformRequest(url, { method: "PUT", headers: value.upload.headers, body: bytes, maximumBytes: 128 * 1024, timeoutMs: 120000, signal }))).arrayBuffer();
     await (await checked(await this.request(`/api/files/${value.id}`, { method: "POST", maximumBytes: 128 * 1024, signal }))).json();
     return value.id;
+  }
+
+  async uploadPrivateImage(bytes: Uint8Array, contentType: "image/png" | "image/jpeg" | "image/webp", signal?: AbortSignal): Promise<string> {
+    if (!bytes.byteLength || bytes.byteLength > 30 * 1024 * 1024) throw new PlatformServiceError("图片不得超过 30 MB。", "REQUEST_TOO_LARGE", 413);
+    return this.upload(bytes, signal, "image", contentType);
+  }
+
+  async imageTaskStatus(id: string, signal?: AbortSignal): Promise<Response> {
+    if (!uuid.test(id)) throw new PlatformServiceError("图像任务标识无效。", "INVALID_CALL_ID");
+    return checked(await this.request(`/v1/images/tasks/${id}`, { signal, timeoutMs: 60000, maximumBytes: 256 * 1024 }));
   }
 
   async download(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -273,7 +287,7 @@ export class PlatformGatewayClient {
     await this.assertBinding(); options.signal?.throwIfAborted();
     const model = typeof input.model === "string" ? input.model : "";
     const route = this.configuration.routes.find(item => item.id === model);
-    const protocol = { responses: "openai-responses", "chat/completions": "openai-chat", decisions: "jev-decisions", voice: "dashscope-tts" }[endpoint as "responses" | "chat/completions" | "decisions" | "voice"];
+    const protocol = { responses: "openai-responses", "chat/completions": "openai-chat", decisions: "jev-decisions", voice: "dashscope-tts", "images/tasks": "kie-images" }[endpoint as "responses" | "chat/completions" | "decisions" | "voice" | "images/tasks"];
     if (!route || (endpoint === "search" ? !["tavily", "bocha"].includes(route.protocol) : route.protocol !== protocol)) throw new PlatformServiceError("未选择可用的官方服务，或服务协议不匹配。", "SERVICE_NOT_CONFIGURED");
     const text = JSON.stringify(input);
     if (Buffer.byteLength(text) > 32 * 1024 * 1024) throw new PlatformServiceError("请求超过 32 MiB，请减少本次输入。", "REQUEST_TOO_LARGE");
@@ -325,7 +339,7 @@ export class PlatformGatewayClient {
         // A connection failure never authorizes a new paid operation. Query first;
         // only a completed, replayable result may be fetched using the SAME id.
         const status = await this.callStatus(record.requestId).catch(() => null);
-        if (status && ["settled", "released"].includes(String(status.status)) && status.resultAvailable === true && !options.signal?.aborted) response = await send();
+        if (endpoint !== "images/tasks" && status && ["settled", "released"].includes(String(status.status)) && status.resultAvailable === true && !options.signal?.aborted) response = await send();
         else throw error;
       }
       await checked(response);

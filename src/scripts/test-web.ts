@@ -11,6 +11,11 @@ import { setPluginEnabled } from "../plugins/enable.js";
 import { checkWebFiles } from "./webFilesChecks.js";
 import { startAccountFixture } from "./helpers/accountFixture.js";
 import { accountHome } from "../platform/account.js";
+import { summarizeEvent } from "../entrypoint/webWorker.js";
+
+assert.equal(summarizeEvent({ type: "messages_updated", get messages(): never { throw new Error("Full history must not be read for live SSE"); } }), null);
+assert.deepEqual(summarizeEvent({ type: "text", text: "first chunk" }), { type: "text", text: "first chunk" });
+assert.deepEqual(summarizeEvent({ type: "tool_use_start", id: "tool-1", name: "Read" }), { type: "tool_start", id: "tool-1", name: "Read" });
 
 const root = path.resolve(import.meta.dirname, "../..");
 const entry = path.join(root, "dist", "ccagent.js");
@@ -125,8 +130,14 @@ try {
   assert.equal((await webFetch(`${base}/chatgpt-web.css`)).status, 200);
   assert.equal((await webFetch(`${base}/plugins.js`)).status, 200);
   for (const asset of ["app-catalog.js", "app-icons.js", "promotion.js", "promotion.css"]) assert.equal((await webFetch(`${base}/${asset}`)).status, 200);
+  for (const asset of ["cloudtv-logo.jpg", "caiyunjian-logo.jpg"]) {
+    const logo = await webFetch(`${base}/${asset}`);
+    assert.equal(logo.status, 200);
+    assert.equal(logo.headers.get("content-type"), "image/jpeg");
+    assert.deepEqual(Buffer.from(await logo.arrayBuffer()), await fs.readFile(path.join(root, "web", asset)));
+  }
   const appCatalog = await (await webFetch(`${base}/api/apps`)).json() as { apps: { id: string; installed: boolean }[] };
-  assert.equal(appCatalog.apps.length, 12);
+  assert.equal(appCatalog.apps.length, 15);
   assert.ok(appCatalog.apps.every((app) => !app.installed));
   assert.equal((await webFetch(`${base}/voice.js`)).status, 200);
   assert.equal((await webFetch(`${base}/voice.css`)).status, 200);
@@ -196,8 +207,14 @@ try {
   assert(((await (await webFetch(`${base}/api/skills`)).json()) as { skills: { name: string }[] }).skills.some((skill) => skill.name === "dotted.skill"));
   const fullResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ mode: "full" }) });
   assert.equal(fullResponse.status, 201);
-  const fullSession = await fullResponse.json() as { sessionId: string };
-  assert.equal(((await (await webFetch(`${base}/api/sessions/${fullSession.sessionId}`)).json()) as { mode: string }).mode, "full");
+  const fullSession = await fullResponse.json() as { sessionId: string; snapshot: Record<string, unknown> & { serverTime: string; lastEventId: number } };
+  const fullSessionRead = await (await webFetch(`${base}/api/sessions/${fullSession.sessionId}`)).json() as Record<string, unknown> & { serverTime: string };
+  assert.equal(fullSessionRead.mode, "full");
+  const { serverTime: createdServerTime, ...createdSnapshot } = fullSession.snapshot;
+  const { serverTime: readServerTime, ...readSnapshot } = fullSessionRead;
+  assert.deepEqual(createdSnapshot, readSnapshot, "Session creation supplies the same complete snapshot as GET without requiring an extra request");
+  assert.equal(fullSession.snapshot.lastEventId, 0, "The creation snapshot includes its exact SSE replay cursor");
+  assert(Number.isFinite(Date.parse(createdServerTime)) && Date.parse(createdServerTime) <= Date.parse(readServerTime));
   const temporaryResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: JSON.stringify({ temporary: true }) });
   assert.equal(temporaryResponse.status, 201);
   const temporary = await temporaryResponse.json() as { sessionId: string; temporary: boolean };
@@ -255,8 +272,16 @@ try {
   assert.equal((await webFetch(`${base}/api/memory/sessions/${created.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "pin" }) })).status, 200);
   const memoryPinned = await (await webFetch(`${base}/api/memory`)).json() as typeof memoryBefore;
   assert.equal(memoryPinned.sessions.find((item) => item.sessionId === created.sessionId)?.pinned, true);
-  assert.equal((await webFetch(`${base}/api/memory/sessions/${fullSession.sessionId}`, { method: "POST", headers, body: JSON.stringify({ action: "delete" }) })).status, 200);
+  const deleteSession = (id: string, folder = workspace) => webFetch(`${base}/api/memory/sessions/${id}`, { method: "POST", headers, body: JSON.stringify({ action: "delete", workspace: folder }) });
+  assert.equal((await deleteSession(fullSession.sessionId, temp)).status, 409, "A stale project row cannot delete a session");
+  const deletedEvents = await webFetch(`${base}/api/sessions/${fullSession.sessionId}/events`);
+  assert.equal(deletedEvents.status, 200);
+  assert.equal((await deleteSession(fullSession.sessionId)).status, 200);
+  assert.match(await deletedEvents.text(), /"type":"session_deleted"/, "Other tabs with the deleted session are notified");
+  assert.equal((await deleteSession(fullSession.sessionId)).status, 200, "Retrying a completed delete succeeds");
   assert.equal((await webFetch(`${base}/api/memory/sessions/${fullSession.sessionId}`)).status, 400);
+  assert.equal((await webFetch(`${base}/api/sessions/${fullSession.sessionId}`)).status, 404);
+  assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}`)).status, 200);
 
   const projectDirs = await fs.readdir(path.join(home, "projects"));
   assert.equal(projectDirs.length, 1);
@@ -282,8 +307,11 @@ try {
   assert.equal(degraded.storageUnavailable, true, "An inaccessible session directory should not break the task list");
   const memoryOnlyResponse = await webFetch(`${base}/api/sessions`, { method: "POST", headers, body: "{}" });
   assert.equal(memoryOnlyResponse.status, 201);
+  const memoryOnly = await memoryOnlyResponse.json() as { sessionId: string };
   await fs.unlink(projectDir);
   await fs.rename(`${projectDir}.saved`, projectDir);
+  assert.equal((await deleteSession(memoryOnly.sessionId)).status, 200, "A task without a stored transcript can still be removed");
+  assert.equal((await webFetch(`${base}/api/sessions/${memoryOnly.sessionId}`)).status, 404);
 
   const events = await webFetch(`${base}/api/sessions/${created.sessionId}/events?lastEventId=0`);
   const reader = events.body?.getReader();
@@ -298,6 +326,7 @@ try {
   assert.match(stream, /"type":"notice"/);
   assert.match(stream, /"type":"browser_open"/);
   assert.match(stream, /"type":"turn_complete"/);
+  assert.doesNotMatch(stream, /"type":"messages"/, "SSE sends incremental events without unused full-history snapshots");
   assert.equal((await webFetch(`${base}/api/sessions/${created.sessionId}/browser`, { method: "DELETE" })).status, 200);
   assert.equal(((await (await webFetch(`${base}/api/sessions/${created.sessionId}`)).json()) as { browserUrl: null }).browserUrl, null);
 
@@ -462,5 +491,5 @@ try {
   await accountFixture.close();
   const relative = path.relative(await fs.realpath(os.tmpdir()), temp);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Unsafe test cleanup path");
-  await fs.rm(temp, { recursive: true, force: true });
+  await fs.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

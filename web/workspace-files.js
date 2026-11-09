@@ -1,3 +1,5 @@
+import { folderIcon } from "./app-icons.js";
+
 export function createWorkspaceFiles({ api, toast, getWorkspace, reference }) {
   const $ = (id) => document.getElementById(id);
   const body = document.createElement("div");
@@ -15,26 +17,79 @@ export function createWorkspaceFiles({ api, toast, getWorkspace, reference }) {
     <div id="files-list" class="files-list" aria-label="文件列表"></div>
     <div id="files-status" class="files-status" role="status"></div>
     <section id="files-preview" class="files-preview" aria-label="文件预览"><p class="files-empty">选择文件查看内容<br>支持代码、图片、PDF、Office 和音视频</p></section>`;
-  body.append(panel);
+  const resizer = document.createElement("div");
+  resizer.id = "workspace-files-resizer";
+  resizer.className = "files-resizer hidden";
+  resizer.setAttribute("role", "separator");
+  resizer.setAttribute("aria-label", "调整工作区文件栏宽度");
+  resizer.setAttribute("aria-orientation", "vertical");
+  resizer.setAttribute("aria-controls", panel.id);
+  resizer.title = "左右拖动调整宽度；方向键调整，Shift 加速，Home / End 调至最窄或最宽";
+  body.append(resizer, panel);
   const toggle = document.createElement("button");
   toggle.id = "workspace-files-toggle";
   toggle.type = "button";
   toggle.className = "files-toggle";
-  toggle.textContent = "▤ 文件";
+  const toggleLabel = document.createElement("span");
+  toggleLabel.textContent = "文件";
+  toggle.append(folderIcon(), toggleLabel);
+  toggle.setAttribute("aria-label", "文件");
   toggle.setAttribute("aria-controls", panel.id);
   toggle.setAttribute("aria-expanded", "false");
   document.querySelector(".topbar-tools").prepend(toggle);
   let workspace = "", directory = "", selected = null, nextOffset = null, request = 0, previewRequest = 0, opened = false, view = "tasks", timer;
+  const widthStorageKey = "ccagent.workspaceFiles.width.v1";
+  let preferredWidth = null, currentWidth = 0, drag = null;
+  try {
+    const stored = window.localStorage.getItem(widthStorageKey);
+    if (stored && /^\d{3}$/.test(stored) && Number(stored) >= 240 && Number(stored) <= 960) preferredWidth = Number(stored);
+  } catch { /* Width remains usable when browser storage is unavailable. */ }
   const fileUrl = (action, file) => `/api/files/${action}?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(file)}`;
   const element = (tag, className, text) => { const node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; };
   const formatSize = (size) => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
 
+  function widthBounds() {
+    const available = Math.max(1, Math.floor(body.getBoundingClientRect().width || window.innerWidth));
+    if (window.innerWidth <= 600) return { min: available, max: available, defaultWidth: available, adjustable: false };
+    const overlay = window.innerWidth < 1200;
+    const max = Math.max(1, Math.min(960, available - (overlay ? 24 : 368)));
+    const min = Math.min(overlay ? 280 : 300, max);
+    return { min, max, defaultWidth: overlay ? 440 : Math.min(480, Math.max(300, window.innerWidth * .3)), adjustable: max > min };
+  }
+  function applyWidth(value = preferredWidth) {
+    const bounds = widthBounds();
+    currentWidth = Math.round(Math.min(bounds.max, Math.max(bounds.min, value ?? bounds.defaultWidth)));
+    body.style.setProperty("--workspace-files-width", `${currentWidth}px`);
+    resizer.setAttribute("aria-valuemin", String(bounds.min));
+    resizer.setAttribute("aria-valuemax", String(bounds.max));
+    resizer.setAttribute("aria-valuenow", String(currentWidth));
+    resizer.setAttribute("aria-valuetext", `${currentWidth} 像素`);
+    resizer.setAttribute("aria-disabled", String(!bounds.adjustable));
+    const visible = opened && ["tasks", "thread"].includes(view) && bounds.adjustable;
+    resizer.classList.toggle("hidden", !visible);
+    resizer.tabIndex = visible ? 0 : -1;
+  }
+  function rememberWidth() {
+    preferredWidth = currentWidth;
+    try { window.localStorage.setItem(widthStorageKey, String(preferredWidth)); } catch { /* Optional preference only. */ }
+  }
+  function finishResize(commit = true) {
+    if (!drag) return;
+    const previous = drag; drag = null;
+    body.classList.remove("files-resizing");
+    document.documentElement.classList.remove("workspace-files-resizing");
+    if (commit) rememberWidth(); else applyWidth(previous.width);
+    try { if (resizer.hasPointerCapture?.(previous.id)) resizer.releasePointerCapture(previous.id); } catch { /* Capture may already have ended. */ }
+  }
+
   function sync() {
     const visible = opened && ["tasks", "thread"].includes(view);
+    if (!visible) finishResize();
     panel.classList.toggle("hidden", !visible);
     body.classList.toggle("files-open", visible);
     toggle.classList.toggle("hidden", !["tasks", "thread"].includes(view));
     toggle.setAttribute("aria-expanded", String(visible));
+    applyWidth();
   }
   function crumbs() {
     $("files-breadcrumbs").replaceChildren();
@@ -67,7 +122,8 @@ export function createWorkspaceFiles({ api, toast, getWorkspace, reference }) {
         row.type = "button";
         row.title = file.path;
         row.dataset.path = file.path;
-        const icon = element("span", `files-icon ${file.directory ? "folder" : file.format}`, file.directory ? "▱" : ({ image: "▧", pdf: "PDF", office: (file.extension || "DOC").toUpperCase(), audio: "♪", video: "▷", text: "≡" })[file.format] || "◇");
+        const icon = element("span", `files-icon ${file.directory ? "folder" : file.format}`);
+        icon.append(folderIcon());
         const name = element("span", "files-name", file.name);
         const meta = element("small", "files-meta", file.directory ? "文件夹" : formatSize(file.size));
         row.append(icon, name, meta);
@@ -128,6 +184,7 @@ export function createWorkspaceFiles({ api, toast, getWorkspace, reference }) {
   function close() { opened = false; sync(); toggle.focus(); }
   async function workspaceChanged(next, forceOpen = false) {
     if (next !== workspace) {
+      finishResize();
       workspace = next; directory = ""; selected = null; request++; previewRequest++;
       $("files-query").value = "";
       $("files-list").replaceChildren();
@@ -145,5 +202,38 @@ export function createWorkspaceFiles({ api, toast, getWorkspace, reference }) {
   $("files-up").addEventListener("click", () => { $("files-query").value = ""; void browse(directory.split("/").slice(0, -1).join("/")); });
   $("files-query").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => void browse(), 200); });
   $("files-hidden").addEventListener("change", () => void browse());
+  resizer.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.isPrimary === false || drag || resizer.classList.contains("hidden")) return;
+    event.preventDefault();
+    resizer.focus({ preventScroll: true });
+    drag = { id: event.pointerId, x: event.clientX, width: currentWidth };
+    body.classList.add("files-resizing");
+    document.documentElement.classList.add("workspace-files-resizing");
+    try { resizer.setPointerCapture(event.pointerId); } catch { finishResize(false); }
+  });
+  resizer.addEventListener("pointermove", event => {
+    if (!drag || event.pointerId !== drag.id) return;
+    applyWidth(drag.width + drag.x - event.clientX);
+  });
+  resizer.addEventListener("pointerup", event => { if (drag?.id === event.pointerId) finishResize(); });
+  resizer.addEventListener("pointercancel", event => { if (drag?.id === event.pointerId) finishResize(false); });
+  resizer.addEventListener("lostpointercapture", event => { if (drag?.id === event.pointerId) finishResize(); });
+  resizer.addEventListener("keydown", event => {
+    if (event.key === "Escape" && drag) { event.preventDefault(); finishResize(false); return; }
+    if (resizer.classList.contains("hidden") || drag) return;
+    const bounds = widthBounds(), step = event.shiftKey ? 80 : 20;
+    const width = event.key === "ArrowLeft" ? currentWidth + step : event.key === "ArrowRight" ? currentWidth - step : event.key === "Home" ? bounds.min : event.key === "End" ? bounds.max : null;
+    if (width === null || !bounds.adjustable) return;
+    event.preventDefault(); applyWidth(width); rememberWidth();
+  });
+  const resize = () => { finishResize(); applyWidth(); };
+  const cancelDrag = () => finishResize();
+  window.addEventListener("resize", resize);
+  window.addEventListener("blur", cancelDrag);
+  window.addEventListener("pagehide", cancelDrag);
+  window.addEventListener("ccagent:account-changing", cancelDrag);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) finishResize(); });
+  if (typeof window.ResizeObserver === "function") new window.ResizeObserver(resize).observe(body);
+  applyWidth();
   return { open: show, close, refresh: () => browse(), workspaceChanged, setView: (next) => { view = next; sync(); }, openPath: async (file) => { if (getWorkspace() !== workspace) await workspaceChanged(getWorkspace()); opened = true; sync(); await preview(file); } };
 }
