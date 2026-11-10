@@ -20,13 +20,14 @@ let editorScene = structuredClone(empty), editorToken = "", editorChanged = fals
 const stores = new Map(); stores.set(workspace, new Map([["board-1", { id: "board-1", name: "第一块白板", revision: 1, createdAt: "2026-11-07T00:00:00.000Z", updatedAt: "2026-11-07T00:00:00.000Z", elementCount: 0, scene: structuredClone(empty) }], ["board-2", { id: "board-2", name: "第二块白板", revision: 1, createdAt: "2026-11-07T00:00:00.000Z", updatedAt: "2026-11-07T00:00:00.000Z", elementCount: 0, scene: structuredClone(empty) }]]));
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFe0AAAAASUVORK5CYII=';
 const designRuns = new Map();
+const imageRoutes = ['flare', 'sunburst'].flatMap(variant => ['text-to-image', 'image-to-image'].map(mode => ({ id: `${variant}-${mode}`, name: `${variant} ${mode}`, upstreamModel: `gpt-image-2-5-${variant}-${mode}` })));
 function store(path) { if (!stores.has(path)) stores.set(path, new Map()); return stores.get(path); }
 function metadata(board) { const { scene: ignored, ...result } = board; return result; }
 function response(data, overrides = {}) { window.dispatchEvent(new MessageEvent("message", { origin: window.location.origin, source: frame.contentWindow, data: { type: "ccagent-whiteboard", channel: new URLSearchParams(frame.src.split("#")[1]).get("channel"), ...data }, ...overrides })); }
 function edit(value) { editorScene = value; editorChanged = true; response({ kind: "change", payload: { token: editorToken, scene: value } }); }
 const api = async (route, options) => {
   const body = options?.body ? JSON.parse(options.body) : undefined; calls.push({ route, body });
-  if (route.startsWith('/api/whiteboards/design/config?')) return { workspace, config: { configured: true, provider: 'official', source: 'official', hasKey: true, maxReferences: 14, model: 'flare-text', routes: [{ id: 'flare-text', name: 'Flare text', upstreamModel: 'gpt-image-2-5-flare-text-to-image' }, { id: 'flare-image', name: 'Flare image', upstreamModel: 'gpt-image-2-5-flare-image-to-image' }] } };
+  if (route.startsWith('/api/whiteboards/design/config?')) return { workspace, config: { configured: true, provider: 'official', source: 'official', hasKey: true, maxReferences: 14, model: 'flare-text-to-image', routes: imageRoutes } };
   if (route === '/api/whiteboards/design/assets') return { assetId: crypto.randomUUID(), name: body.image.name };
   if (route === '/api/whiteboards/design/start') { const runId = crypto.randomUUID(); designRuns.set(runId, { ...body, runId, status: 'completed', images: [{ dataURL: png, mimeType: 'image/png', width: 1, height: 1 }] }); return { runId }; }
   if (route.startsWith('/api/whiteboards/design/run?')) return structuredClone(designRuns.get(new URL(route, window.location.origin).searchParams.get('runId')));
@@ -127,11 +128,12 @@ try {
   // an empty base must save via getScene without requesting designSnapshot.
   document.getElementById('whiteboard-design-toggle').click();
   await until(() => !document.getElementById('design-generate').disabled, 'Official text model loads on a blank board');
+  for (const id of ['design-provider', 'design-endpoint', 'design-model', 'design-api-key', 'design-save-config', 'design-variant']) assert.equal(document.getElementById(id), null, `${id} is not part of the parent whiteboard`);
+  assert.equal(document.getElementById('design-import-reference').disabled, false, 'Reference upload does not require changing the default text model');
   document.getElementById('design-prompt').value = 'Draw a city block'; document.getElementById('design-generate').click();
   await until(() => designRuns.size === 1, 'Actual parent accepts no-base text generation');
-  assert.equal([...designRuns.values()][0].baseImageId, ''); assert.equal([...designRuns.values()][0].annotated, undefined);
+  const textRun = [...designRuns.values()][0]; assert.equal(textRun.baseImageId, ''); assert.equal(textRun.annotated, undefined); assert.equal(textRun.assetIds, undefined); assert.equal(textRun.model, undefined); assert.equal(textRun.generationMode, undefined);
   await until(() => document.querySelector('#design-results figure'), 'Text result is displayed');
-  const variant = document.getElementById('design-variant'); variant.value = 'flare-image'; variant.dispatchEvent(new Event('change'));
   savedGlobals.set('Image', globalThis.Image);
   globalThis.Image = class { naturalWidth = 1; naturalHeight = 1; async decode() {} };
   browser.HTMLCanvasElement.prototype.getContext = () => ({ fillRect() {}, drawImage() {} }); browser.HTMLCanvasElement.prototype.toDataURL = () => png;
@@ -139,10 +141,10 @@ try {
   await until(() => !document.getElementById('design-generate').disabled, 'Reference-only model ready through actual upload and parent capture');
   document.getElementById('design-prompt').value = 'Make a diagram variation'; document.getElementById('design-generate').click();
   await until(() => designRuns.size === 2, 'Actual parent accepts reference-only image generation');
-  const referenceRun = [...designRuns.values()][1]; assert.equal(referenceRun.baseImageId, ''); assert.equal(referenceRun.annotated, undefined); assert.equal(referenceRun.assetIds.length, 1);
+  const referenceRun = [...designRuns.values()][1]; assert.equal(referenceRun.baseImageId, ''); assert.equal(referenceRun.annotated, undefined); assert.equal(referenceRun.assetIds.length, 1); assert.equal(referenceRun.model, undefined); assert.equal(referenceRun.generationMode, undefined);
   await until(() => document.querySelector('#design-results figure'), 'Reference-only result is displayed');
   assert.equal(await ui.beforeLeave(), true);
-  console.log("Offline whiteboard controller passed: lazy local iframe, initial no-write normalization, origin/source/nonce/token checks, autosave, serialized revision saves, blocked loss, conflict recovery, JSON/PNG/SVG downloads, import validation and workspace isolation. Real Excalidraw rendering is not exercised by this suite.");
+  console.log("Offline whiteboard controller passed: lazy local iframe, initial no-write normalization, origin/source/nonce/token checks, autosave, serialized revision saves, blocked loss, conflict recovery, JSON/PNG/SVG downloads, import validation, workspace isolation and gateway-only automatic text/reference generation without model or credential controls. Real Excalidraw rendering is not exercised by this suite.");
 } finally {
   URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke;
   for (const [key, value] of savedGlobals) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }

@@ -185,6 +185,23 @@ try {
   assert.equal(foreignOrigin.status, 403);
 
   const headers = { "content-type": "application/json", "x-ccagent-web": "1", cookie: loginCookie, origin: base };
+  const powerRoute = `${base}/api/customize/power-settings`;
+  const powerBefore = await (await webFetch(powerRoute)).json();
+  assert.deepEqual(powerBefore.mailPowers, {
+    qq: { read: false, write: false, delete: false, search: false, send: false },
+    "163": { read: false, write: false, delete: false, search: false, send: false },
+  });
+  const togglePower = (body: Record<string, unknown>) => webFetch(powerRoute, { method: "POST", headers, body: JSON.stringify(body) });
+  assert.equal((await togglePower({ account: "qq", power: "read", enabled: "true" })).status, 400);
+  const savedPower = await togglePower({ account: "qq", power: "read", enabled: true });
+  assert.equal(savedPower.status, 200);
+  const expectedPowers = { ...powerBefore.mailPowers, qq: { ...powerBefore.mailPowers.qq, read: true } };
+  assert.deepEqual((await savedPower.json()).mailPowers, expectedPowers);
+  assert.deepEqual((await (await webFetch(powerRoute)).json()).mailPowers, expectedPowers);
+  const storedSettings = JSON.parse(await fs.readFile(path.join(home, "settings.json"), "utf8"));
+  assert.equal(storedSettings.mailPowers.qq.read, true, "The CLI and Mail tool read the same account setting");
+  assert.equal(storedSettings.defaultModel, "deepseek");
+  assert.equal((await togglePower({ account: "qq", power: "read", enabled: false })).status, 200);
   await checkWebFiles(base, workspace, headers, webFetch);
   assert.equal((await webFetch(`${base}/workspace-files.js`)).status, 200);
   assert.equal((await webFetch(`${base}/composer-tools.js`)).status, 200);

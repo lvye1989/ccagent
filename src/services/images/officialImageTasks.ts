@@ -10,6 +10,15 @@ type Gateway = Pick<Awaited<ReturnType<typeof getPlatformGatewayClient>>, "uploa
 type Receipt = { version: 1; requestId: string; userId: string; origin: string; keyHash: string; model: string; fingerprint: string; inputFileIds: string[]; state: "uploading" | "sending" | "created" | "unknown" | "completed" | "failed"; taskId?: string; updatedAt: number };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const error = (message: string, code = "DESIGN_IMAGE_UNKNOWN"): never => { throw new PlatformServiceError(message, code, 409); };
+const taskMessages: Record<string, string> = {
+  IMAGE_INPUT_UPLOAD_FAILED: "参考图上传失败，尚未提交生成，预留额度已释放。请重新发起生成；若仍失败，请联系管理员检查图像上传服务。",
+  IMAGE_SUPPLIER_REJECTED: "图像服务未接受本次请求，预留额度已释放。请检查生成参数或联系管理员。",
+  IMAGE_GENERATION_FAILED: "图像服务生成失败，预留额度已释放。请调整绘图要求后重新生成。",
+  IMAGE_CREATE_UNCONFIRMED: "图像请求的提交结果待确认，请继续查询原任务。",
+  IMAGE_RESULT_UNCONFIRMED: "图像结果暂未核实，请继续查询原任务。",
+  IMAGE_RECONCILIATION_REQUIRED: "图像任务等待服务端核对，请保留调用编号并联系管理员。",
+  IMAGE_CALL_CLOSED: "图像调用已关闭，结果未核实，预留额度已释放。",
+};
 const receiptsFile = () => getCCAgentPath("platform", "image-task-receipts.json");
 async function readReceipts(): Promise<Receipt[]> {
   const info = await lstat(receiptsFile()).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
@@ -67,7 +76,10 @@ async function result(taskId: string, gateway: Gateway, signal: AbortSignal, ini
     value = await (await gateway.imageTaskStatus(taskId, signal)).json() as Record<string, unknown>;
   }
   if (value.id !== taskId) return error("图像任务回执不匹配。");
-  if (value.status !== "succeeded") return error(value.status === "failed" ? `图像任务失败。调用编号：${taskId}` : `图像任务状态待核实，可继续查询原任务。调用编号：${taskId}`, value.status === "failed" ? "DESIGN_IMAGE_FAILED" : "DESIGN_IMAGE_UNKNOWN");
+  if (value.status !== "succeeded") {
+    const message = typeof value.code === "string" && Object.hasOwn(taskMessages, value.code) ? taskMessages[value.code] : value.status === "failed" ? "图像任务失败。" : "图像任务状态待核实，可继续查询原任务。";
+    return error(`${message}调用编号：${taskId}`, value.status === "failed" ? "DESIGN_IMAGE_FAILED" : "DESIGN_IMAGE_UNKNOWN");
+  }
   if (!Array.isArray(value.images) || value.images.length !== 1) return error("图像任务未返回一张有效结果。");
   const output: { mimeType: DesignRaster["mimeType"]; bytes: Uint8Array }[] = [];
   for (const image of value.images) {

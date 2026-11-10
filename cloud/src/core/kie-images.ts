@@ -62,9 +62,17 @@ export function createKieClient(secret: string, transport: KieTransport = kieTra
       if (!extension || data.length > 30 * 1024 * 1024 || imageType(data) !== mime) throw new HttpError(400, 'INVALID_IMAGE', '参考图须为不超过 30 MB 的 PNG、JPEG 或 WebP。');
       const boundary = `ccagent-${randomUUID()}`, fileName = `${randomUUID()}.${extension}`;
       const body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="uploadPath"\r\n\r\n${path}\r\n--${boundary}\r\nContent-Disposition: form-data; name="fileName"\r\n\r\n${fileName}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${mime}\r\n\r\n`), Buffer.from(data), Buffer.from(`\r\n--${boundary}--\r\n`)]);
-      const response = await transport('https://kieai.redpandaai.co/api/file-stream-upload', { method: 'POST', headers: { authorization: headers.authorization, 'content-type': `multipart/form-data; boundary=${boundary}` }, body, signal, redirect: 'error' }, ['kieai.redpandaai.co']);
-      const payload = await json(response), url = record(payload.data).downloadUrl;
-      if (!response.ok || payload.code !== 200 || typeof url !== 'string') throw new Error('IMAGE_UPLOAD_FAILED');
+      const response = await transport('https://kieai.redpandaai.co/api/file-stream-upload', { method: 'POST', headers: { authorization: headers.authorization, 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': String(body.byteLength) }, body, signal, redirect: 'error' }, ['kieai.redpandaai.co']);
+      // Preserve a safe reason without exposing supplier messages, image URLs or credentials.
+      let payload: Record<string, unknown>;
+      try { payload = await json(response); }
+      catch { throw new HttpError(502, 'IMAGE_UPLOAD_RESPONSE_INVALID', '图像上传服务返回了无效响应。'); }
+      const url = record(payload.data).downloadUrl;
+      if (!response.ok || payload.code !== 200 || typeof url !== 'string') {
+        const status = response.ok ? Number(payload.code) : response.status;
+        const code = [401, 403].includes(status) ? 'IMAGE_UPLOAD_AUTH_FAILED' : status === 429 ? 'IMAGE_UPLOAD_RATE_LIMITED' : status === 413 ? 'IMAGE_UPLOAD_TOO_LARGE' : 'IMAGE_UPLOAD_FAILED';
+        throw new HttpError(502, code, '参考图上传未完成，请联系管理员检查图像上传服务。');
+      }
       // Upload output is used by Kie, never fetched by this server. Reject non-public URL syntax and credentials.
       const parsed = new URL(url);
       if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash || parsed.port || !/^[a-z0-9.-]+$/i.test(parsed.hostname)) throw new Error('IMAGE_UPLOAD_URL_INVALID');

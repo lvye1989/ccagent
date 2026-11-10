@@ -10,7 +10,7 @@ import type { Usage } from "../types/message.js";
 export const OLD_TOOL_RESULT_PLACEHOLDER = "[Old tool result content cleared]";
 const MICROCOMPACT_MIN_MESSAGES = 10;
 const MICROCOMPACT_KEEP_RECENT_MESSAGES = 8;
-const COMPACTABLE_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "Edit", "Write"]);
+const COMPACTABLE_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "PowerShell", "Edit", "MultiEdit", "Write"]);
 
 const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -63,7 +63,9 @@ export interface CompactionCheckOptions {
   usage?: Usage;
   usageAnchorIndex?: number;
   usageSystemPromptTokens?: number;
+  usageToolDefinitionTokens?: number;
   systemPrompt?: string;
+  toolDefinitions?: readonly unknown[];
   force?: boolean;
   /** Clear old tool payloads without making a summarization API call. */
   microOnly?: boolean;
@@ -103,7 +105,7 @@ function microCompactToolResultContent(content: unknown): string | null {
   return null;
 }
 
-function microCompactMessage(message: MessageParam): { message: MessageParam; compactedToolIds: string[] } {
+function microCompactMessage(message: MessageParam, toolNames: ReadonlyMap<string, string>): { message: MessageParam; compactedToolIds: string[] } {
   if (!isContentBlocks(message.content)) {
     return { message, compactedToolIds: [] };
   }
@@ -122,6 +124,9 @@ function microCompactMessage(message: MessageParam): { message: MessageParam; co
       return block;
     }
 
+    // Failed observations can be the only explanation for an unfinished task.
+    if (block.is_error) return block;
+
     const binaryReplacement = microCompactToolResultContent(block.content);
     if (binaryReplacement) {
       compactedToolIds.push(block.tool_use_id);
@@ -132,17 +137,22 @@ function microCompactMessage(message: MessageParam): { message: MessageParam; co
       return block;
     }
 
-    const toolName = block.content.match(/^([A-Za-z0-9_-]+):/)?.[1] ?? null;
+    // Runtime results are raw file text/stdout, not "Read: ...". Pair them
+    // with their actual tool_use; retain prefix support for legacy histories.
+    const toolName = toolNames.get(block.tool_use_id) ?? block.content.match(/^([A-Za-z0-9_-]+):/)?.[1] ?? null;
     if (!toolName || !COMPACTABLE_TOOLS.has(toolName)) {
       return block;
     }
+    if (block.content === OLD_TOOL_RESULT_PLACEHOLDER) return block;
 
     compactedToolIds.push(block.tool_use_id);
     return { ...block, content: OLD_TOOL_RESULT_PLACEHOLDER };
   });
 
   return {
-    message: { ...message, content: nextContent },
+    message: nextContent.some((block, index) => block !== message.content[index])
+      ? { ...message, content: nextContent }
+      : message,
     compactedToolIds,
   };
 }
@@ -153,17 +163,23 @@ export function microCompactMessages(messages: MessageParam[]): { messages: Mess
   }
 
   const compactedToolIds: string[] = [];
+  const toolNames = new Map<string, string>();
   const nextMessages = messages.map((message, index) => {
+    if (isContentBlocks(message.content)) {
+      for (const block of message.content) {
+        if (block.type === "tool_use") toolNames.set(block.id, block.name);
+      }
+    }
     if (index >= messages.length - MICROCOMPACT_KEEP_RECENT_MESSAGES) {
       return message;
     }
 
-    const result = microCompactMessage(message);
+    const result = microCompactMessage(message, toolNames);
     compactedToolIds.push(...result.compactedToolIds);
     return result.message;
   });
 
-  return { messages: nextMessages, compactedToolIds };
+  return { messages: nextMessages.some((message, index) => message !== messages[index]) ? nextMessages : messages, compactedToolIds };
 }
 
 function makeCompactBoundary(metadata: CompactBoundaryMetadata): CompactBoundaryMessage {
@@ -234,6 +250,7 @@ async function summarizeMessages(messages: MessageParam[], focus?: string, model
     querySource: "background",
     model: model ?? process.env.ANTHROPIC_MODEL,
     maxTokens: 6000,
+    thinking: { type: "disabled" },
     system: NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT + extraInstruction,
     messages: [
       {
@@ -269,15 +286,18 @@ export async function compactMessages(
   options: CompactionCheckOptions = {},
 ): Promise<CompactionResult> {
   options.signal?.throwIfAborted();
+  if (messages.length === 0) return { messages, didCompact: false, didMicroCompact: false };
   const microcompactResult = microCompactMessages(messages);
   const microCompacted = microcompactResult.messages;
-  const microChanged = JSON.stringify(microCompacted) !== JSON.stringify(messages);
+  const microChanged = microCompacted !== messages;
 
   const budget = buildTokenBudgetSnapshot(microCompacted, {
     usage: options.usage,
     usageAnchorIndex: options.usageAnchorIndex,
     usageSystemPromptTokens: options.usageSystemPromptTokens,
+    usageToolDefinitionTokens: options.usageToolDefinitionTokens,
     systemPrompt: options.systemPrompt,
+    toolDefinitions: options.toolDefinitions,
     model: options.model,
     contextWindow: options.contextWindow,
   });

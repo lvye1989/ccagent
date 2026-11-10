@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { requirePlatformScope } from "../platform/account.js";
-import { DesignImageError, generateDesignImage, resumeDesignImage, getDesignImageConfig, validateDesignRaster, validateImageGenerationOptions, type DesignRaster } from "../services/images/designImageProvider.js";
+import { DesignImageError, generateDesignImage, resumeDesignImage, getDesignImageConfig, validateDesignRaster, validateImageGenerationOptions, selectDesignImageRoute, type DesignRaster } from "../services/images/designImageProvider.js";
 import { lstat, readFile } from "node:fs/promises";
 import { getCCAgentPath } from "../utils/paths.js";
 import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
@@ -10,7 +10,7 @@ import { handleWhiteboard, type Whiteboard } from "./webWhiteboards.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ELEMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_RUNS = 8, MAX_RECEIPTS = 2048, MAX_RESULT_BYTES = 96 * 1024 * 1024, RETENTION_MS = 30 * 60_000;
-const INPUT_KEYS = new Set(["workspace", "id", "revision", "kind", "prompt", "baseImageId", "canvasVersion", "annotated", "requestId", "model", "generationMode", "aspect_ratio", "resolution", "background", "assetIds", "baseAssetId"]);
+const INPUT_KEYS = new Set(["workspace", "id", "revision", "kind", "prompt", "baseImageId", "canvasVersion", "annotated", "requestId", "aspect_ratio", "resolution", "background", "assetIds", "baseAssetId"]);
 type Kind = "architecture" | "urban-analysis";
 type Status = "running" | "completed" | "failed" | "stopped";
 type ObjectValue = Record<string, unknown>;
@@ -57,8 +57,6 @@ function parseRequest(input: Record<string, unknown>, workspace: string): Reques
   try { if (input.annotated !== undefined) annotated = validateDesignRaster(input.annotated); }
   catch { return invalid("勾画快照不是有效的 PNG、JPEG 或 WEBP 图片。"); }
   if (annotated && (annotated.width > 2048 || annotated.height > 2048)) invalid("勾画快照不能超过 2048 像素，请缩小后再试。");
-  if (input.generationMode !== undefined && !["text-to-image", "image-to-image"].includes(String(input.generationMode))) invalid("图像生成模式无效。");
-  if (input.model !== undefined && (typeof input.model !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,79}$/.test(input.model))) invalid("图像模型无效。");
   for (const key of ["aspect_ratio", "resolution", "background"] as const) if (input[key] !== undefined && typeof input[key] !== "string") invalid("图像生成参数无效。");
   validateImageGenerationOptions(input as Request);
   if (input.assetIds !== undefined && (!Array.isArray(input.assetIds) || input.assetIds.length > 16 || input.assetIds.some(id => typeof id !== "string" || !UUID.test(id)))) invalid("临时参考图编号无效。");
@@ -66,7 +64,6 @@ function parseRequest(input: Record<string, unknown>, workspace: string): Reques
   if (input.baseImageId && !annotated) invalid("请重新获取原图勾画快照。");
   const data: Omit<Request, "fingerprint"> = { workspace, id: input.id, revision: input.revision as number, kind: input.kind, prompt: input.prompt.trim(), baseImageId: input.baseImageId,
     canvasVersion: input.canvasVersion as number, annotated, requestId: input.requestId,
-    ...(input.model ? { model: input.model as string } : {}), ...(input.generationMode ? { generationMode: input.generationMode as Request["generationMode"] } : {}),
     ...(input.aspect_ratio ? { aspect_ratio: input.aspect_ratio as string } : {}), ...(input.resolution ? { resolution: input.resolution as string } : {}), ...(input.background ? { background: input.background as string } : {}),
     ...(input.assetIds ? { assetIds: input.assetIds as string[] } : {}), ...(input.baseAssetId ? { baseAssetId: input.baseAssetId as string } : {}) };
   // A retry is identical only when every generation input is identical. Neither a
@@ -75,13 +72,13 @@ function parseRequest(input: Record<string, unknown>, workspace: string): Reques
   return { ...data, fingerprint };
 }
 
-function savedImages(board: Whiteboard, baseImageId: string, maxReferences = 2): { base: DesignRaster; references: DesignRaster[] } {
+function savedImages(board: Whiteboard, baseImageId: string, maxReferences = 2): { base?: DesignRaster; references: DesignRaster[] } {
   const elements = board.scene.elements.filter((element) => element.type === "image" && !element.isDeleted);
   const metadata = (element: ObjectValue): ObjectValue | undefined => object(element.customData) && object(element.customData.ccagentDesign) ? element.customData.ccagentDesign : undefined;
   const original = elements.find((element) => element.id === baseImageId);
-  if (!original || metadata(original)?.role !== "base" || metadata(original)?.version !== 1) invalid("所选原图不在已保存的画布中，请重新导入或保存原图。", 409, "base_image_missing");
-  if (typeof original.width !== "number" || typeof original.height !== "number" || original.width <= 0 || original.height <= 0) invalid("原图显示尺寸无效，请恢复图片大小后保存。", 400, "base_image_transformed");
-  if (original.angle !== 0 || (original.crop !== undefined && original.crop !== null) || (Array.isArray(original.scale) && (original.scale[0] !== 1 || original.scale[1] !== 1))) {
+  if (baseImageId && (!original || metadata(original)?.role !== "base" || metadata(original)?.version !== 1)) invalid("所选原图不在已保存的画布中，请重新导入或保存原图。", 409, "base_image_missing");
+  if (original && (typeof original.width !== "number" || typeof original.height !== "number" || original.width <= 0 || original.height <= 0)) invalid("原图显示尺寸无效，请恢复图片大小后保存。", 400, "base_image_transformed");
+  if (original && (original.angle !== 0 || (original.crop !== undefined && original.crop !== null) || (Array.isArray(original.scale) && (original.scale[0] !== 1 || original.scale[1] !== 1)))) {
     invalid("请先恢复原图的旋转、裁剪和翻转，再在原图上勾画。", 400, "base_image_transformed");
   }
   function raster(element: ObjectValue): DesignRaster {
@@ -96,7 +93,7 @@ function savedImages(board: Whiteboard, baseImageId: string, maxReferences = 2):
     return meta?.version === 1 && meta.role === "reference" && meta.baseImageId === baseImageId;
   });
   if (references.length > maxReferences) invalid(`一张原图最多使用 ${maxReferences} 张参考图，请移除多余参考图后保存。`, 400, "reference_limit");
-  return { base: raster(original), references: references.map(raster) };
+  return { ...(original ? { base: raster(original) } : {}), references: references.map(raster) };
 }
 
 /** Account/workspace-bound raster drafts. Generation never writes a saved board. */
@@ -189,7 +186,7 @@ export function createWhiteboardDesignManager(options: WhiteboardDesignManagerOp
       const current = await Promise.race([requirePlatformScope(0), aborted]);
       if (current.user.id !== run.owner || options.getWorkspace() !== run.workspace) { stopRun(run); return; }
       if (!Array.isArray(result.images) || result.images.length < 1 || result.images.length > 4) throw new Error("invalid-design-result");
-      const output = result.images.map((image) => validateDesignRaster(image, 64 * 1024 * 1024));
+      const output = result.images.map((image) => validateDesignRaster(image, "output"));
       if (output.reduce((total, image) => total + Buffer.byteLength(image.dataURL), 0) > MAX_RESULT_BYTES) throw new Error("design-result-too-large");
       // Cancellation during the final scope check must not resurrect a stopped run.
       if (run.status !== "running" || run.controller.signal.aborted || disposed) return;
@@ -231,15 +228,20 @@ export function createWhiteboardDesignManager(options: WhiteboardDesignManagerOp
       if (!("board" in response) || !("scene" in response.board)) invalid("已保存的画布暂时无法读取。", 409, "board_unavailable");
       if (response.board.revision !== request.revision) invalid("画布已被其他窗口更新，请重新打开后再生成。", 409, "conflict");
       const config = await configuration(request.workspace);
-      const images: { base?: DesignRaster; references: DesignRaster[] } = request.baseImageId ? savedImages(response.board, request.baseImageId, config.maxReferences) : { references: [] };
+      const images = savedImages(response.board, request.baseImageId, config.maxReferences);
       if (request.baseAssetId) {
         if (!request.baseImageId) invalid("高清原图需要对应的画布原图。");
         images.base = (await assets.read(request.workspace, [request.baseAssetId]))[0];
       }
       if (request.assetIds?.length) images.references.push(...await assets.read(request.workspace, request.assetIds));
-      if (config.provider !== "official" && (!images.base || !request.annotated)) invalid("个人图像编辑服务需要原图和勾画。");
+      if (config.provider !== "official" && (!images.base || !request.annotated)) invalid("当前绘图输入不完整，请重新导入图片。");
       if (config.provider === "official" && ((images.base ? 1 : 0) + (request.annotated ? 1 : 0) + images.references.length > 16)) invalid("最多使用 16 张输入图（含原图和勾画）。");
-      if (!config.configured) invalid("请先在绘图面板中配置可用的图像生成模型。", 400, "config_not_ready");
+      if (!config.configured) invalid("图像生成服务暂未开放，请稍后重试。", 503, "DESIGN_IMAGE_UNAVAILABLE");
+      if (config.provider === "official") {
+        const imageCount = (images.base ? 1 : 0) + (request.annotated ? 1 : 0) + images.references.length;
+        request.model = selectDesignImageRoute(config, imageCount).id;
+        request.generationMode = imageCount > 0 ? "image-to-image" : "text-to-image";
+      }
       const referenceLimit = config.provider === "official" ? 16 - (images.base ? 1 : 0) - (request.annotated ? 1 : 0) : config.maxReferences;
       if (images.references.length > referenceLimit) invalid(`当前图像模型最多使用 ${referenceLimit} 张参考图，请移除多余参考图后保存。`, 400, "reference_limit");
       if (disposed) invalid("图像绘制服务正在退出，请重新打开应用。", 503, "unavailable");

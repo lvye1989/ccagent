@@ -185,6 +185,37 @@ export async function forgetOfficialKey(): Promise<void> {
   });
 }
 
+const imageCatalogRefreshes = new Map<string, Promise<{ configuration: ServiceConfiguration; client: PlatformGatewayClient }>>();
+/** Fetch an image-only catalog snapshot without rewriting any saved account choices. */
+export async function refreshOfficialImageCatalog(): Promise<{ configuration: ServiceConfiguration; client: PlatformGatewayClient }> {
+  const session = await requirePlatformScope(0), account = await getPlatformAccountClient(), binding = await readServiceBinding();
+  if (!binding || binding.configuration.origin !== account.origin || binding.configuration.userId !== session.user.id) throw new PlatformServiceError("账户服务暂不可用，请稍后重试。", "SERVICE_NOT_CONFIGURED", 503);
+  const paths = servicePaths(), identity = paths.state + ":" + digest(binding.credential.apiKey);
+  const pending = imageCatalogRefreshes.get(identity); if (pending) return pending;
+  const operation = (async () => {
+    const response = await checked(await account.serviceRequest("/v1/models", session.user.id, { headers: { authorization: `Bearer ${binding.credential.apiKey}` }, maximumBytes: 1024 * 1024, timeoutMs: 20000 }));
+    const data = await response.json() as { data?: unknown; defaults?: unknown };
+    let routes: OfficialServiceRoute[], defaults: ServiceRoles;
+    try {
+      if (!Array.isArray(data.data) || data.data.length > 100) throw new Error("catalog");
+      routes = data.data.map(item => serviceRouteSchema.parse(item));
+      if (new Set(routes.map(route => route.id)).size !== routes.length) throw new Error("duplicates");
+      defaults = catalogDefaultRoles(data.defaults, routes);
+    } catch { throw new PlatformServiceError("图像服务目录暂不可用，请稍后重试。", "INVALID_CATALOG", 503); }
+    const current = await readServiceBinding();
+    if (!current || current.configuration.userId !== session.user.id || current.configuration.origin !== account.origin || current.credential.apiKey !== binding.credential.apiKey || current.configuration.revision !== binding.configuration.revision || (await getPlatformAccountClient()).origin !== account.origin || process.env.CCAGENT_ACCOUNT_ID !== session.user.id) throw new PlatformServiceError("账户服务已更新，请稍后重试。", "SERVICE_CONFIGURATION_CHANGED", 409);
+    const images = routes.filter(route => route.service === "image"), otherRoutes = current.configuration.routes.filter(route => route.service !== "image");
+    if (images.some(image => otherRoutes.some(route => route.id === image.id))) throw new PlatformServiceError("图像目录编号冲突，请联系管理员。", "INVALID_CATALOG", 503);
+    const { imageGeneration: savedImage, ...otherRoles } = current.configuration.roles;
+    const imageGeneration = images.some(route => route.id === savedImage) ? savedImage : defaults.imageGeneration;
+    const roles: ServiceRoles = { ...otherRoles, ...(imageGeneration ? { imageGeneration } : {}) };
+    const configuration = serviceConfigurationSchema.parse({ ...current.configuration, roles, routes: [...otherRoutes, ...images] });
+    return { configuration, client: new PlatformGatewayClient(account, configuration, current.credential) };
+  })();
+  imageCatalogRefreshes.set(identity, operation);
+  try { return await operation; } finally { if (imageCatalogRefreshes.get(identity) === operation) imageCatalogRefreshes.delete(identity); }
+}
+
 export async function officialServicesView() {
   const session = await requirePlatformScope(0), account = await getPlatformAccountClient(), binding = await readServiceBinding().catch(() => null);
   const configured = Boolean(binding && binding.configuration.origin === account.origin);

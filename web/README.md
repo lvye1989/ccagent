@@ -32,6 +32,8 @@ cloudTV 使用网站自身的登录状态，本地 CCAGENT 的账户凭据及模
 
 ## 自定义、模型与知识库
 
+「插件 → MCP 服务」下方的「软件权限设置」可单独开关 QQ 邮箱和 163 邮箱的读信、写草稿、删信、查信与发送邮件权限。与 CLI 的 `/powersetting` 共用同一 CCAGENT 账号的用户设置。
+
 - `?view=agents`：点击“创建 Agent”，描述需求生成可编辑角色，或直接填写名称、使用场景与工作要求；保存为用户/项目 `.ccagent/agents/*.md`。自定义 Agent 可再次编辑，也可单独启停。
 - `?view=mcp`：点击“添加 MCP”，输入服务 URL、标准 `mcpServers` JSON 或带有具体包名/命令的需求，解析后核对并“添加并连接”。支持 stdio / HTTP / SSE，连接与工具发现状态会持续更新。
 - `?view=skills`：支持导入单个 SKILL.md，或通过“加载技能目录”导入完整目录（含 scripts、references 等）。逐项启停状态持久化并同时控制模型发现、Skill 工具和 `/技能名` 调用。

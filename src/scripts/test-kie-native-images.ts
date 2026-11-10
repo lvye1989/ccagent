@@ -1,12 +1,13 @@
 /** Real local account + HTTP + private uploads; no external request or provider Key. */
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startAccountFixture } from "./helpers/accountFixture.js";
 import { enterPlatformAccount } from "../platform/account.js";
-import { saveOfficialServices, getPlatformGatewayClient } from "../platform/gatewayClient.js";
+import { saveOfficialServices, getPlatformGatewayClient, forgetOfficialKey } from "../platform/gatewayClient.js";
+import { servicePaths } from "../platform/serviceState.js";
 import { generateDesignImage, resumeDesignImage, getDesignImageConfig, validateDesignRaster, validateImageGenerationOptions, KIE_ASPECT_RATIOS, DesignImageError } from "../services/images/designImageProvider.js";
 import { createDesignAssets } from "../entrypoint/webDesignAssets.js";
 import { createWhiteboardDesignManager } from "../entrypoint/webWhiteboardDesign.js";
@@ -21,6 +22,7 @@ const routes = ["flare", "sunburst"].flatMap(variant => ["text-to-image", "image
   pricing: { currency: "CNY", definition: { tariff: { kind: "constant" }, rates: ["1k", "2k", "4k"].map(resolution => ({ metric: `output_images_${resolution}`, price: "0.2", unitQuantity: "1" })) }, markup: "1.3", version: 1, sourceUrl: "https://kie.ai/gpt-image-2-5", fingerprint: "1".repeat(64) },
   limits: { contextWindow: 20000, maxOutputTokens: 1, maxImages: 16 } })));
 const files = new Map<string, { owner: string; bytes: Buffer; ready: boolean; mime: string; token: string }>();
+let publishedRoutes = routes, publishedDefault: string | undefined, catalogReads = 0;
 const tasks = new Map<string, { owner: string; state: string; polls: number; fileId: string }>();
 const creates: Record<string, unknown>[] = []; let polls = 0, puts = 0, mode = "normal";
 let fixture: Awaited<ReturnType<typeof startAccountFixture>>;
@@ -33,7 +35,7 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
     file.bytes = await body(); puts++; return reply(200, {});
   }
   if (!user) return reply(401, {});
-  if (url.pathname === "/v1/models") { assert.equal(req.headers.authorization, `Bearer ${key}`); return reply(200, { data: routes, defaults: {} }); }
+  if (url.pathname === "/v1/models") { catalogReads++; assert.equal(req.headers.authorization, `Bearer ${key}`); return reply(200, { data: publishedRoutes, defaults: { image: publishedDefault ?? null } }); }
   if (url.pathname === "/api/files" && req.method === "POST") {
     const input = JSON.parse((await body()).toString()); assert.equal(input.purpose, "image"); const id = randomUUID(), token = randomUUID();
     files.set(id, { owner: user.id, mime: input.contentType, ready: false, bytes: Buffer.alloc(0), token });
@@ -53,7 +55,7 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
     files.set(fileId, { owner: user.id, bytes: Buffer.from(raster.dataURL.split(",")[1]!, "base64"), mime: "image/png", ready: true, token: "" });
     tasks.set(id, { owner: user.id, state: mode === "unknown" ? "unknown" : "processing", polls: 0, fileId });
     if (mode === "lost") { res.destroy(); return true; }
-    return reply(202, { id, call_id: id, status: mode === "unknown" ? "unknown" : "queued", poll_after_ms: 1, images: [] });
+    return reply(202, { id, call_id: id, status: mode === "upload-failed" ? "failed" : mode === "unknown" ? "unknown" : "queued", ...(mode === "upload-failed" ? { code: "IMAGE_INPUT_UPLOAD_FAILED", message: "untrusted upstream detail" } : {}), poll_after_ms: 1, images: [] });
   }
   if (url.pathname.startsWith("/v1/images/tasks/")) {
     const id = url.pathname.split("/").at(-1)!, task = tasks.get(id); if (!task || task.owner !== user.id) return reply(404, {}); polls++; task.polls++;
@@ -65,8 +67,12 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
 let assetWorkspace = workspace; const assets = createDesignAssets(() => assetWorkspace);
 try {
   await fixture.nativeClient.signIn(fixture.users[0]!.email, fixture.password); await enterPlatformAccount();
-  await saveOfficialServices({ apiKey: key, roles: {}, auxiliaryEnabled: true });
+  await saveOfficialServices({ apiKey: key, roles: {}, auxiliaryEnabled: false });
+  const localConfigurationBefore = await readFile(servicePaths().state, "utf8");
+  process.env.IMAGE_EDIT_PROVIDER = "openai"; process.env.IMAGE_EDIT_BASE_URL = "https://legacy.invalid"; process.env.IMAGE_EDIT_API_KEY = "ignored-legacy-environment-key";
+  await writeFile(path.join(process.env.CCAGENT_HOME!, "settings.json"), JSON.stringify({ whiteboardDesignImage: { disabled: true, provider: "openai", baseURL: "https://legacy.invalid", model: "legacy-model", apiKey: "ignored-legacy-user-key" } }));
   const config = await getDesignImageConfig(workspace); assert.equal(config.provider, "official"); assert.equal(config.routes?.length, 4); assert.equal(config.configured, true);
+  assert.deepEqual(config.modes, { textToImage: true, imageToImage: true }); assert.equal(await readFile(servicePaths().state, "utf8"), localConfigurationBefore);
   const input = (model: string, extra = {}) => ({ model, kind: "architecture" as const, prompt: "Create an isolated architectural diagram.", references: [], requestId: randomUUID(), signal: new AbortController().signal, ...extra });
   for (const variant of ["flare", "sunburst"]) {
     const text = await generateDesignImage(input(`${variant}-text-to-image`, { generationMode: "text-to-image", background: "transparent" }), workspace);
@@ -78,7 +84,7 @@ try {
   assert.equal((creates.at(-1)!.input_images as string[]).length, 16); assert.equal((creates.at(-1)!.prompt as string).length, 20000);
   const before = creates.length;
   await assert.rejects(generateDesignImage(input("flare-image-to-image", { references: Array(17).fill(raster) }), workspace), /16/);
-  await assert.rejects(generateDesignImage(input("flare-text-to-image", { references: [raster] }), workspace), /不接收图片/);
+  await assert.rejects(generateDesignImage(input("flare-text-to-image", { references: [raster] }), workspace), /模式暂未开放/);
   for (const aspect_ratio of KIE_ASPECT_RATIOS) assert.equal(validateImageGenerationOptions({ aspect_ratio }).aspect_ratio, aspect_ratio);
   for (const ratio of ["27:16", "16:27", "9:8", "8:9"]) assert.throws(() => validateImageGenerationOptions({ aspect_ratio: ratio, resolution: "2K" }), /仅支持 1K/);
   assert.throws(() => validateImageGenerationOptions({ resolution: "4K", background: "transparent" }), /仅支持 1K/); assert.equal(creates.length, before);
@@ -97,7 +103,7 @@ try {
   await assets.remove(workspace, asset.assetId); await assert.rejects(assets.read(workspace, [asset.assetId]), /不存在/);
   const board = await handleWhiteboard("create", { name: "Text-to-image fixture" }, workspace); assert("board" in board);
   let busy = false, captured: unknown; const manager = createWhiteboardDesignManager({ getWorkspace: () => workspace, isBusy: () => busy, onBusy: () => { busy = true; }, onIdle: () => { busy = false; }, getConfiguration: async () => config, generate: async value => { captured = value; return { provider: "official", model: value.model!, images: [raster] }; } });
-  const boardInput = { workspace, id: board.board.id, revision: board.board.revision, kind: "architecture", prompt: "Draw a city diagram", baseImageId: "", canvasVersion: 0, requestId: randomUUID(), model: "flare-text-to-image", generationMode: "text-to-image" };
+  const boardInput = { workspace, id: board.board.id, revision: board.board.revision, kind: "architecture", prompt: "Draw a city diagram", baseImageId: "", canvasVersion: 0, requestId: randomUUID() };
   const accepted = await manager.start(boardInput);
   while (busy) await new Promise(resolve => setTimeout(resolve, 10)); assert.equal((await manager.status(accepted.runId, workspace)).status, "completed"); assert.equal((captured as { base?: unknown }).base, undefined); manager.dispose();
   let resumed = 0; const recreated = createWhiteboardDesignManager({ getWorkspace: () => workspace, isBusy: () => busy, onBusy: () => { busy = true; }, onIdle: () => { busy = false; }, generate: async () => { assert.fail("Restored manager must never dispatch generation"); }, resume: async requestId => { assert.equal(requestId, boardInput.requestId); resumed++; return { provider: "official", model: "flare-text-to-image", images: [raster] }; } });
@@ -105,9 +111,44 @@ try {
   assert.equal((await recreated.start(boardInput)).runId, accepted.runId);
   await assert.rejects(recreated.start({ ...boardInput, prompt: "mutated" }), /不能用于不同/);
   await recreated.resume(accepted.runId, workspace); while (busy) await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(resumed, 1); assert.equal((await recreated.status(accepted.runId, workspace)).status, "completed"); recreated.dispose();
+  const savedReference = (id: string, baseImageId: string) => ({ id, type: "image", fileId: "saved-ref-file", x: 0, y: 0, width: 1, height: 1, angle: 0, isDeleted: false, customData: { ccagentDesign: { version: 1, role: "reference", width: 1, height: 1, baseImageId } } });
+  const refOnlyBoard = await handleWhiteboard("create", { name: "Persisted references without a base", scene: { type: "excalidraw", version: 2, appState: {}, elements: [savedReference("saved-reference", ""), savedReference("unrelated-reference", "another-base")], files: { "saved-ref-file": { id: "saved-ref-file", mimeType: raster.mimeType, dataURL: raster.dataURL, created: Date.now() } } } }, workspace); assert("board" in refOnlyBoard);
+  let canonicalInput: import("../services/images/designImageProvider.js").DesignImageInput | undefined;
+  const canonical = createWhiteboardDesignManager({ getWorkspace: () => workspace, isBusy: () => busy, onBusy: () => { busy = true; }, onIdle: () => { busy = false; }, getConfiguration: async () => config, generate: async value => { canonicalInput = value; return { provider: "official", model: value.model!, images: [raster] }; } });
+  const refAccepted = await canonical.start({ ...boardInput, id: refOnlyBoard.board.id, revision: refOnlyBoard.board.revision, requestId: randomUUID(), assetIds: [] });
+  while (busy) await new Promise(resolve => setTimeout(resolve, 10)); assert.equal((await canonical.status(refAccepted.runId, workspace)).status, "completed");
+  assert.equal(canonicalInput?.base, undefined); assert.equal(canonicalInput?.annotated, undefined); assert.equal(canonicalInput?.references.length, 1); assert.equal(canonicalInput?.references[0]!.dataURL, raster.dataURL); assert.equal(canonicalInput?.generationMode, "image-to-image"); assert(canonicalInput?.model?.endsWith("image-to-image")); canonical.dispose();
   await assert.rejects(fixture.nativeClient.serviceRequest("/v1/images/tasks/not-an-id", fixture.users[0]!.id), /接口无效/);
   await assert.rejects((await getPlatformGatewayClient()).imageTaskStatus("../../invalid"), /标识无效/);
   assert.equal(puts, 23); assert.equal(polls, 10);
+  const automatic = (extra = {}) => ({ kind: "architecture" as const, prompt: "Automatic gateway mode", references: [], requestId: randomUUID(), signal: new AbortController().signal, ...extra });
+  publishedDefault = "sunburst-image-to-image";
+  await generateDesignImage(automatic(), workspace); assert.equal(creates.at(-1)!.model, "sunburst-text-to-image");
+  await generateDesignImage(automatic({ references: [raster] }), workspace); assert.equal(creates.at(-1)!.model, "sunburst-image-to-image");
+  publishedRoutes = [...routes, { ...routes.find(route => route.id === "sunburst-text-to-image")!, id: "new-admin-default" }]; publishedDefault = "new-admin-default";
+  assert.equal((await getDesignImageConfig(workspace)).model, "new-admin-default");
+  await generateDesignImage(automatic(), workspace); assert.equal(creates.at(-1)!.model, "new-admin-default", "Fresh image snapshot is used even though the saved catalog has no new route");
+  assert.equal(await readFile(servicePaths().state, "utf8"), localConfigurationBefore, "Main/Qwen, auxiliary, fallback, Key revision and old price choices are unchanged");
+  publishedRoutes = routes; publishedDefault = "sunburst-image-to-image";
+  await saveOfficialServices({ roles: { imageGeneration: "flare-image-to-image" } });
+  await generateDesignImage(automatic(), workspace); assert.equal(creates.at(-1)!.model, "flare-text-to-image", "Saved unified model choice takes precedence over the catalog recommendation");
+  await generateDesignImage(automatic({ references: [raster] }), workspace); assert.equal(creates.at(-1)!.model, "flare-image-to-image");
+  await saveOfficialServices({ roles: {} });
+  publishedRoutes = routes.filter(route => route.id !== "sunburst-text-to-image"); publishedDefault = "sunburst-image-to-image";
+  assert.deepEqual((await getDesignImageConfig(workspace)).modes, { textToImage: false, imageToImage: true });
+  const noNewCalls = creates.length; await assert.rejects(generateDesignImage(automatic(), workspace), /暂未开放/); assert.equal(creates.length, noNewCalls);
+  mode = "upload-failed";
+  await assert.rejects(generateDesignImage(automatic({ references: [raster] }), workspace), (error: unknown) => {
+    assert(error instanceof DesignImageError); assert.equal(error.code, "DESIGN_IMAGE_FAILED");
+    assert.match(error.message, /参考图上传失败.*尚未提交生成.*预留额度已释放.*调用编号/);
+    assert(!error.message.includes("untrusted upstream detail")); return true;
+  });
+  const failedReceipt = JSON.parse(await readFile(path.join(process.env.CCAGENT_HOME!, "platform/image-task-receipts.json"), "utf8")).at(-1);
+  assert.equal(failedReceipt.state, "failed"); mode = "normal";
+  const afterFailedCall = creates.length;
+  publishedRoutes = []; publishedDefault = undefined; const closed = await getDesignImageConfig(workspace); assert.equal(closed.configured, false); assert.deepEqual(closed.modes, { textToImage: false, imageToImage: false });
+  await assert.rejects(generateDesignImage(automatic(), workspace), /暂未开放/); assert.equal(creates.length, afterFailedCall);
+  assert(catalogReads > 8); await forgetOfficialKey(); await assert.rejects(getDesignImageConfig(workspace), /账户服务暂不可用/); assert.equal(creates.length, afterFailedCall);
   console.log("Kie native images passed: four exact variants, private original/annotation/reference uploads, 16 images, 20k prompt, 13 ratios, 1K/2K/4K and background gates, single create/unknown/abort, owned task download, transient asset isolation and no-base whiteboard generation. Loopback fixtures only.");
 } finally {
   assets.dispose(); await fixture.close();

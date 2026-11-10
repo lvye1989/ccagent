@@ -5,7 +5,9 @@
  * local, flag, and plugin settings cannot turn on access to a mailbox.
  */
 import { getUserSettingsPath } from "../utils/paths.js";
-import { readJsonSettingsFile, updateUserSettings } from "../utils/settings.js";
+import { readJsonSettingsFile } from "../utils/settings.js";
+import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
+import { resetSettingsCache } from "./sources.js";
 import * as fs from "node:fs/promises";
 
 export type MailAccount = "qq" | "163";
@@ -19,11 +21,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isMailAccount(value: unknown): value is MailAccount {
+export function isMailAccount(value: unknown): value is MailAccount {
   return value === "qq" || value === "163";
 }
 
-function isMailPower(value: unknown): value is MailPower {
+export function isMailPower(value: unknown): value is MailPower {
   return value === "read" || value === "write" || value === "delete" ||
     value === "search" || value === "send";
 }
@@ -81,20 +83,17 @@ export async function isMailPowerEnabled(account: unknown, operation: unknown): 
   return settings[account][power];
 }
 
-// Serialize this module's writes so two rapid menu changes do not lose one
-// another's account/power update. The next call still runs after a failure.
-let writeTail: Promise<void> = Promise.resolve();
-
-export function setMailPower(
+export async function setMailPower(
   account: MailAccount,
   power: MailPower,
   enabled: boolean,
 ): Promise<MailPowerSettings> {
   if (!isMailAccount(account) || !isMailPower(power) || typeof enabled !== "boolean") {
-    return Promise.reject(new Error("Invalid mail account, permission, or switch value."));
+    throw new Error("Invalid mail account, permission, or switch value.");
   }
-  const action = async (): Promise<MailPowerSettings> => {
-    const settingsPath = getUserSettingsPath();
+  const settingsPath = getUserSettingsPath();
+  // CLI and Web workers can edit different switches in the same settings file.
+  const updated = await withFileTransaction(settingsPath, async () => {
     const { raw, parseError } = await readJsonSettingsFile<Record<string, unknown>>(settingsPath);
     if (parseError) throw new Error(`${parseError}; settings left unchanged.`);
     if (raw === null) {
@@ -116,10 +115,9 @@ export function setMailPower(
       ...previous,
       [account]: { ...accountPrevious, [power]: enabled },
     };
-    await updateUserSettings({ mailPowers });
+    await writeJsonAtomically(settingsPath, { ...raw, mailPowers });
     return parsePowers(mailPowers);
-  };
-  const result = writeTail.then(action);
-  writeTail = result.then(() => undefined, () => undefined);
-  return result;
+  });
+  resetSettingsCache();
+  return updated;
 }

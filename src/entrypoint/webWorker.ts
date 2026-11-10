@@ -10,6 +10,7 @@ import type { QueryEngineEvent } from "../core/queryEngine.js";
 import { classifyUserInput } from "../ui/hooks/useAgentSession/inputClassification.js";
 import {
   appendTranscriptEntry,
+  appendCompactionSnapshot,
   applySessionRetentionPolicy,
   createSessionId,
   initSessionStorage,
@@ -71,7 +72,7 @@ import { WebScheduleStore, type WebScheduledTask } from "./webSchedules.js";
 import { handleCustomization, readSessionTeam, saveSessionTeam, sessionTeamInstructions } from "./webCustomization.js";
 import { getActiveTeam } from "../state/teamContext.js";
 import { clearPendingNotifications } from "../state/notificationStore.js";
-import { findWebNotificationSession } from "./webNotifications.js";
+import { createWebNotificationDispatcher } from "./webNotifications.js";
 import { getRunningAsyncAgents } from "../state/asyncAgentStore.js";
 import { browseWorkingFolders, listFolderLocations, pickNativeWorkingFolder, resolveWorkingFolder } from "./webWorkspaces.js";
 import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWorkspaceAttachment, MAX_UPLOAD } from "./webFiles.js";
@@ -313,6 +314,7 @@ export function summarizeEvent(event: QueryEngineEvent): Record<string, unknown>
     case "error": return { type: "notice", tone: "error", message: event.error.message };
     case "model_changed": return { type: "model", model: event.model, source: event.source };
     case "stream_restart": return { type: "stream_restart" };
+    case "compacted": return { type: "notice", tone: "info", message: "上下文已压缩，将继续执行当前任务。" };
     default: return null;
   }
 }
@@ -415,6 +417,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
   catch (error) { schedulesReady = false; console.warn(`[ccagent web] Scheduled tasks: ${String(error)}`); }
   let scheduleDispatching = false;
   let schedulePoll: Promise<void> | null = null;
+  let shuttingDown = false;
+  let notificationDispatcher: ReturnType<typeof createWebNotificationDispatcher<WebSession>> | undefined;
   const workspaceListPath = getCCAgentPath("web-workspaces.json");
   async function listWebWorkspaces(): Promise<string[]> {
     let saved: unknown = [];
@@ -512,10 +516,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
     return session;
   }
 
-  async function persistTranscript(session: WebSession, entry: TranscriptEntry): Promise<void> {
+  async function persistSessionChange(session: WebSession, action: () => Promise<void>): Promise<void> {
     if (session.temporary || session.persistenceUnavailable) return;
     try {
-      await retrySessionWrite(() => appendTranscriptEntry(workspace, session.id, entry));
+      await retrySessionWrite(action);
     } catch (error) {
       if (!isSessionStorageError(error)) throw error;
       session.persistenceUnavailable = true;
@@ -524,6 +528,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
         message: "会话记录暂时无法写入。当前对话可以继续，但重启后新增内容无法恢复。请检查 .ccagent 会话目录的访问权限。",
       });
     }
+  }
+
+  async function persistTranscript(session: WebSession, entry: TranscriptEntry): Promise<void> {
+    await persistSessionChange(session, () => appendTranscriptEntry(workspace, session.id, entry));
   }
 
   async function webModels() {
@@ -627,12 +635,19 @@ export async function runWebWorker(args: string[]): Promise<void> {
       while (true) {
         const { value, done } = await run.next();
         if (done) {
+          succeeded = value.reason === undefined || value.reason === "completed";
           publish(session, { type: "turn_complete", reason: value.reason ?? "completed" });
           break;
         }
         const outgoing = summarizeEvent(value);
         if (outgoing) publish(session, outgoing);
-        if (value.type === "model_changed") {
+        if (value.type === "compacted") {
+          if (value.trigger === "micro") {
+            await persistTranscript(session, { type: "system", timestamp: new Date().toISOString(), level: "info", message: "compaction:micro" });
+          } else {
+            await persistSessionChange(session, () => appendCompactionSnapshot(workspace, session.id, value.trigger as "auto" | "manual", session.engine.getState().messages));
+          }
+        } else if (value.type === "model_changed") {
           session.model = value.model;
           await persistTranscript(session, { type: "model_change", timestamp: new Date().toISOString(), model: value.model });
         } else if (value.type === "assistant_message" || value.type === "tool_result_message") {
@@ -662,6 +677,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       session.busy = false;
       activeTurn = null;
       teamOwner = getActiveTeam() ? session.id : null;
+      notificationDispatcher?.request();
     }
     return succeeded;
   }
@@ -1293,8 +1309,16 @@ export async function runWebWorker(args: string[]): Promise<void> {
           });
           res.write(": connected\n\n");
           const lastId = Number(req.headers["last-event-id"] ?? url.searchParams.get("lastEventId") ?? 0);
-          for (const item of session.events) {
-            if (item.id > lastId) res.write(`id: ${item.id}\ndata: ${JSON.stringify(item.data)}\n\n`);
+          const earliest = session.events[0]?.id ?? session.nextEventId;
+          const replayUnavailable = !Number.isSafeInteger(lastId) || lastId < 0 || lastId < earliest - 1 || lastId >= session.nextEventId;
+          if (replayUnavailable) {
+            // Partial replay cannot restore lost assistant text or an approval
+            // prompt. Ask the client to fetch the authoritative session once.
+            res.write(`data: ${JSON.stringify({ type: "session_snapshot_required" })}\n\n`);
+          } else {
+            for (const item of session.events) {
+              if (item.id > lastId) res.write(`id: ${item.id}\ndata: ${JSON.stringify(item.data)}\n\n`);
+            }
           }
           // A reconnect may outlive the bounded event buffer. Snapshot after replay so old starts cannot reset its clock.
           const serverTime = new Date().toISOString();
@@ -1435,6 +1459,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
       if (error instanceof AccountError) return json(res, error.status || 503, { error: error.message, code: error.code });
       const message = error instanceof Error ? error.message : String(error);
       return json(res, message.includes("Session ") ? 404 : 400, { error: message });
+    } finally {
+      // Loading a reminder's owner or releasing a configuration lock is also
+      // an idle transition; do not make it wait for the fallback poll.
+      notificationDispatcher?.request();
     }
   });
 
@@ -1443,11 +1471,22 @@ export async function runWebWorker(args: string[]): Promise<void> {
     server.listen(port, "127.0.0.1", () => resolve());
   });
   process.send?.({ type: "ccagent:worker-ready" });
+  notificationDispatcher = createWebNotificationDispatcher({
+    sessions: () => sessions.values(), teamOwner: () => teamOwner,
+    blocked: () => shuttingDown || Boolean(activeTurn || pluginMutationBusy || scheduleDispatching),
+    start: session => { activeTurn = session.id; void runTurn(session, ""); },
+  });
+  const notificationFallback = setInterval(() => notificationDispatcher?.request(), 1000);
+  notificationFallback.unref();
+  server.once("close", () => { notificationDispatcher?.dispose(); clearInterval(notificationFallback); });
   if (process.env.CCAGENT_DESKTOP_TOKEN && process.send) {
     let stopping = false;
     const shutdownDesktopService = async () => {
       if (stopping) return;
       stopping = true;
+      shuttingDown = true;
+      notificationDispatcher?.dispose();
+      clearInterval(notificationFallback);
       server.close();
       clearWorkfriendTimers();
       whiteboardAI.dispose();
@@ -1479,13 +1518,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     void dispatchScheduledTask().catch(error => console.warn(`[ccagent web] Scheduled task: ${String(error)}`));
   }
   console.log(`CCAGENT Web: http://127.0.0.1:${port}`);
-  setInterval(() => {
-    if (activeTurn || pluginMutationBusy || scheduleDispatching) return;
-    // The queue belongs to conversations, not the currently visible tab.
-    // Keep team execution pinned to its existing owner and never adopt an
-    // unowned legacy reminder or restore a different workspace implicitly.
-    const session = findWebNotificationSession(sessions.values(), teamOwner);
-    if (session) { activeTurn = session.id; void runTurn(session, ""); }
-  }, 1000).unref();
+  // Startup may have queued restored reminders before the subscription existed.
+  notificationDispatcher.request();
   console.log(`Workspace: ${workspace}`);
 }

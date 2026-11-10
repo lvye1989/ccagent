@@ -215,8 +215,17 @@ export async function runChildAgent(params: RunChildAgentParams): Promise<AgentR
 async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunResult> {
   const startTime = Date.now();
   const def = params.agentDefinition;
-  const resolved = resolveAgentTools(def, params.availableTools);
+  // A child may narrow its parent's capabilities, never regain a tool from
+  // the global pool. Match the actual tool instance and reject ambiguous
+  // names, just as the shared loop does at dispatch time.
+  const parentScope = params.parentToolContext.scopedTools;
+  const availableTools = params.availableTools.filter((tool) =>
+    tool.isEnabled() && (parentScope === undefined ||
+      (parentScope.includes(tool) && parentScope.filter((candidate) => candidate.name === tool.name).length === 1)),
+  );
+  const resolved = resolveAgentTools(def, availableTools);
   const toolApiParams = resolved.resolvedTools.map(toolToApiParam);
+  const abortSignal = params.abortSignal ?? params.parentToolContext.abortSignal;
 
   // Sub-agent gets its own session id so its TodoWrite / Task state
   // doesn't pollute the parent's. Format keeps the parent's id as a
@@ -239,7 +248,10 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     // passes the worktree path here so EVERY sub-agent tool call
     // (Read/Write/Edit/Bash) resolves against the isolated tree.
     cwd: params.cwdOverride ?? params.parentToolContext.cwd,
-    abortSignal: params.abortSignal,
+    scopedTools: Object.freeze([...resolved.resolvedTools]),
+    officialVisionOnly: params.parentToolContext.officialVisionOnly,
+    abortSignal,
+    defaultModel: params.model,
     sessionId: subSessionId,
     notificationOwnerSessionId: params.parentToolContext.notificationOwnerSessionId ?? params.parentToolContext.sessionId,
     strictNotificationScope: params.parentToolContext.strictNotificationScope,
@@ -305,7 +317,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     systemPrompt: def.getSystemPrompt(),
     tools: toolApiParams,
     model: params.model,
-    abortSignal: params.abortSignal,
+    abortSignal,
     toolContext: subToolContext,
     maxTurns: def.maxTurns ?? DEFAULT_AGENT_MAX_TURNS,
     permissionMode: subPermissionMode,

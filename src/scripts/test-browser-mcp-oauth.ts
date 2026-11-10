@@ -124,8 +124,13 @@ try {
   assert.equal(browserOpens, 1); assert.equal(tokenRequests, 1);
   pass("real HTTP metadata discovery, PKCE S256, Basic client auth, forged callback rejection and MCP tool call");
 
-  const files = await readdir(path.join(temporary, "oauth", "browser")); assert.equal(files.length, 1);
-  const stored = await readFile(path.join(temporary, "oauth", "browser", files[0]!), "utf8");
+  const files = await readdir(path.join(temporary, "oauth", "browser"));
+  const credentials = files.filter(file => /^[a-f0-9]{64}\.json$/.test(file));
+  assert.equal(credentials.length, 1, "One OAuth identity persists exactly one credential envelope");
+  // SecureCredentialStore deliberately keeps its cross-process transaction
+  // sentinel. It is not a second credential, temporary write or live lock.
+  assert.deepEqual(files.sort(), [credentials[0]!, `${credentials[0]}.transaction`].sort(), "Only the credential and its transaction sentinel remain after a completed write");
+  const stored = await readFile(path.join(temporary, "oauth", "browser", credentials[0]!), "utf8");
   if (process.platform === "win32") { assert(!stored.includes("synthetic-access")); assert(stored.includes("windows-dpapi")); }
   const restored = new BrowserMcpOAuthProvider(`${origin}/mcp`, config, runtime); providers.push(restored);
   assert.equal((await restored.tokens())?.access_token, "synthetic-access");

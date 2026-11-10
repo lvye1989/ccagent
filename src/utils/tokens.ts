@@ -64,7 +64,16 @@ export function getEffectiveContextWindowSize(model: string, configuredContextWi
 }
 
 function roughTokenCountEstimation(content: string, charsPerToken = TEXT_CHARS_PER_TOKEN): number {
-  return Math.max(1, Math.round(content.length / charsPerToken));
+  // The four-ASCII-character heuristic severely undercounts Chinese and
+  // other non-ASCII text before a provider usage anchor exists (notably
+  // after resume). Count non-ASCII code units conservatively; surrogate
+  // pairs retain two units because emoji/supplementary scripts can use
+  // multiple tokens. English/JSON/base64 estimates remain unchanged.
+  let nonAscii = 0;
+  for (let index = 0; index < content.length; index++) {
+    if (content.charCodeAt(index) > 0x7f) nonAscii++;
+  }
+  return Math.max(1, Math.round((content.length - nonAscii) / charsPerToken + nonAscii));
 }
 
 function estimateUnknownObjectTokens(value: unknown): number {
@@ -117,6 +126,12 @@ export function estimateSystemPromptTokens(systemPrompt: string): number {
   return roughTokenCountEstimation(systemPrompt) + MESSAGE_OVERHEAD_TOKENS;
 }
 
+/** Schemas are mostly descriptions/JSON; use the same conservative margin as message estimates. */
+export function estimateToolDefinitionTokens(tools?: readonly unknown[]): number {
+  if (!tools?.length) return 0;
+  return Math.ceil(roughTokenCountEstimation(JSON.stringify(tools)) * 4 / 3);
+}
+
 export function getTokenCountFromUsage(usage: Usage): number {
   return (
     usage.input_tokens +
@@ -128,9 +143,10 @@ export function getTokenCountFromUsage(usage: Usage): number {
 
 export function tokenCountWithEstimation(
   messages: readonly MessageParam[],
-  options?: { usage?: Usage; usageAnchorIndex?: number; usageSystemPromptTokens?: number; systemPrompt?: string },
+  options?: { usage?: Usage; usageAnchorIndex?: number; usageSystemPromptTokens?: number; usageToolDefinitionTokens?: number; systemPrompt?: string; toolDefinitions?: readonly unknown[] },
 ): number {
   const systemPromptTokens = options?.systemPrompt ? estimateSystemPromptTokens(options.systemPrompt) : 0;
+  const toolDefinitionTokens = estimateToolDefinitionTokens(options?.toolDefinitions);
 
   const usage = options?.usage;
   const promptTokens = usage ? usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0;
@@ -145,14 +161,24 @@ export function tokenCountWithEstimation(
     // growth of the dynamic system prompt since that same request.
     const measuredTokens = getTokenCountFromUsage(usage) + roughTokenCountEstimationForMessages(suffix);
     if (options.usageSystemPromptTokens !== undefined && Number.isFinite(options.usageSystemPromptTokens) && options.usageSystemPromptTokens >= 0) {
-      return measuredTokens + Math.max(0, systemPromptTokens - options.usageSystemPromptTokens);
+      const toolBaseline = options.usageToolDefinitionTokens;
+      const hasToolBaseline = toolBaseline !== undefined && Number.isFinite(toolBaseline) && toolBaseline >= 0;
+      const dynamicToolGrowth = hasToolBaseline
+        ? Math.max(0, toolDefinitionTokens - toolBaseline)
+        : 0;
+      const measuredWithGrowth = measuredTokens + Math.max(0, systemPromptTokens - options.usageSystemPromptTokens) + dynamicToolGrowth;
+      // A legacy usage anchor cannot establish which schemas it already paid
+      // for. Use a visible-context floor instead of adding all tools twice.
+      return !hasToolBaseline
+        ? Math.max(measuredWithGrowth, roughTokenCountEstimationForMessages(messages) + systemPromptTokens + toolDefinitionTokens)
+        : measuredWithGrowth;
     }
     // Older callers lack the system snapshot. Keep the current visible prompt
     // as a floor without adding its entire system prompt a second time.
-    return Math.max(measuredTokens, roughTokenCountEstimationForMessages(messages) + systemPromptTokens);
+    return Math.max(measuredTokens, roughTokenCountEstimationForMessages(messages) + systemPromptTokens + toolDefinitionTokens);
   }
 
-  return roughTokenCountEstimationForMessages(messages) + systemPromptTokens;
+  return roughTokenCountEstimationForMessages(messages) + systemPromptTokens + toolDefinitionTokens;
 }
 
 export interface TokenBudgetSnapshot {
@@ -177,7 +203,9 @@ export function buildTokenBudgetSnapshot(
     usage?: Usage;
     usageAnchorIndex?: number;
     usageSystemPromptTokens?: number;
+    usageToolDefinitionTokens?: number;
     systemPrompt?: string;
+    toolDefinitions?: readonly unknown[];
     model?: string;
     contextWindow?: number;
   },

@@ -16,7 +16,7 @@ import {
 } from "../permissions/permissions.js";
 import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
 import { compactMessages } from "../context/compaction.js";
-import { autoCompactIfNeeded, calculateTokenWarningState } from "../context/autoCompact.js";
+import { autoCompactIfNeeded, calculateTokenWarningState, createAutoCompactState, resetAutoCompactFailures } from "../context/autoCompact.js";
 import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
 import { formatProjectSessionHistory } from "../session/history.js";
 import { fileHistoryMakeSnapshot } from "../session/fileHistory.js";
@@ -172,6 +172,8 @@ export class QueryEngine {
   private usageAnchorIndex: number = -1;
   private lastCallUsage: Usage = { input_tokens: 0, output_tokens: 0 };
   private lastCallSystemPromptTokens?: number;
+  private lastCallToolDefinitionTokens?: number;
+  private readonly autoCompactState = createAutoCompactState();
   private lastCallModel?: string;
   private modeChangeCallback?: (mode: PermissionMode, previousMode: PermissionMode) => void;
   private needsPlanModeExitAttachment = false;
@@ -221,6 +223,7 @@ export class QueryEngine {
     const handle = model.trim();
     if (!handle) throw new Error("Model handle is required");
     this.sessionModelOverride = handle;
+    resetAutoCompactFailures(this.autoCompactState);
   }
 
   /**
@@ -280,6 +283,7 @@ export class QueryEngine {
   clearContextAndImplement(planContent: string, allowedPrompts?: string[]): string {
     this.messages = [];
     this.invalidateUsageAnchor();
+    resetAutoCompactFailures(this.autoCompactState);
     if (allowedPrompts) {
       this.addSessionAllowRules(allowedPrompts);
     }
@@ -648,8 +652,7 @@ export class QueryEngine {
       const prepareImages = async (messages: MessageParam[], historical = false) => {
         const prepared = await prepareOfficialImageReferences(messages, this.getActiveModel(), this.toolContext.cwd, abortSignal, undefined, !historical);
         if (prepared.imageCount && !historical) {
-          const tools = this.toolContext.scopedTools === undefined ? getToolsApiParams(this.currentPermissionMode)
-            : this.toolContext.scopedTools.filter(tool => tool.isEnabled() && this.toolContext.scopedTools!.filter(candidate => candidate.name === tool.name).length === 1).map(toolToApiParam);
+          const tools = this.getActiveTools();
           if (!tools.some(tool => tool.name === "ReadImage")) throw new Error("当前工具范围未开放 ReadImage，无法使用官方读图辅助服务。");
         }
         return prepared.messages;
@@ -671,6 +674,9 @@ export class QueryEngine {
       });
       const previewSystemPrompt = renderSystemPrompt(previewSystemParts);
       const activeContextWindow = await this.getActiveContextWindow();
+      const previewTools = this.getActiveTools();
+      let initialCompactionFailed = false;
+      let pendingAutoCompaction: Extract<QueryEngineEvent, { type: "compacted" }> | undefined;
       if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
 
       // Only run compaction when there's meaningful conversation history
@@ -679,9 +685,11 @@ export class QueryEngine {
         const microResult = await compactMessages(this.messages, undefined, {
           ...this.usageEstimate(),
           systemPrompt: previewSystemPrompt,
+          toolDefinitions: previewTools,
           model: this.getActiveModel(),
           contextWindow: activeContextWindow,
           microOnly: true,
+          signal: abortSignal,
         });
         if (microResult.didMicroCompact || microResult.didCompact) {
           this.messages = [...microResult.messages];
@@ -695,26 +703,34 @@ export class QueryEngine {
         }
 
         // Auto-compact with circuit breaker if still over threshold
-        const { result: autoResult, didAutoCompact } = await autoCompactIfNeeded(
+        const { result: autoResult, didAutoCompact, didAttemptAutoCompact } = await autoCompactIfNeeded(
           this.messages,
           this.getActiveModel(),
           {
             ...this.usageEstimate(),
             systemPrompt: previewSystemPrompt,
+            toolDefinitions: previewTools,
             contextWindow: activeContextWindow,
+            signal: abortSignal,
+            state: this.autoCompactState,
           },
         );
+        initialCompactionFailed = didAttemptAutoCompact && !didAutoCompact;
         if (didAutoCompact) {
           this.messages = [...autoResult.messages];
           this.invalidateUsageAnchor();
           yield { type: "messages_updated", messages: [...this.messages] };
-          yield { type: "compacted", summary: autoResult.summary, trigger: "auto" };
+          // CLI/Web persist the raw current prompt before entering the engine.
+          // Do not publish their replacement checkpoint until that prompt and
+          // its prepared attachments are also present in the compacted state.
+          pendingAutoCompaction = { type: "compacted", summary: autoResult.summary, trigger: "auto" };
         }
 
         // Emit token warning if approaching limits
         const estimatedTokens = tokenCountWithEstimation(this.messages, {
           ...this.usageEstimate(),
           systemPrompt: previewSystemPrompt,
+          toolDefinitions: previewTools,
         });
         const warningState = calculateTokenWarningState(
           estimatedTokens,
@@ -851,19 +867,22 @@ export class QueryEngine {
         messageId: this.currentMessageId ?? undefined,
       };
 
+      if (pendingAutoCompaction) {
+        abortSignal.throwIfAborted();
+        yield pendingAutoCompaction;
+      }
+
       const loop = query({
         messages: [...this.messages],
         initialCallUsage: this.usageEstimate().usage,
         initialUsageAnchorIndex: this.usageAnchorIndex,
         initialSystemPromptTokens: this.lastCallSystemPromptTokens,
+        initialToolDefinitionTokens: this.lastCallToolDefinitionTokens,
+        initialCompactionFailed,
         prepareMessages: prepareImages,
         ...(rawDirectUserText ? { directUserTurnText: rawDirectUserText } : {}),
         systemPrompt,
-        getTools: () => (this.toolContext.scopedTools === undefined
-          ? getToolsApiParams(this.currentPermissionMode)
-          : this.toolContext.scopedTools.filter((tool, index, scoped) => tool.isEnabled() && scoped.findIndex((candidate) => candidate.name === tool.name) === index
-            && scoped.filter((candidate) => candidate.name === tool.name).length === 1).map(toolToApiParam))
-          .filter((tool) => this.toolContext.agentTeamsAllowed !== false || !["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(tool.name)),
+        getTools: () => this.getActiveTools(),
         model: this.getActiveModel(),
         contextWindow: activeContextWindow,
         abortSignal,
@@ -890,6 +909,7 @@ export class QueryEngine {
           this.lastCallUsage = { ...value.lastCallUsage };
           this.usageAnchorIndex = value.lastCallUsageAnchorIndex;
           this.lastCallSystemPromptTokens = value.lastCallSystemPromptTokens;
+          this.lastCallToolDefinitionTokens = value.lastCallToolDefinitionTokens;
           this.lastCallModel = this.getActiveModel();
           yield { type: "messages_updated", messages: [...this.messages] };
           yield {
@@ -945,6 +965,7 @@ export class QueryEngine {
     this.usageAnchorIndex = -1;
     this.lastCallUsage = { input_tokens: 0, output_tokens: 0 };
     this.lastCallSystemPromptTokens = undefined;
+    this.lastCallToolDefinitionTokens = undefined;
     this.lastCallModel = undefined;
   }
 
@@ -954,7 +975,16 @@ export class QueryEngine {
       usage: this.lastCallModel === this.getActiveModel() ? this.lastCallUsage : undefined,
       usageAnchorIndex: this.usageAnchorIndex,
       usageSystemPromptTokens: this.lastCallSystemPromptTokens,
+      usageToolDefinitionTokens: this.lastCallToolDefinitionTokens,
     };
+  }
+
+  private getActiveTools() {
+    return (this.toolContext.scopedTools === undefined
+      ? getToolsApiParams(this.currentPermissionMode)
+      : this.toolContext.scopedTools.filter((tool, index, scoped) => tool.isEnabled() && scoped.findIndex(candidate => candidate.name === tool.name) === index
+        && scoped.filter(candidate => candidate.name === tool.name).length === 1).map(toolToApiParam))
+      .filter(tool => this.toolContext.agentTeamsAllowed !== false || !["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(tool.name));
   }
 
   private async getActiveContextWindow(): Promise<number> {
@@ -995,6 +1025,7 @@ export class QueryEngine {
         this.messages = [...messages];
         this.totalUsage = { ...totalUsage };
         this.invalidateUsageAnchor();
+        resetAutoCompactFailures(this.autoCompactState);
         this.currentMessageId = null;
         // A resumed session is a fresh boot for the SessionStart hook semantics.
         this.sessionStartHooksFired = false;
@@ -1005,7 +1036,7 @@ export class QueryEngine {
     };
   }
 
-  private async *handleCommand(command: string): AsyncGenerator<QueryEngineEvent, { handled: boolean }> {
+  private async *handleCommand(command: string): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
     const [name, ...args] = command.slice(1).split(/\s+/).filter(Boolean);
 
     switch (name) {
@@ -1129,6 +1160,8 @@ export class QueryEngine {
       }
       case "clear":
         this.messages = [];
+        this.invalidateUsageAnchor();
+        resetAutoCompactFailures(this.autoCompactState);
         yield { type: "session_cleared" };
         yield { type: "messages_updated", messages: [] };
         yield { type: "command", kind: "info", message: "Conversation cleared." };
@@ -1189,6 +1222,7 @@ export class QueryEngine {
 
         if (nextModel === "default") {
           this.sessionModelOverride = null;
+          resetAutoCompactFailures(this.autoCompactState);
           const activeModel = this.getActiveModel();
           yield { type: "model_changed", model: activeModel, source: "default" };
           yield {
@@ -1231,21 +1265,32 @@ export class QueryEngine {
         };
         return { handled: true };
       case "compact": {
-        const focus = args.join(" ").trim();
-        const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd, temporaryChat: this.toolContext.temporaryChat });
-        const manualSystemPrompt = renderSystemPrompt(manualSystemParts);
-        const result = await compactMessages(this.messages, focus || undefined, { ...this.usageEstimate(), systemPrompt: manualSystemPrompt, model: this.getActiveModel(), contextWindow: await this.getActiveContextWindow(), force: true });
-        this.messages = [...result.messages];
-        if (result.didCompact || result.didMicroCompact) {
-          this.invalidateUsageAnchor();
+        const controller = new AbortController();
+        this.abortController = controller;
+        const signal = this.toolContext.abortSignal ? AbortSignal.any([controller.signal, this.toolContext.abortSignal]) : controller.signal;
+        try {
+          const focus = args.join(" ").trim();
+          const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd, temporaryChat: this.toolContext.temporaryChat });
+          const manualSystemPrompt = renderSystemPrompt(manualSystemParts);
+          const result = await compactMessages(this.messages, focus || undefined, { ...this.usageEstimate(), systemPrompt: manualSystemPrompt, toolDefinitions: this.getActiveTools(), model: this.getActiveModel(), contextWindow: await this.getActiveContextWindow(), force: true, signal });
+          this.messages = [...result.messages];
+          if (result.didCompact || result.didMicroCompact) {
+            this.invalidateUsageAnchor();
+            resetAutoCompactFailures(this.autoCompactState);
+          }
+          yield { type: "messages_updated", messages: [...this.messages] };
+          if (result.didCompact || result.didMicroCompact) {
+            yield { type: "compacted", summary: result.summary, trigger: focus ? "manual" : result.didCompact ? "manual" : "micro" };
+          } else {
+            yield { type: "command", kind: "info", message: "Conversation did not need compaction." };
+          }
+          return { handled: true };
+        } catch (error) {
+          if (signal.aborted) return { handled: true, reason: "aborted" };
+          throw error;
+        } finally {
+          if (this.abortController === controller) this.abortController = null;
         }
-        yield { type: "messages_updated", messages: [...this.messages] };
-        if (result.didCompact || result.didMicroCompact) {
-          yield { type: "compacted", summary: result.summary, trigger: focus ? "manual" : result.didCompact ? "manual" : "micro" };
-        } else {
-          yield { type: "command", kind: "info", message: "Conversation did not need compaction." };
-        }
-        return { handled: true };
       }
       case "rewind":
       case "checkpoint":

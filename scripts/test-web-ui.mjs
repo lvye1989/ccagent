@@ -12,7 +12,7 @@ for (const name of ["window", "document", "location", "history", "localStorage",
 Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 globalThis.setInterval = () => 0;
-globalThis.EventSource = class { constructor() { globalThis.lastEventSource = this; } close() {} };
+globalThis.EventSource = class { constructor(url) { this.url = url; this.closed = false; globalThis.lastEventSource = this; } close() { this.closed = true; } };
 const calls = [], models = [
   { id: "fixture", label: "Fixture", model: "fixture", available: true },
   { id: "ccagent:qwen-vision", label: "Qwen vision tool", model: "qwen-vision", available: true, mainModelSelectable: false },
@@ -29,7 +29,12 @@ const sessionId = "11111111-1111-4111-8111-111111111111";
 const removableSessionId = "33333333-3333-4333-8333-333333333333";
 let recentSessions = [{ sessionId, firstPrompt: "保留的历史任务" }, { sessionId: removableSessionId, firstPrompt: "待删除任务" }];
 let sessionMode = "default", failUpload = false, failSubmit = false, effortLevel = "", useCreationSnapshot = true;
+let recoveredSessionSnapshot = null;
+let failSessionSnapshotReads = 0;
+let failSessionSnapshotStatus = 503;
 let additionalDirectories = [], pickedDirectory = "E:\\选择的 输出目录";
+const mailPowers = Object.fromEntries(["qq", "163"].map(account => [account, { read: false, write: false, delete: false, search: false, send: false }]));
+let failMailPowerWrite = false;
 const recognizers = [];
 window.SpeechRecognition = class {
   constructor() { recognizers.push(this); }
@@ -52,6 +57,7 @@ let adminPermissions = [], failAccess = false, pendingAccess = null;
 const catalogRevision = '11111111-1111-4111-8111-111111111111';
 const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }], tariff: { kind: 'constant' } } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
 const backupOfficialRoute = { ...defaultOfficialRoute, id: 'fixture-backup', name: '备用服务测试', limits: { fallbackEnabled: false, fallbackRouteId: null } };
+let imageOfficialRoutes = [];
 globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
   calls.push({ route, payload });
@@ -63,7 +69,10 @@ globalThis.fetch = async (route, options = {}) => {
     data = { deleted: true };
   }
   else if (route === "/api/sessions") data = { sessionId, ...(useCreationSnapshot ? { snapshot: { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false, lastEventId: 0 } } : {}) };
-  else if (route === `/api/sessions/${sessionId}`) data = { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false };
+  else if (route === `/api/sessions/${sessionId}`) {
+    if (failSessionSnapshotReads > 0) { failSessionSnapshotReads--; const error = new Error("Fixture snapshot unavailable"); error.status = failSessionSnapshotStatus; throw error; }
+    data = recoveredSessionSnapshot || { sessionId, mode: sessionMode, model: "fixture", messages: [], team: "off", busy: false };
+  }
   else if (route === `/api/sessions/${sessionId}/mode`) { sessionMode = payload.mode; data = {}; }
   else if (route === `/api/sessions/${sessionId}/messages`) { if (failSubmit) throw new Error("Fixture submit failure"); data = { accepted: true }; }
   else if (route === `/api/sessions/${sessionId}/interrupt`) data = { interrupted: true };
@@ -86,9 +95,14 @@ globalThis.fetch = async (route, options = {}) => {
       else if (payload.roles !== undefined) selectedOfficialRoles = payload.roles;
       if (payload.fallbackEnabled !== undefined) officialFallback = payload.fallbackEnabled;
     }
-    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute] : [], wallet: { available: '1', balance: '100001', frozen: '100000' } };
+    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute, ...imageOfficialRoutes] : [], wallet: { available: '1', balance: '100001', frozen: '100000' } };
   }
   else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; if (payload?.additionalDirectories) additionalDirectories = payload.additionalDirectories; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel, additionalDirectories }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
+  else if (route === "/api/customize/power-settings") {
+    if (payload && failMailPowerWrite) throw new Error("Fixture save failure");
+    if (payload) mailPowers[payload.account][payload.power] = payload.enabled;
+    data = { mailPowers };
+  }
   else if (route === "/api/customize/models") { if (payload) models.push({ id: payload.id, label: payload.id, model: payload.model, available: true }); data = payload ? { id: payload.id } : { models: models.map((m) => ({ ...m, protocol: "openai-chat", baseURL: "https://example.test/v1" })) }; }
   else if (route === "/api/customize/model-test") data = { ok: true, reply: "OK" };
   else if (route === "/api/customize/teams") { if (payload?.op === "global") teamEnabled = payload.enabled; data = { teams, enabled: teamEnabled, activeTeam: null }; }
@@ -291,6 +305,59 @@ try {
   const beforeHistoryOpen = calls.length;
   await click("#recent-list .recent-item");
   assert.equal(calls.slice(beforeHistoryOpen).filter(call => call.route === `/api/sessions/${sessionId}`).length, 1, "Opening history still reloads the authoritative session state");
+  const staleSource = lastEventSource;
+  recoveredSessionSnapshot = {
+    sessionId, mode: sessionMode, model: "fixture", team: "off", busy: true, lastEventId: 901,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "断线前带图的任务" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "internal-result", content: "工具结果不能作为用户消息显示" }] },
+      { role: "assistant", content: "断线期间完整回复" },
+    ],
+    pending: { id: "recovered-approval", kind: "permission", request: { toolName: "Write", summary: "恢复等待中的授权", input: { file_path: "fixture.txt" } } },
+    execution: { id: executionId, startedAt, completedAt: null, reason: null, tools: [] },
+  };
+  const beforeGapRecovery = calls.length;
+  failSessionSnapshotReads = 1;
+  emit({ type: "session_snapshot_required" });
+  staleSource.onmessage({ data: JSON.stringify({ type: "session_snapshot_required" }) });
+  staleSource.onmessage({ data: JSON.stringify({ type: "assistant", message: { role: "assistant", content: "过期连接不能写入" } }) });
+  await settle();
+  assert.equal(staleSource.closed, false, "A transient snapshot failure leaves EventSource reconnect available");
+  assert.match(location.search, /session=/, "A transient recovery failure preserves the selected conversation URL");
+  await new Promise(resolve => setTimeout(resolve, 350)); await settle();
+  assert(staleSource.closed);
+  assert.notEqual(lastEventSource, staleSource);
+  assert.match(lastEventSource.url, /lastEventId=901$/);
+  assert.equal(calls.slice(beforeGapRecovery).filter(call => call.route === `/api/sessions/${sessionId}`).length, 2, "A replay gap retries a transient read failure without duplicate queued reloads");
+  assert.equal(calls.slice(beforeGapRecovery).filter(call => call.route.endsWith("/messages")).length, 0, "Snapshot recovery never resubmits a task");
+  assert.match($("timeline").textContent, /断线期间完整回复/);
+  assert.match($("timeline").textContent, /断线前带图的任务/);
+  assert(!$("timeline").textContent.includes("工具结果不能作为用户消息显示"));
+  assert(!$("timeline").textContent.includes("过期连接不能写入"));
+  assert(!$("interaction-overlay").classList.contains("hidden"));
+  assert.match($("interaction-title").textContent, /Write/);
+  staleSource.onmessage({ data: JSON.stringify({ type: "turn_complete", reason: "completed" }) });
+  assert.equal($("stop-button").classList.contains("hidden"), false, "A stale source cannot complete the recovered active task");
+  emit({ type: "interaction_resolved" });
+  emit({ type: "turn_complete", reason: "completed" });
+  await click('[data-customize-view="agents"]');
+  const backgroundRecoveryUrl = location.href;
+  recoveredSessionSnapshot = { ...recoveredSessionSnapshot, busy: false, pending: null, execution: null };
+  emit({ type: "session_snapshot_required" }); await settle();
+  assert(!$("agents-view").classList.contains("hidden"), "Automatic recovery preserves the user's current page");
+  assert.equal(location.href, backgroundRecoveryUrl);
+  const deletedSource = lastEventSource;
+  failSessionSnapshotReads = 1; failSessionSnapshotStatus = 404;
+  const beforeDeletedRecovery = calls.length;
+  emit({ type: "session_snapshot_required" }); await settle();
+  assert(deletedSource.closed, "A terminal missing-session response closes the old source");
+  assert($("interaction-overlay").classList.contains("hidden"));
+  assert(!$("agents-view").classList.contains("hidden"), "Deleting a background conversation preserves the current page");
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(calls.slice(beforeDeletedRecovery).filter(call => call.route === `/api/sessions/${sessionId}`).length, 1, "A deleted session is not retried as a transient failure");
+  failSessionSnapshotStatus = 503;
+  recoveredSessionSnapshot = null;
+  console.log("Replay gap DOM: authoritative replies/approval, transient read retry, preserved page/cursor, no resubmission, stale same-session callbacks ignored.");
   await click("#new-task");
   console.log("Streaming DOM: immediate first text, batched text-node appends, bounded deferred buffer, exact final chunks, retry and navigation isolation passed.");
   await click("#insert-command"); await click(tool("添加照片和文件"));
@@ -325,6 +392,27 @@ try {
   $("editor-requirements").value = "https://example.test/mcp"; await click(".editor-generate");
   assert.equal($("edit-mcp-name").value, "my-mcp"); await click(action("添加并连接"));
   assert(calls.some((c) => c.route === "/api/customize/mcp" && c.payload.config.type === "http"));
+  const powerNav = document.querySelector('[data-customize-view="power-settings"]');
+  assert.equal(powerNav.previousElementSibling.dataset.customizeView, "mcp");
+  assert(powerNav.querySelector("svg"));
+  await click(powerNav);
+  assert(powerNav.classList.contains("selected"));
+  assert.equal(location.search, "?view=power-settings");
+  const switches = $("power-settings-list").querySelectorAll('[role="switch"]');
+  assert.equal(switches.length, 10);
+  const qqRead = switches[0], qqDelete = switches[2], mail163Read = switches[5];
+  await click(qqRead);
+  assert.deepEqual(calls.at(-1).payload, { account: "qq", power: "read", enabled: true });
+  assert.equal(qqRead.getAttribute("aria-checked"), "true");
+  assert.equal(mail163Read.getAttribute("aria-checked"), "false");
+  failMailPowerWrite = true;
+  await click(qqDelete);
+  assert.equal(qqDelete.getAttribute("aria-checked"), "false");
+  assert.match($("power-settings-status").textContent, /保存失败/);
+  failMailPowerWrite = false;
+  await click('[data-customize-view="mcp"]');
+  await click(powerNav);
+  assert.equal(qqRead.getAttribute("aria-checked"), "true");
 
   await click('[data-customize-view="skills"]');
   await click([...$("skills-list").querySelectorAll("button")].find((b) => b.textContent === "关闭"));
@@ -402,6 +490,22 @@ try {
   assert.equal(consent.fallbackEnabled, false); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback'), null);
   assert(!$('settings-content').textContent.includes('需单独开启备用授权')); assert($('settings-content').textContent.includes('备用服务测试'));
   console.log('Official service DOM: streamlined links/copy, explicit account connection, optional manual Key, fallback disabled on save, catalog recommendations and cleared selections passed.');
+
+  imageOfficialRoutes = ['sunburst', 'flare'].flatMap(variant => ['image-to-image', 'text-to-image'].map(mode => ({ ...defaultOfficialRoute, id: `${variant}-${mode}`, service: 'image', protocol: 'kie-images', upstreamModel: `gpt-image-2-5-${variant}-${mode}`, name: `${variant} ${mode}` })));
+  imageOfficialRoutes.push({ ...defaultOfficialRoute, id: 'another-image', service: 'image', protocol: 'kie-images', upstreamModel: 'another-image-model', name: '其他图像模型' });
+  for (const saved of ['', ...imageOfficialRoutes.slice(0, 4).map(route => route.id)]) {
+    selectedOfficialRoles = saved ? { imageGeneration: saved } : {};
+    await click('[data-setting="official"]');
+    const select = $('official-role-imageGeneration');
+    assert.deepEqual([...select.options].map(option => option.textContent), ['未选择', 'GPT Image 2.5', '其他图像模型']);
+    assert.equal(select.value, saved, 'Existing variant selection survives grouping');
+    if (!saved) select.value = select.options[1].value;
+    $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+    assert.equal(selectedOfficialRoles.imageGeneration, saved || 'sunburst-text-to-image');
+    assert.equal($('official-role-imageGeneration').value, selectedOfficialRoles.imageGeneration);
+  }
+  imageOfficialRoutes = []; selectedOfficialRoles = {}; await click('[data-setting="official"]');
+  console.log('Unified GPT Image 2.5 selection, saved variants, save/reload and unrelated image models passed.');
 
   const originalBackupPricing = backupOfficialRoute.pricing;
   backupOfficialRoute.pricing = { ...originalBackupPricing, definition: { tariff: { kind: 'qwen-input-tiers', defaultThinking: true, maxThinkingTokens: 32768 },

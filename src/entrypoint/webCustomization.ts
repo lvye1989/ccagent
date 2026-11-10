@@ -6,6 +6,7 @@ import { getUserSettingsPath, getCCAgentPath } from "../utils/paths.js";
 import { readJsonSettingsFile, readTrustedStringArraySetting, updateUserSettings } from "../utils/settings.js";
 import { expandHome, resolveSafePath } from "../tools/pathUtils.js";
 import { loadSettingSources } from "../config/sources.js";
+import { isMailAccount, isMailPower, loadMailPowerSettings, setMailPower } from "../config/mailPowerSettings.js";
 import { loadProfiles } from "../services/api/providers/profile.js";
 import { streamMessage } from "../services/api/streaming.js";
 import { getAllAgents } from "../agents/registry.js";
@@ -235,6 +236,7 @@ export async function handleCustomization(resource: string, method: string, body
     if (resource === "legacy-source") return { source: getPlatformHome() };
     if (resource === "official-services") return officialServicesView();
     if (resource === "models") return modelsView(context);
+    if (resource === "power-settings") return { mailPowers: await loadMailPowerSettings() };
     if (resource === "teams") return { teams: await listTeamPresets(), enabled: isAgentTeamsEnabled(), activeTeam: getActiveTeam()?.teamName ?? null };
     if (resource === "rag") return { connections: (await loadRagConnections()).map(({ apiKey, ...c }) => ({ ...c, hasKey: Boolean(resolveWebSecret(apiKey)) })) };
     if (resource === "settings") {
@@ -250,6 +252,11 @@ export async function handleCustomization(resource: string, method: string, body
   }
   if (method !== "POST") throw new Error("Method not supported.");
   if (resource === "legacy-preview") return previewLegacyData(body.source);
+  if (resource === "power-settings") {
+    const { account, power, enabled } = body;
+    if (!isMailAccount(account) || !isMailPower(power) || typeof enabled !== "boolean") throw new Error("请选择有效的邮箱、权限和开关状态。");
+    return { mailPowers: await setMailPower(account, power, enabled) };
+  }
   if (resource === "legacy-import") return importLegacyData(body);
   if (resource === "official-services") {
     if (body.op === "connect") return connectOfficialServices();

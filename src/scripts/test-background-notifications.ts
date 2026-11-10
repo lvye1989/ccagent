@@ -12,7 +12,7 @@ import {
   clearPendingNotifications, drainPendingNotifications, enqueuePendingNotification,
   notificationScopeForContext, pendingNotificationCount, peekPendingNotifications,
 } from "../state/notificationStore.js";
-import { findWebNotificationSession } from "../entrypoint/webNotifications.js";
+import { createWebNotificationDispatcher, findWebNotificationSession } from "../entrypoint/webNotifications.js";
 import { createWorkfriendSchedule, clearWorkfriendTimers, listWorkfriendSchedules } from "../workfriend/scheduler.js";
 import { bootstrapAgentStates, setAgentState } from "../agents/preferences.js";
 
@@ -54,6 +54,35 @@ await withTestAccount(async () => {
     assert.equal(findWebNotificationSession(sessions, a.sessionId)?.id, a.sessionId);
     clearPendingNotifications();
   });
+  await test("Web push continuation coalesces enqueues, runs before a timer and retries on idle exactly once", async () => {
+    let busy = false;
+    const starts: string[] = [], sessions = [{ id: a.sessionId, busy: false }, { id: b.sessionId, busy: false }];
+    const dispatcher = createWebNotificationDispatcher({ sessions: () => sessions, teamOwner: () => null, blocked: () => busy,
+      start(session) { busy = true; starts.push(session.id); drainPendingNotifications({ sessionId: session.id }); } });
+    try {
+      // B arrived first even though A was the first session opened.
+      enqueuePendingNotification({ mode: "task-notification", text: "b-first", ownerSessionId: b.sessionId });
+      enqueuePendingNotification({ mode: "task-notification", text: "a-next", ownerSessionId: a.sessionId });
+      enqueuePendingNotification({ mode: "task-notification", text: "b-batched", ownerSessionId: b.sessionId });
+      assert.deepEqual(starts, [], "Enqueue must not synchronously re-enter the executing engine");
+      await Promise.resolve(); assert.deepEqual(starts, [b.sessionId]);
+      dispatcher.request(); await Promise.resolve(); assert.deepEqual(starts, [b.sessionId], "A running foreground turn keeps exclusive ownership");
+      busy = false; dispatcher.request(); dispatcher.request();
+      await Promise.resolve(); assert.deepEqual(starts, [b.sessionId, a.sessionId]);
+      busy = false; dispatcher.request(); await Promise.resolve(); assert.equal(starts.length, 2);
+    } finally { dispatcher.dispose(); clearPendingNotifications(); }
+  });
+  await test("pending approval and a disposed worker never trigger background continuation", async () => {
+    const owner = { id: a.sessionId, busy: false, pending: {} as unknown }, starts: string[] = [];
+    const dispatcher = createWebNotificationDispatcher({ sessions: () => [owner], teamOwner: () => null, blocked: () => false,
+      start(session) { starts.push(session.id); drainPendingNotifications({ sessionId: session.id }); } });
+    enqueuePendingNotification({ mode: "task-notification", text: "approval-held", ownerSessionId: a.sessionId });
+    await Promise.resolve(); assert.deepEqual(starts, []);
+    owner.pending = undefined; dispatcher.request(); dispatcher.dispose();
+    await Promise.resolve(); assert.deepEqual(starts, [], "A queued microtask must not resume after shutdown");
+    enqueuePendingNotification({ mode: "task-notification", text: "after-shutdown", ownerSessionId: a.sessionId });
+    await Promise.resolve(); assert.deepEqual(starts, []); clearPendingNotifications();
+  });
   await test("closed Workfriend reminders stay owned and deletion clears only the chosen conversation", async () => {
     await setAgentState("workfriend", "close");
     enqueuePendingNotification({ mode: "workfriend-notification", text: "held-a", ownerSessionId: a.sessionId });
@@ -88,7 +117,9 @@ const workspace = path.join(temporary, "workspace"), base = path.join(temporary,
 await fs.mkdir(workspace);
 const account = await startAccountFixture(base);
 const profileId = "notification-fixture", supplierErrors: string[] = [];
-const requests: { user: string; history: string }[] = [];
+const requests: { user: string; history: string; startedAt: number }[] = [];
+const releaseTimes = new Map<string, number>();
+const continuationTimings: Record<string, number> = {};
 const held = new Map<string, ServerResponse>();
 let sequence = 0;
 function reply(response: ServerResponse, text: string, tool?: { name: string; input: Record<string, unknown> }) {
@@ -107,7 +138,7 @@ const supplier = createServer(async (request, response) => {
     while (lastUserIndex >= 0 && messages[lastUserIndex]!.role !== "user") lastUserIndex--;
     const user = String(messages[lastUserIndex]?.content ?? ""), history = JSON.stringify(messages.filter(message => message.role !== "system"));
     const calls = messages.slice(lastUserIndex + 1).flatMap(message => message.tool_calls ?? []).map(call => call.function.name);
-    requests.push({ user, history });
+    requests.push({ user, history, startedAt: Date.now() });
     if (user.includes("[task-notification]")) {
       assert.ok(!history.includes("UNRELATED_B"), "A task completion must never enter conversation B");
       if (history.includes("START_FAILED_BACKGROUND")) { assert.match(user, /<status>failed<\/status>/); reply(response, "FAILURE_NOTIFIED"); }
@@ -180,7 +211,7 @@ async function waitIdle(id: string) {
   try { await waitFor(async () => { current = await state(id); assert.equal(current.pending, null); return !current.busy && Boolean(current.execution?.completedAt); }, "Web turn must finish", 45000); }
   catch (error) { throw new Error(String(error) + " " + JSON.stringify({ current, requests: requests.map(item => item.user), supplierErrors, logs })); }
 }
-function release(key: string, text: string) { const response = held.get(key); assert.ok(response); held.delete(key); reply(response, text); }
+function release(key: string, text: string) { const response = held.get(key); assert.ok(response); held.delete(key); releaseTimes.set(key, Date.now()); reply(response, text); }
 async function loginWeb() {
   await waitFor(async () => { if (child.exitCode !== null) throw new Error(logs); try { return (await fetch(origin + "/api/health", { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } }, "Source Web did not start: " + logs);
   const login = await request("/api/account/login", { email: account.users[0]!.email, password: account.password }); cookie = login.headers.get("set-cookie")!.split(";")[0]!;
@@ -198,6 +229,7 @@ try {
     await waitIdle(a);
     const other = await state(b); assert.ok(!JSON.stringify(other.messages).includes("CHILD_DONE_A"));
     assert.equal(requests.filter(item => item.user.includes("[task-notification]") && item.history.includes("START_BACKGROUND_A")).length, 1);
+    continuationTimings.childReleaseToParentRequestMs = requests.find(item => item.user.includes("[task-notification]") && item.history.includes("START_BACKGROUND_A"))!.startedAt - releaseTimes.get("A")!;
   });
   await test("completion arriving while another conversation is busy waits and resumes exactly once after idle", async () => {
     const c = await create(), other = await create();
@@ -210,6 +242,7 @@ try {
     await waitIdle(c);
     assert.ok(!JSON.stringify((await state(other)).messages).includes("CHILD_DONE_C"));
     assert.equal(requests.filter(item => item.user.includes("[task-notification]") && item.history.includes("START_BACKGROUND_C")).length, 1);
+    continuationTimings.busyTurnReleaseToParentRequestMs = requests.find(item => item.user.includes("[task-notification]") && item.history.includes("START_BACKGROUND_C"))!.startedAt - releaseTimes.get("OTHER")!;
   });
   await test("a failed background model reports failure only to its owning Web conversation", async () => {
     const failed = await create(); await submit(failed, "START_FAILED_BACKGROUND");
@@ -237,6 +270,7 @@ try {
     assert.deepEqual(supplierErrors, []);
   });
   console.log(`Background notifications: ${passed} checks passed; loopback fixtures only, no real suppliers or browser launches.`);
+  console.log("Isolated continuation timings (includes model-history preparation and transcript I/O): " + JSON.stringify(continuationTimings));
 } finally {
   await stopWeb();
   supplier.closeAllConnections(); await new Promise<void>(resolve => supplier.close(() => resolve())); await account.close();

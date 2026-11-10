@@ -27,10 +27,11 @@ test('Kie asynchronous tasks preserve account isolation, idempotency and real is
   const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr4kAAAAASUVORK5CYII=', 'base64');
   const bodies: Record<string, unknown>[] = [], calls: string[] = [], jobs = new Map<string, string>(); let creates = 0, downloads = 0, uploads = 0;
   let createMode: 'ok' | 'throw' | 'reject' = 'ok', queryState = 'success', consumed: number | undefined = 6, downloadMode: 'ok' | 'bad' = 'ok', failSettlement = false, wrongModel = false, wrongResolution = false;
+  let rejectUpload = false, rejectReference = false;
   let blockQuery: Promise<void> | undefined, releaseQuery: (() => void) | undefined, queryEntered: (() => void) | undefined, blockCreate: Promise<void> | undefined, releaseCreate: (() => void) | undefined;
   const transport: KieTransport = async (url, init, allowedHosts) => {
     calls.push(url); assert.equal(init.redirect, 'error');
-    if (url.includes('/file-stream-upload')) { uploads++; assert.deepEqual(allowedHosts, ['kieai.redpandaai.co']); assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${secret}`); assert.ok(init.body instanceof Uint8Array); return Response.json({ code: 200, data: { downloadUrl: 'https://api.kie.ai/reference.png' } }); }
+    if (url.includes('/file-stream-upload')) { uploads++; assert.deepEqual(allowedHosts, ['kieai.redpandaai.co']); assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${secret}`); assert.ok(init.body instanceof Uint8Array); if (rejectUpload) return Response.json({ code: 401, msg: secret }, { status: 401 }); return Response.json({ code: 200, data: { downloadUrl: 'https://api.kie.ai/reference.png' } }); }
     if (url.includes('/jobs/createTask')) {
       creates++; assert.deepEqual(allowedHosts, ['api.kie.ai']); assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${secret}`);
       bodies.push(JSON.parse(String(init.body))); if (createMode === 'throw') throw new Error(`secret ${secret}`); if (createMode === 'reject') return Response.json({ code: 402, msg: secret });
@@ -51,6 +52,7 @@ test('Kie asynchronous tasks preserve account isolation, idempotency and real is
     return { id, expiresAt };
   };
   const gateway = createImagesGateway({ transport, saveResult, settle: async input => { if (failSettlement && !input.release) { failSettlement = false; throw new Error('SYNTHETIC_TRANSIENT_SETTLEMENT'); } return finishUsage(input); }, readFile: (async (owner, id, purposes) => {
+    if (rejectReference) { const { HttpError } = await import('../src/core/http'); throw new HttpError(503, 'FILE_SIZE_MISMATCH', secret); }
     const { ownedFile } = await import('../src/core/files'), record = await ownedFile(owner, id, purposes);
     return { record, stream: new ReadableStream({ start(controller) { controller.enqueue(image); controller.close(); } }) };
   }) as typeof readOwnedFile });
@@ -121,6 +123,23 @@ test('Kie asynchronous tasks preserve account isolation, idempotency and real is
       assert.equal(response.status, 202); assert.equal((await response.json()).status, 'queued'); assert.equal(uploads, 1);
       const body = bodies.at(-1)! as { input: Record<string, unknown> }; assert.deepEqual(body.input.input_urls, ['https://api.kie.ai/reference.png']); assert.equal(body.input.background, 'transparent'); assert.equal('input_images' in body.input, false);
       await get((await reservation('edit')).id);
+    });
+    await t.test('reference failure records a safe stage/reason and releases funds without submitting generation', async () => {
+      const id = randomUUID(), prefix = createHash('sha256').update(userId).digest('hex').slice(0, 32);
+      await database().db.insert(tables.blobs).values({ id, userId, pathname: `ccagent/users/${prefix}/image/${id}.png`, purpose: 'image', contentType: 'image/png', size: image.length, status: 'ready', expiresAt: new Date(Date.now() + 900000) });
+      const beforeCreates = creates;
+      try {
+        for (const stage of ['read-reference', 'upload-reference']) {
+          rejectReference = stage === 'read-reference'; rejectUpload = stage === 'upload-reference';
+          const response = await start(`failed-${stage}`, input({ model: 'kie-fixture-i2i', input_images: [`ccagent-file:${id}`] }));
+          const result = await response.json(), saved = await reservation(`failed-${stage}`);
+          assert.equal(result.status, 'failed'); assert.equal(result.code, 'IMAGE_INPUT_UPLOAD_FAILED');
+          assert.equal(saved.status, 'released'); assert.equal(saved.charged, 0n); assert.equal(creates, beforeCreates);
+          assert.deepEqual(saved.usage, { imageTask: { version: 1, status: 'failed', code: 'IMAGE_INPUT_UPLOAD_FAILED', failureStage: stage, failureCode: rejectReference ? 'FILE_SIZE_MISMATCH' : 'IMAGE_UPLOAD_AUTH_FAILED' } });
+          assert(!JSON.stringify(saved.usage).includes(secret)); assert(!JSON.stringify(result).includes(secret));
+          assert.equal('failureCode' in result, false);
+        }
+      } finally { rejectReference = false; rejectUpload = false; }
     });
     await t.test('immutable cost snapshot is used after prices change and route is paused; 4K does not send background', async () => {
       consumed = 16; await start('snapshot', input({ resolution: '4K', aspect_ratio: '16:9' })); assert.equal((bodies.at(-1)!.input as Record<string, unknown>).background, undefined);

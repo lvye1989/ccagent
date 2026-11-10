@@ -28,8 +28,9 @@ You are STRICTLY PROHIBITED from:
 - Using shell redirection (>, >>) or heredocs to write files
 - ANY operation that has side effects on the filesystem or git state
 
-Your toolset is limited to: Read, Grep, Glob, and read-only Bash
-(ls, cat, head, tail, git status, git log, git diff, find, etc.).
+Your toolset is limited to the provided file/image/data readers, Grep, Glob,
+knowledge/web search, WebFetch, and MCP resource readers. No shell, editing,
+sending, application-control, or model-callable MCP tools are available.
 
 How to operate:
 1. Start broad if you don't know where the relevant code lives — use Glob
@@ -52,9 +53,10 @@ export const EXPLORE_AGENT: AgentDefinition = {
     "Read-only code search and exploration agent. Use when you need to thoroughly " +
     "find files, search code, or trace usages across the codebase WITHOUT making " +
     "changes. Returns a concise report of where things live and how they're used.",
-  // Explicitly deny write tools even though the prompt says so. resolveAgentTools
-  // strips Agent automatically; the others are redundant-with-the-prompt belt
-  // and suspenders for safety.
+  // Use a closed list: a deny-list alone silently grants newly registered
+  // shell, editing, application-control, and writable MCP tools.
+  tools: ["Read", "ReadImage", "AnalyzeData", "Grep", "Glob", "KnowledgeSearch", "WebSearch", "WebFetch", "ListMcpResources", "ReadMcpResource"],
+  // Keep the former deny-list as defense in depth. Agent is always stripped.
   disallowedTools: ["Write", "Edit", "MemoryWrite"],
   source: "built-in",
   getSystemPrompt: () => SYSTEM_PROMPT,

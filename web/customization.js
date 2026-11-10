@@ -18,6 +18,26 @@ function field(parent, label, id, value = "", options = {}) {
   wrap.append(input); parent.append(wrap); return input;
 }
 const scopeChoices = [["project", "当前项目"], ["user", "所有工作区"]];
+export function officialImageChoices(routes, selected) {
+  const isGptImage25 = route => route.service === "image" && route.protocol === "kie-images" && /^gpt-image-2-5-(?:flare|sunburst)-(?:text-to-image|image-to-image)$/.test(route.upstreamModel || "");
+  const family = routes.filter(isGptImage25);
+  // Keep the saved route and its pricing identity. Only the selector is grouped.
+  const representative = family.find(route => route.id === selected) || family.find(route => route.upstreamModel.endsWith("-text-to-image")) || family[0];
+  let added = false;
+  return routes.filter(route => route.service === "image").flatMap(route => {
+    if (!isGptImage25(route)) return [[route.id, route.name]];
+    if (added) return [];
+    added = true;
+    return [[representative.id, "GPT Image 2.5"]];
+  });
+}
+const mailPowerLabels = [
+  ["read", "读信", "列出邮件并读取邮件内容"],
+  ["write", "写信", "创建并保存邮件草稿"],
+  ["delete", "删信", "删除邮件"],
+  ["search", "查信", "按条件搜索邮件"],
+  ["send", "发送邮件", "向收件人发送邮件"],
+];
 
 export function createCustomizationUI({ api, toast, navigate, changed, getModel, getSessionId, getBusy, getWorkspace = () => "" }) {
   function addButton(afterId, id, label) { const b = button(label, () => {}, "plugin-add-button"); b.id = id; $(afterId).after(b); }
@@ -33,6 +53,76 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   const initialSetting = new URLSearchParams(location.search).get("setting");
   let selectedSettings = ["general", "official", "models", "execution", "import"].includes(initialSetting) ? initialSetting : "general", modalRequest = 0, modalBusy = false, teamsData = { teams: [], enabled: true };
   const request = (resource, body) => api(`/api/customize/${resource}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+  const powerList = $("power-settings-list"), powerStatus = $("power-settings-status");
+  let powerRequest = 0, powerSaving = false, powerLoaded = false;
+  const powerControls = [];
+  for (const [account, label] of [["qq", "QQ 邮箱"], ["163", "163 邮箱"]]) {
+    const group = el("section", "power-settings-group");
+    const heading = el("h2", "", label);
+    heading.id = `power-account-${account}`;
+    group.setAttribute("aria-labelledby", heading.id);
+    group.append(heading);
+    for (const [power, title, description] of mailPowerLabels) {
+      const row = el("div", "power-settings-row");
+      const copy = el("div"), detail = el("p", "", description);
+      detail.id = `power-description-${account}-${power}`;
+      copy.append(el("strong", "", title), detail);
+      const toggle = button("关闭", () => void updatePowerSettings({
+        account, power, enabled: toggle.getAttribute("aria-checked") !== "true",
+      }), "power-settings-toggle");
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-label", `${label} · ${title}`);
+      toggle.setAttribute("aria-describedby", detail.id);
+      toggle.setAttribute("aria-checked", "false");
+      toggle.disabled = true;
+      powerControls.push({ account, power, toggle });
+      row.append(copy, toggle);
+      group.append(row);
+    }
+    powerList.append(group);
+  }
+  powerList.hidden = true;
+
+  async function updatePowerSettings(change) {
+    if (powerSaving) return;
+    const revision = ++powerRequest;
+    powerSaving = Boolean(change);
+    if (!change) {
+      powerLoaded = false;
+      powerList.hidden = true;
+    }
+    const focused = powerControls.find(({ toggle }) => toggle === document.activeElement)?.toggle;
+    powerStatus.textContent = change ? "正在保存权限…" : "正在读取权限…";
+    for (const { toggle } of powerControls) toggle.disabled = true;
+    try {
+      const { mailPowers } = await request("power-settings", change);
+      if (revision !== powerRequest) return;
+      for (const { account, power, toggle } of powerControls) {
+        const enabled = mailPowers[account][power] === true;
+        toggle.setAttribute("aria-checked", String(enabled));
+        toggle.textContent = enabled ? "开启" : "关闭";
+      }
+      powerLoaded = true;
+      powerStatus.textContent = change ? "已保存，权限立即生效。" : "";
+    } catch (error) {
+      if (revision !== powerRequest) return;
+      powerStatus.textContent = `${change ? "保存失败" : "读取失败"}：${error.message}`;
+    } finally {
+      if (revision === powerRequest) {
+        powerSaving = false;
+        powerList.hidden = !powerLoaded;
+        for (const { toggle } of powerControls) toggle.disabled = !powerLoaded;
+        if (focused && !focused.disabled && document.activeElement === document.body && !$("power-settings-view").classList.contains("hidden")) focused.focus();
+      }
+    }
+  }
+  window.addEventListener("ccagent:account-changing", () => {
+    powerRequest++;
+    powerSaving = powerLoaded = false;
+    powerList.hidden = true;
+    powerStatus.textContent = "";
+    for (const { toggle } of powerControls) toggle.disabled = true;
+  });
   const adminEntry = $("settings-admin-entry");
   let adminAccess = null, adminAccessRevision = 0;
   function clearAdminAccess() { adminAccessRevision++; adminAccess = null; adminEntry.hidden = true; }
@@ -250,7 +340,9 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         const selections = {};
         if (service.routes.length) {
           for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"], ["imageGeneration", "图像生成", "image"]]) {
-            selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`])] });
+            const choices = role === "imageGeneration" ? officialImageChoices(service.routes, service.roles[role]) : service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`]);
+            selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...choices] });
+            if (role === "imageGeneration" && choices.some(([, name]) => name === "GPT Image 2.5")) form.append(el("p", "editor-hint", "GPT Image 2.5 支持文字生成图片和参考图编辑，会根据输入自动选择。"));
           }
         } else if (service.configured) form.append(el("p", "editor-hint", "暂无已开放且价格配置完整的服务，请联系管理员。"));
         const auxiliary = field(form, "读图、决策、搜索、语音和图像生成使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
@@ -501,7 +593,11 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     catch (error) { for (const selectId of ["home-effort", "thread-effort"]) $(selectId).value = currentEffort; toast(error.message); }
     finally { effortBusy = false; for (const selectId of ["home-effort", "thread-effort"]) $(selectId).disabled = getBusy(); }
   });
-  return { agentEditor, refreshTeams, refreshPreferences, openOfficial() { selectedSettings = "official"; navigate("settings"); }, open: async (view) => { if (view === "settings") await renderSettings(); else if (view === "teams") await refreshTeams(); }, setSessionTeam: (team) => {
+  return { agentEditor, refreshTeams, refreshPreferences, openOfficial() { selectedSettings = "official"; navigate("settings"); }, open: async (view) => {
+    if (view === "settings") await renderSettings();
+    else if (view === "teams") await refreshTeams();
+    else if (view === "power-settings") await updatePowerSettings();
+  }, setSessionTeam: (team) => {
     const select = $("thread-team");
     if (team && ![...select.options].some((o) => o.value === team)) { const option = el("option", "", "原团队已关闭"); option.value = team; option.disabled = true; select.append(option); }
     select.value = team || "off";

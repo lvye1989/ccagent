@@ -19,6 +19,8 @@ const state = { workspace: "", model: "", mode: "default", selectedModel: "", av
 let toastTimer;
 let sessionListRequest = 0;
 let openingSession = null;
+let sessionRecoveryTimer = null;
+let sessionRecoveryAttempt = 0;
 const deletingSessions = new Set();
 const STREAM_FLUSH_MS = 30;
 const MAX_STREAM_BUFFER_CHARS = 32 * 1024;
@@ -226,7 +228,8 @@ async function setView(view) {
   state.view = view;
   workspaceFiles.setView(view);
   composerTools.close();
-  const customizing = ["plugins", "skills", "agents", "mcp", "teams"].includes(view);
+  const pluginView = ["plugins", "skills", "agents", "mcp"].includes(view);
+  const customizing = pluginView || view === "teams" || view === "power-settings";
   const feature = ["schedules", "library", "memory"].includes(view);
   document.querySelector(".main-area").classList.toggle("home-active", view === "tasks");
   $("sidebar").classList.toggle("hidden", customizing || feature || view === "settings" || view === "visualization" || view === "whiteboard");
@@ -255,22 +258,23 @@ async function setView(view) {
   $("skills-view").classList.toggle("hidden", view !== "skills");
   $("agents-view").classList.toggle("hidden", view !== "agents");
   $("mcp-view").classList.toggle("hidden", view !== "mcp");
+  $("power-settings-view").classList.toggle("hidden", view !== "power-settings");
   $("settings-view").classList.toggle("hidden", view !== "settings");
   $("teams-view").classList.toggle("hidden", view !== "teams");
   $("visualization-view").classList.toggle("hidden", view !== "visualization");
   $("cloudtv-view").classList.toggle("hidden", view !== "cloudtv");
   $("whiteboard-view").classList.toggle("hidden", view !== "whiteboard");
-  $("header-title").textContent = view === "thread" ? $("thread-title").textContent : ({ tasks: "任务", changes: "代码更改", about: "关于工作区", library: "资料空间", memory: "记忆管理", schedules: "定时任务", plugins: "Plugins", skills: "Skills", agents: "Agents", mcp: "MCP 服务", teams: "Agent Teams", settings: "设置" })[view];
-  document.querySelectorAll(".rail-button[data-view]").forEach((item) => item.classList.toggle("selected", item.dataset.view === (view === "thread" ? "tasks" : ["skills", "agents", "mcp", "teams"].includes(view) ? "plugins" : view)));
-  $("customize-search").classList.toggle("hidden", view === "teams");
+  $("header-title").textContent = view === "thread" ? $("thread-title").textContent : ({ tasks: "任务", changes: "代码更改", about: "关于工作区", library: "资料空间", memory: "记忆管理", schedules: "定时任务", plugins: "Plugins", skills: "Skills", agents: "Agents", mcp: "MCP 服务", teams: "Agent Teams", settings: "设置", "power-settings": "软件权限设置" })[view];
+  document.querySelectorAll(".rail-button[data-view]").forEach((item) => item.classList.toggle("selected", item.dataset.view === (view === "thread" ? "tasks" : customizing ? "plugins" : view)));
+  $("customize-search").classList.toggle("hidden", !pluginView);
   $("sidebar").classList.remove("open");
   $("customize-sidebar").classList.remove("open");
   $("feature-sidebar").classList.remove("open");
   if (view === "tasks") history.replaceState(null, "", "/");
   else if (view !== "thread") history.replaceState(null, "", `/?view=${view}`);
-  if (customizing && view !== "teams") void pluginUI.open(view);
-  if (view === "settings" || view === "teams") void customizationUI.open(view);
-  if (view === "teams") document.querySelectorAll(".customize-nav-item").forEach((item) => item.classList.toggle("selected", item.dataset.customizeView === view));
+  if (pluginView) void pluginUI.open(view);
+  if (view === "settings" || (customizing && !pluginView)) void customizationUI.open(view);
+  if (customizing && !pluginView) document.querySelectorAll(".customize-nav-item").forEach((item) => item.classList.toggle("selected", item.dataset.customizeView === view));
   if (view === "library") void libraryUI.open();
   if (view === "memory") void memoryUI.open();
   if (view === "schedules") void schedulesUI.open();
@@ -766,9 +770,10 @@ function renderStoredMessages(messages) {
   state.toolNodes.clear();
   for (const message of messages) {
     if (message.role === "user") {
-      if (typeof message.content === "string" && message.content.trim()) {
+      const text = messageText(message);
+      if (text.trim()) {
         state.toolNodes.clear();
-        addUser(message.content);
+        addUser(text);
       }
       continue;
     }
@@ -971,10 +976,15 @@ function handleEvent(event) {
     case "notice": addNotice(event.message, event.tone === "error"); break;
     case "interaction": showInteraction(event); break;
     case "interaction_resolved": state.pending = null; $("interaction-overlay").classList.add("hidden"); syncThreadProgress(); break;
+    case "session_snapshot_required":
+      // A bounded event log cannot reconstruct missing replies or approvals.
+      // Reload state without submitting a prompt or restarting the task.
+      if (state.sessionId && !openingSession) void openSession(state.sessionId, undefined, true);
+      break;
     case "execution_state":
       if (event.execution && state.execution && event.execution.id !== state.execution.id) {
         // The bounded replay buffer may omit a newer turn's start and user message.
-        void openSession(state.sessionId);
+        if (!openingSession) void openSession(state.sessionId, undefined, true);
         break;
       }
       restoreExecution(event.execution, event.serverTime);
@@ -1015,20 +1025,25 @@ function handleEvent(event) {
   }
 }
 
-async function openSession(id, initialSnapshot) {
+async function openSession(id, initialSnapshot, recovery = false) {
   if (deletingSessions.has(id)) return false;
-  const request = { id };
+  const request = { id, recovery };
+  const previousSource = state.source;
+  clearTimeout(sessionRecoveryTimer);
+  sessionRecoveryTimer = null;
   openingSession = request;
   try {
-    if (state.view === "whiteboard" && !await whiteboardUI.beforeLeave()) return false;
+    if (!recovery && state.view === "whiteboard" && !await whiteboardUI.beforeLeave()) return false;
     if (openingSession !== request || deletingSessions.has(id)) return false;
     if (state.sessionId !== id) voiceUI.stop();
-    state.source?.close();
-    state.source = null;
+    if (!recovery) { state.source?.close(); state.source = null; }
     // Creation already returns the authoritative initial state. Reuse only a
     // matching snapshot; ordinary navigation/reconnect still reloads state.
     const data = initialSnapshot?.sessionId === id ? initialSnapshot : await api(`/api/sessions/${id}`);
     if (openingSession !== request || deletingSessions.has(id)) return false;
+    previousSource?.close();
+    state.source = null;
+    sessionRecoveryAttempt = 0;
     state.sessionId = id;
     state.temporary = data.temporary === true;
     $("thread-view").classList.toggle("temporary-thread", state.temporary);
@@ -1049,20 +1064,39 @@ async function openSession(id, initialSnapshot) {
     state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || (block.type === "tool_result" && block.is_error)) ? "incomplete" : null);
     setBusy(data.busy);
     if (data.pending) showInteraction(data.pending);
-    if (!await setView("thread")) return false;
+    if (!recovery && !await setView("thread")) return false;
     if (openingSession !== request || deletingSessions.has(id)) return false;
-    history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
+    if (!recovery) history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
     renderSessions();
-    state.source = new EventSource(`/api/sessions/${id}/events?lastEventId=${data.lastEventId || 0}`);
-    state.source.onmessage = (message) => {
-      if (state.sessionId !== id) return;
-      try { handleEvent(JSON.parse(message.data)); } catch (error) { console.error(error); }
+    const source = new EventSource(`/api/sessions/${id}/events?lastEventId=${data.lastEventId || 0}`);
+    state.source = source;
+    source.onmessage = (message) => {
+      if (state.sessionId !== id || state.source !== source) return;
+      try {
+        const event = JSON.parse(message.data);
+        if (!openingSession?.recovery || event.type === "session_deleted") handleEvent(event);
+      } catch (error) { console.error(error); }
     };
-    state.source.onerror = () => { if (!state.switchingWorkspace) toast("连接中断，正在重新连接…"); };
-    $("thread-input").focus();
+    source.onerror = () => { if (state.source === source && !state.switchingWorkspace) toast("连接中断，正在重新连接…"); };
+    if (!recovery) $("thread-input").focus();
     return true;
   } catch (error) {
     if (openingSession !== request) return false;
+    if (recovery && error.status === 404) {
+      await onSessionDeleted(id);
+      return false;
+    }
+    if (recovery && state.sessionId === id && state.source === previousSource && (!error.status || error.status >= 500)) {
+      // Keep EventSource's own reconnect alive while retrying the read-only
+      // snapshot. Navigation/source changes cancel the delayed recovery.
+      const delay = Math.min(5000, 250 * 2 ** Math.min(sessionRecoveryAttempt++, 5));
+      sessionRecoveryTimer = setTimeout(() => {
+        sessionRecoveryTimer = null;
+        if (state.sessionId === id && state.source === previousSource && !openingSession && !deletingSessions.has(id)) void openSession(id, undefined, true);
+      }, delay);
+      toast("连接恢复中，正在重新读取任务状态…");
+      return false;
+    }
     if (new URLSearchParams(location.search).get("session") === id) history.replaceState(null, "", "/");
     toast(error.message);
     return false;
@@ -1253,7 +1287,7 @@ function installHandlers() {
     if (event.key === "Escape" && !$("interaction-overlay").classList.contains("hidden")) answerInteraction(false);
     if (event.key === "Escape") workspacePicker.close();
   });
-  $("refresh-all").addEventListener("click", () => { if (state.view === "whiteboard") void whiteboardUI.open(); else if (state.view === "cloudtv") cloudTVUI.refresh(); else if (["teams", "settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
+  $("refresh-all").addEventListener("click", () => { if (state.view === "whiteboard") void whiteboardUI.open(); else if (state.view === "cloudtv") cloudTVUI.refresh(); else if (["teams", "settings", "power-settings"].includes(state.view)) void customizationUI.open(state.view); else if (["plugins", "skills", "agents", "mcp"].includes(state.view)) void pluginUI.refresh(); else if (state.view === "library") void libraryUI.refresh(); else if (state.view === "memory") void memoryUI.refresh(); else if (state.view === "schedules") void schedulesUI.refresh(); else { refreshSessions(); refreshChanges(); void workspaceFiles.refresh(); } });
   $("activity-refresh").addEventListener("click", refreshChanges);
   $("close-diff").addEventListener("click", () => $("diff-view").classList.add("hidden"));
   $("stop-button").addEventListener("click", async () => {
@@ -1306,7 +1340,7 @@ await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customi
 const params = new URLSearchParams(location.search);
 const savedSession = params.get("session");
 if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
-else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv", "whiteboard"].includes(params.get("view"))) await setView(params.get("view"));
+else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "power-settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv", "whiteboard"].includes(params.get("view"))) await setView(params.get("view"));
 else setView("tasks");
 const homePromotion = createHomePromotion({ api, isIdle: () => state.view === "tasks" && !state.busy && !state.pending && !$("home-input").value.trim() });
 void homePromotion.start();

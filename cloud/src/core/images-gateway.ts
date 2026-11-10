@@ -13,7 +13,8 @@ import { callIdentifierPattern } from './call-identifiers';
 import { createKieClient, imageTaskInput, validateKieRoute, boundedImageBytes, type ImageResult, type ImageTaskInput, type ImageTaskStatus, type KieTransport } from './kie-images';
 
 type Reservation = typeof reservations.$inferSelect;
-type ImageState = { version: 1; status: ImageTaskStatus; upstreamTaskId?: string; images?: ImageResult[]; code?: string; credits?: number; leaseId?: string; leaseUntil?: number };
+type ImageState = { version: 1; status: ImageTaskStatus; upstreamTaskId?: string; images?: ImageResult[]; code?: string; failureStage?: 'read-reference' | 'upload-reference'; failureCode?: string; credits?: number; leaseId?: string; leaseUntil?: number };
+const uploadFailureCodes = new Set(['FILE_NOT_FOUND', 'FILE_EXPIRED', 'FILE_NOT_READY', 'FILE_TYPE_MISMATCH', 'FILE_SIZE_MISMATCH', 'STORAGE_NOT_CONFIGURED', 'INVALID_IMAGE', 'UPSTREAM_HOST_NOT_ALLOWED', 'UPSTREAM_TRANSPORT_FAILED', 'UPSTREAM_REDIRECT_NOT_ALLOWED', 'UPSTREAM_RESPONSE_INVALID', 'INVALID_UPSTREAM_BODY', 'IMAGE_UPLOAD_RESPONSE_INVALID', 'IMAGE_UPLOAD_AUTH_FAILED', 'IMAGE_UPLOAD_RATE_LIMITED', 'IMAGE_UPLOAD_TOO_LARGE', 'IMAGE_UPLOAD_FAILED']);
 type ImageSnapshot = { route: CredentialRoute & { protocol: string; upstreamModel: string }; resolution: ImageTaskInput['resolution']; parameters: { aspect_ratio: string; background: string }; definition: PriceDefinition; currency: 'CNY' | 'USD'; usdCny: string | null };
 const identifier = z.string().regex(callIdentifierPattern);
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -78,21 +79,26 @@ export function createImagesGateway(options: {
         sourceUrl: selected.price.sourceUrl, currency: image.currency, usdCny: image.usdCny, markup: '1.3', fingerprint: pricing.fingerprint, image } });
     if (authorization.replay) return json(view(authorization.reservation), 200);
     const value = authorization.reservation, client = createKieClient(secret, options.transport), controller = new AbortController(), timer = setTimeout(() => controller.abort(), selected.route.timeoutMs);
-    let createSent = false;
+    let createSent = false, failureStage: ImageState['failureStage'];
     try {
       await update(value, { version: 1, status: 'queued' });
       const urls: string[] = [];
       for (const reference of input.input_images) {
+        failureStage = 'read-reference';
         const file = await readFile(current.user.id, reference.slice('ccagent-file:'.length), ['image']);
         const bytes = await boundedImageBytes(new Response(file.stream), 30 * 1024 * 1024);
+        failureStage = 'upload-reference';
         urls.push(await client.upload(bytes, file.record.contentType, `ccagent/${createHash('sha256').update(current.user.id).digest('hex').slice(0, 32)}/${value.id}`, controller.signal));
       }
       createSent = true;
       const result = await client.create(route.upstreamModel, input, urls, controller.signal);
       if (result.rejected) await settle({ userId: value.userId, reservationId: value.id, charged: 0n, release: true, usage: { imageTask: { version: 1, status: 'failed', code: 'IMAGE_SUPPLIER_REJECTED' } } });
       else await update(value, { version: 1, status: result.taskId ? 'queued' : 'unknown', ...(result.taskId ? { upstreamTaskId: result.taskId } : { code: 'IMAGE_CREATE_UNCONFIRMED' }) });
-    } catch {
-      if (!createSent) await settle({ userId: value.userId, reservationId: value.id, charged: 0n, release: true, usage: { imageTask: { version: 1, status: 'failed', code: 'IMAGE_INPUT_UPLOAD_FAILED' } } });
+    } catch (error) {
+      if (!createSent) {
+        const failureCode = error instanceof HttpError && uploadFailureCodes.has(error.code) ? error.code : controller.signal.aborted ? 'IMAGE_UPLOAD_TIMEOUT' : 'IMAGE_INPUT_UNAVAILABLE';
+        await settle({ userId: value.userId, reservationId: value.id, charged: 0n, release: true, usage: { imageTask: { version: 1, status: 'failed', code: 'IMAGE_INPUT_UPLOAD_FAILED', failureStage, failureCode } } });
+      }
       else await update(value, { version: 1, status: 'unknown', code: 'IMAGE_CREATE_UNCONFIRMED' });
     } finally { clearTimeout(timer); }
     return json(view(await read(value.id, value.userId, value.keyId)), 202);

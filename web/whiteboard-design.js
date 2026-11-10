@@ -30,7 +30,7 @@ export function designSceneImages(scene) {
 
 /** Normalize user-selected raster files before adding them to the bounded board. */
 export async function prepareDesignFile(file) {
-  if (!file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 30 * 1024 * 1024 || !file.size) throw new Error('请选择 20MB 以内的 PNG、JPEG 或 WEBP 图片。');
+  if (!file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 30 * 1024 * 1024 || !file.size) throw new Error('请选择 30MB 以内的 PNG、JPEG 或 WEBP 图片。');
   // The application permits data: images in its CSP. Decode the selected file
   // through that same scheme instead of a blob: URL blocked on the parent page.
   const source = await new Promise((resolve, reject) => {
@@ -60,7 +60,7 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
   const header = el('header', 'design-header'), heading = el('div'); heading.append(el('span', 'design-eyebrow', 'DESIGN STUDIO'), el('h2', '', '建筑与城市设计'));
   const close = action('×', () => onClose(), 'design-close'); close.setAttribute('aria-label', '返回 AI 绘图助手'); header.append(heading, close);
   const body = el('div', 'design-body');
-  body.append(el('p', 'design-intro', '导入底图，在图上勾画，再用文字描述你的设计。'));
+  body.append(el('p', 'design-intro', '描述你要绘制的内容，也可以导入底图或参考图辅助设计。'));
   const stepOne = el('section', 'design-section'); stepOne.append(el('h3', '', '01  原图与参考'));
   const upload = el('div', 'design-upload-actions');
   const baseInput = el('input', 'sr-only'); baseInput.type = 'file'; baseInput.accept = 'image/png,image/jpeg,image/webp'; baseInput.id = 'design-base-file';
@@ -74,23 +74,13 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
   const kind = el('select'); kind.id = 'design-kind'; kind.setAttribute('aria-label', '设计任务类型');
   for (const [value, label] of [['architecture', '建筑设计图'], ['urban-analysis', '城市设计分析图']]) { const option = el('option', '', label); option.value = value; kind.append(option); }
   const presets = el('div', 'design-presets');
-  for (const text of ['建筑体量与立面', '功能分区与空间结构', '交通动线与慢行', '绿地与公共空间']) presets.append(action(text, () => { prompt.value = `请根据原图与勾画绘制${text}分析图，保留未标注区域的空间关系，配以清晰的中文图例与标题。`; kind.value = text.startsWith('建筑') ? 'architecture' : 'urban-analysis'; prompt.focus(); }));
+  for (const text of ['建筑体量与立面', '功能分区与空间结构', '交通动线与慢行', '绿地与公共空间']) presets.append(action(text, () => { const guidance = currentBase() ? '请根据原图与勾画绘制' : textMode() ? '请绘制' : '请根据参考图绘制'; prompt.value = `${guidance}${text}分析图，${currentBase() ? '保留未标注区域的空间关系，' : ''}配以清晰的中文图例与标题。`; kind.value = text.startsWith('建筑') ? 'architecture' : 'urban-analysis'; prompt.focus(); }));
   const prompt = el('textarea'); prompt.id = 'design-prompt'; prompt.rows = 5; prompt.maxLength = 20000; prompt.placeholder = '例如：保留现状建筑，在红线范围内增加公共空间；用绿色表示绿地、橙色表示慢行动线，并参考参考图的表达风格。'; prompt.setAttribute('aria-label', '建筑与城市设计绘制要求');
   const note = el('p', 'design-note', '原图默认锁定，勾画可随时撤销。生成结果是独立图片，原图与手绘内容会保留。');
   stepTwo.append(sketchButton, kind, presets, prompt, note);
-  const modelSection = el('section', 'design-section design-model-section'), modelBadge = el('p', 'design-model-badge'); modelBadge.id = 'design-model-badge';
-  const settings = el('details', 'design-settings'), summary = el('summary', '', '图像模型设置'); settings.append(summary);
-  const configForm = el('form', 'design-config-form'), provider = el('select'); provider.id = 'design-provider'; provider.setAttribute('aria-label', '图像编辑服务');
-  for (const [value, label] of [['official', 'CCAGENT 官方图像生成'], ['dashscope', '阿里云百炼 Qwen Image'], ['openai', 'OpenAI 兼容图像编辑']]) { const option = el('option', '', label); option.value = value; provider.append(option); }
-  const endpoint = el('input'); endpoint.id = 'design-endpoint'; endpoint.type = 'url'; endpoint.placeholder = '服务接口地址'; endpoint.setAttribute('aria-label', '图像服务 API 地址');
-  const model = el('input'); model.id = 'design-model'; model.placeholder = '支持多图编辑的模型名称'; model.setAttribute('aria-label', '图像编辑模型名称');
-  const key = el('input'); key.id = 'design-api-key'; key.type = 'password'; key.autocomplete = 'off'; key.placeholder = 'API Key（留空保留当前配置）'; key.setAttribute('aria-label', '图像服务 API Key');
-  const saveConfig = action('保存模型设置', () => configForm.requestSubmit()); saveConfig.id = 'design-save-config';
-  const clearConfig = action('清除本机设置', () => void perform(async () => { const data = await request('config', { clear: true }); acceptConfig(data.config); key.value = ''; state.phase = '已清除图像模型设置。'; }));
-  const configButtons = el('div', 'design-config-actions'); configButtons.append(saveConfig, clearConfig); configForm.append(provider, endpoint, model, key, configButtons); settings.append(configForm);
-  const cost = el('p', 'design-note', '生成会向所选图像服务发送图片与要求，可能产生供应商费用。');
+  const modelSection = el('section', 'design-section design-output-section'), modelBadge = el('p', 'design-model-badge'); modelBadge.id = 'design-model-badge';
+  modelSection.append(el('h3', '', '03  输出选项'));
   const generationOptions = el('div', 'design-generation-options'); generationOptions.id = 'design-generation-options';
-  const variant = el('select'); variant.id = 'design-variant'; variant.setAttribute('aria-label', '图像生成模型');
   const ratio = el('select'); ratio.id = 'design-aspect-ratio'; ratio.setAttribute('aria-label', '宽高比');
   const resolution = el('select'); resolution.id = 'design-resolution'; resolution.setAttribute('aria-label', '输出分辨率');
   const background = el('select'); background.id = 'design-background'; background.setAttribute('aria-label', '图像背景');
@@ -98,8 +88,8 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
   for (const value of ['1K', '2K', '4K']) { const option = el('option', '', value); option.value = value; resolution.append(option); }
   for (const [value, label] of [['auto', '自动背景'], ['transparent', '透明背景（1K）'], ['opaque', '不透明背景（1K）']]) { const option = el('option', '', label); option.value = value; background.append(option); }
   const optionNote = el('p', 'design-note', '每次生成一张图片；图生图最多 16 张输入（含原图与勾画），高清附件临时保留 30 分钟。');
-  generationOptions.append(variant, ratio, resolution, background, optionNote);
-  modelSection.append(modelBadge, generationOptions, settings, cost);
+  generationOptions.append(ratio, resolution, background, optionNote);
+  modelSection.append(modelBadge, generationOptions);
   const resultArea = el('section', 'design-results'); resultArea.id = 'design-results';
   body.append(stepOne, stepTwo, modelSection, resultArea);
   const footer = el('footer', 'design-footer'), status = el('p', 'design-status'); status.id = 'design-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -112,10 +102,12 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
   function locked() { return state.busy || state.starting || !!state.run || !!state.pending || state.leaving > 0; }
   const currentBase = () => (state.context?.images || []).find(image => image.role === 'base' && image.elementId === state.baseImageId);
   const references = () => (state.context?.images || []).filter(image => image.role === 'reference' && image.baseImageId === state.baseImageId);
-  const official = () => state.config?.provider === 'official';
-  const selectedRoute = () => state.config?.routes?.find(route => route.id === variant.value);
-  const textMode = () => official() && selectedRoute()?.upstreamModel?.endsWith('-text-to-image');
-  const cap = () => official() ? (currentBase() ? 14 : 16) : (state.config?.maxReferences === 2 ? 2 : 1);
+  const textMode = () => !currentBase() && references().length === 0 && state.assets.length === 0;
+  const modeAvailable = () => {
+    const mode = textMode() ? 'textToImage' : 'imageToImage';
+    return state.config?.modes ? state.config.modes[mode] === true : Boolean(state.config?.routes?.some(route => route.upstreamModel?.endsWith(textMode() ? '-text-to-image' : '-image-to-image')));
+  };
+  const cap = () => currentBase() ? 14 : 16;
   function updateGenerationOptions() {
     const oneK = ['27:16', '16:27', '9:8', '8:9'].includes(ratio.value);
     if (oneK) resolution.value = '1K';
@@ -124,10 +116,10 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
     for (const option of background.options) option.disabled = resolution.value !== '1K' && option.value !== 'auto';
     render();
   }
-  for (const control of [variant, ratio, resolution, background]) control.addEventListener('change', updateGenerationOptions);
+  for (const control of [ratio, resolution, background]) control.addEventListener('change', updateGenerationOptions);
   function acceptConfig(config) {
     if (!config || typeof config.configured !== 'boolean') throw new Error('图像模型配置读取失败。');
-    state.config = config; state.configLoaded = true; variant.replaceChildren(); for (const route of config.routes || []) { const option = el('option', '', route.name); option.value = route.id; variant.append(option); } variant.value = config.model || ''; if (!variant.value && variant.options.length) variant.selectedIndex = 0; provider.value = config.provider || 'dashscope'; endpoint.value = config.baseURL || ''; model.value = config.model || ''; render();
+    state.config = config; state.configLoaded = true; render();
   }
   async function request(action, fields = {}, context = state.context) { return api(`/api/whiteboards/design/${action}`, { method: 'POST', body: JSON.stringify({ workspace: context.workspace, ...fields }) }); }
   async function loadConfig() {
@@ -143,25 +135,25 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
     const images = state.context?.images || [], bases = images.filter(image => image.role === 'base'), base = currentBase(), refs = references();
     const selected = state.baseImageId; baseSelect.replaceChildren(); for (const image of bases) { const option = el('option', '', image.name); option.value = image.elementId; baseSelect.append(option); } baseSelect.value = selected; baseSelect.hidden = bases.length < 2;
     const frozen = locked(); panel.setAttribute('aria-busy', String(frozen));
-    for (const control of [variant, ratio, resolution, background, uploadBase, baseInput, baseSelect, kind, prompt, provider, endpoint, model, key, saveConfig, clearConfig]) control.disabled = frozen || !state.context;
-    uploadReference.disabled = frozen || textMode() || (!official() && !base) || refs.length + state.assets.length >= cap(); referenceInput.disabled = uploadReference.disabled; uploadReference.textContent = `添加参考图 ${refs.length + state.assets.length}/${cap()}`; sketchButton.disabled = frozen || !base;
-    presets.querySelectorAll('button').forEach(button => { button.disabled = frozen || !base; });
-    generate.disabled = frozen || !state.config?.configured || (official() ? (!variant.value || (!textMode() && !base && !state.assets.length)) : !base); generate.hidden = Boolean(state.run) || Boolean(state.pending); stop.hidden = !state.run; stop.disabled = !state.run || state.run.cancelled;
+    for (const control of [ratio, resolution, background, uploadBase, baseInput, baseSelect, kind, prompt]) control.disabled = frozen || !state.context;
+    uploadReference.disabled = frozen || !state.context || refs.length + state.assets.length >= cap(); referenceInput.disabled = uploadReference.disabled; uploadReference.textContent = `添加参考图 ${refs.length + state.assets.length}/${cap()}`; sketchButton.disabled = frozen || !base;
+    presets.querySelectorAll('button').forEach(button => { button.disabled = frozen || !state.context; });
+    generate.disabled = frozen || !state.context || !state.config?.configured || !modeAvailable(); generate.hidden = Boolean(state.run) || Boolean(state.pending); stop.hidden = !state.run; stop.disabled = !state.run || state.run.cancelled;
     recover.hidden = !state.pending || Boolean(state.run); recover.disabled = state.starting || state.busy;
     resumeOriginal.hidden = !state.lastRun?.canResume || Boolean(state.run) || Boolean(state.pending) || Boolean(state.result); resumeOriginal.disabled = frozen;
-    generationOptions.hidden = !official(); endpoint.hidden = model.hidden = key.hidden = provider.value === 'official'; prompt.maxLength = official() ? 20000 : 6000;
+    generationOptions.hidden = false;
     sources.replaceChildren();
-    if (!base) sources.append(el('div', 'design-empty-source', state.context ? '导入一张总平面、现状照片或建筑草图' : '先新建或打开一块白板'));
+    if (!base) sources.append(el('div', 'design-empty-source', state.context ? '可导入总平面、现状照片或建筑草图' : '先新建或打开一块白板'));
     if (base) { const card = el('figure', 'design-source base'); card.append(imageNode(base), el('figcaption', '', `原图 · ${base.name}`)); sources.append(card); }
     for (const image of refs) { const card = el('figure', 'design-source reference'), remove = action('移除', () => void perform(async () => { await removeImage(image.elementId); })); remove.disabled = frozen; card.append(imageNode(image), el('figcaption', '', `参考 · ${image.name}`), remove); sources.append(card); }
     for (const asset of state.assets) { const card = el('figure', 'design-source reference'), remove = action('移除', () => void perform(async () => { await api('/api/whiteboards/design/assets', { method: 'DELETE', body: JSON.stringify({ workspace: state.context.workspace, assetId: asset.assetId }) }); state.assets = state.assets.filter(item => item !== asset); })); remove.disabled = frozen; card.append(imageNode(asset.preview), el('figcaption', '', `高清参考 · ${asset.name}`), remove); sources.append(card); }
-    modelBadge.textContent = state.config?.configured ? `${official() ? '官方图像生成 · 按分辨率计费' : state.config.source === 'environment' ? '已使用本机环境配置' : '已配置图像编辑服务'} · ${selectedRoute()?.name || state.config.model}` : state.configLoaded ? '请先配置可用的图像模型' : '正在读取图像模型…';
-    status.textContent = state.error || state.phase || (!state.context ? '新建白板后即可导入原图。' : textMode() ? '文生图：填写要求即可生成，原图与参考图不会发送。' : !base ? (official() && state.assets.length ? '参考图已上传，可直接进行图生图。' : '先导入原图或添加参考图。') : '原图、勾画和参考图将一起用于生成。'); status.classList.toggle('error', Boolean(state.error)); status.setAttribute('role', state.error ? 'alert' : 'status');
+    modelBadge.textContent = state.configLoaded ? state.config?.configured && modeAvailable() ? '已自动连接平台图像服务' : '图像生成服务暂未开放，请稍后重试。' : '正在连接平台图像服务…';
+    status.textContent = state.error || state.phase || (!state.context ? '新建白板后即可导入原图。' : textMode() ? '填写要求即可生成，也可以导入原图或添加参考图。' : !base ? '参考图已上传，可直接生成。' : '原图、勾画和参考图将一起用于生成。'); status.classList.toggle('error', Boolean(state.error)); status.setAttribute('role', state.error ? 'alert' : 'status');
     renderResults();
   }
   function renderResults() {
     resultArea.replaceChildren(); if (!state.result) return;
-    resultArea.append(el('h3', '', '03  生成结果'));
+    resultArea.append(el('h3', '', '04  生成结果'));
     const unchanged = sameBoard(state.result.context, state.context) && state.result.context.canvasVersion === state.context.canvasVersion && state.result.context.baseImageId === (textMode() ? '' : state.baseImageId);
     state.result.images.forEach((image, index) => {
       const figure = el('figure', 'design-result'), controls = el('div', 'design-result-actions'); figure.append(imageNode(image));
@@ -192,7 +184,7 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
     const context = state.context, generation = state.generation, baseImageId = state.baseImageId;
     void perform(async () => {
       let asset;
-      if (official()) {
+      {
         if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 30 * 1024 * 1024 || !file.size) throw new Error('请选择 30MB 以内的 PNG、JPEG 或 WebP 图片。');
         const dataURL = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('图片读取失败。')); reader.readAsDataURL(file); });
         asset = await api('/api/whiteboards/design/assets', { method: 'POST', body: JSON.stringify({ workspace: context.workspace, image: { dataURL, mimeType: file.type, name: file.name } }) });
@@ -206,18 +198,16 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
       state.result = null; state.phase = result.saved === false ? '图片已加入画布，保存尚未完成，请处理上方保存提示。' : role === 'base' ? '原图已导入并锁定，可以开始勾画。' : '参考图已加入，生成时会与原图一起使用。';
     });
   });
-  provider.addEventListener('change', () => { endpoint.hidden = model.hidden = key.hidden = provider.value === 'official'; endpoint.value = provider.value === 'dashscope' ? 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation' : 'https://api.openai.com/v1'; model.value = provider.value === 'dashscope' ? 'qwen-image-2.0-pro' : 'gpt-image-1.5'; key.value = ''; });
-  configForm.addEventListener('submit', event => { event.preventDefault(); void perform(async () => { const data = await request('config', { provider: provider.value, baseURL: endpoint.value.trim(), model: model.value.trim(), ...(key.value.trim() ? { apiKey: key.value } : {}) }); key.value = ''; acceptConfig(data.config); state.phase = '图像模型设置已保存。'; }); });
   function start() { if (state.startTask) return state.startTask; const task = executeStart(); state.startTask = task; void task.finally(() => { if (state.startTask === task) state.startTask = null; }); return task; }
   async function executeStart() {
-    if (locked() || !state.context || !state.config?.configured || (!official() && !currentBase())) return;
+    if (locked() || !state.context || !state.config?.configured || !modeAvailable()) return;
     if (!prompt.value.trim()) { state.error = '请填写你希望绘制的建筑或城市设计要求。'; render(); prompt.focus(); return; }
     const generation = state.generation, baseImageId = textMode() ? '' : state.baseImageId; state.starting = true; state.error = ''; state.phase = '正在保存原图与勾画，准备生成…'; render();
     try {
       const snapshot = await capture(baseImageId);
       if (generation !== state.generation || !sameBoard(snapshot, state.context)) return;
       const requestId = crypto.randomUUID(), context = { ...snapshot, baseImageId };
-      const body = { workspace: snapshot.workspace, id: snapshot.id, revision: snapshot.revision, canvasVersion: snapshot.canvasVersion, kind: kind.value, prompt: prompt.value.trim(), baseImageId, annotated: snapshot.annotated, requestId, ...(official() ? { model: variant.value, generationMode: textMode() ? 'text-to-image' : 'image-to-image', aspect_ratio: ratio.value, resolution: resolution.value, background: background.value, ...(!textMode() ? { assetIds: state.assets.map(asset => asset.assetId), ...(state.baseAssets.get(baseImageId) ? { baseAssetId: state.baseAssets.get(baseImageId).assetId } : {}) } : {}) } : {}) };
+      const body = { workspace: snapshot.workspace, id: snapshot.id, revision: snapshot.revision, canvasVersion: snapshot.canvasVersion, kind: kind.value, prompt: prompt.value.trim(), baseImageId, annotated: snapshot.annotated, requestId, aspect_ratio: ratio.value, resolution: resolution.value, background: background.value, ...(!textMode() ? { assetIds: state.assets.map(asset => asset.assetId), ...(state.baseAssets.get(baseImageId) ? { baseAssetId: state.baseAssets.get(baseImageId).assetId } : {}) } : {}) };
       rememberRequest(requestId, context);
       state.pending = { requestId, context }; const result = await api('/api/whiteboards/design/start', { method: 'POST', body: JSON.stringify(body) });
       if (!result?.runId) throw new Error('未收到有效的生成任务编号，请查询提交状态。');
@@ -275,7 +265,7 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
       if (result.status === 'running') { state.phase = `${run.cancelled ? '正在停止' : '正在生成设计图'} · 已处理 ${Math.max(0, Math.floor((result.elapsedMs || 0) / 1000))} 秒`; state.timer = setTimeout(() => void poll(generation, run), 1100); render(); return; }
       if (result.status === 'completed' && !run.cancelled && Array.isArray(result.images) && result.images.length && result.images.every(image => rasterURL.test(image.dataURL || ''))) { state.result = { runId: run.id, images: result.images, context: run.context, applied: new Set() }; state.phase = '设计图已生成，可预览、放入画布或下载。'; }
       else if (result.status === 'stopped' || run.cancelled) state.phase = '已停止等待，原图与勾画已保留。供应商可能仍会处理已发出的请求。';
-      else if (result.status === 'failed') { state.error = result.error || '图像生成失败，请检查模型设置后重新生成。'; state.phase = ''; }
+      else if (result.status === 'failed') { state.error = result.error || '图像生成未完成，请稍后查看原任务。'; state.phase = ''; }
       else throw Object.assign(new Error('生成任务返回了无法识别的结果。'), { code: 'invalid_result' });
       state.lastRun = { ...run, canResume: result.canResume === true }; state.run = null;
       if (result.canResume && result.status !== 'completed') state.phase = `${state.phase || ''} 请求编号：${run.requestId}`;
@@ -293,10 +283,10 @@ export function createWhiteboardDesign({ api, toast, host, capture, importImage,
     return true;
   }
   function contextChanged(context) {
-    if (!sameBoard(state.context, context)) { void beforeLeave(); state.context = context; state.baseImageId = ''; state.assets = []; state.baseAssets.clear(); state.lastRun = null; state.result = null; state.configLoaded = false; state.config = null; state.error = ''; state.phase = ''; key.value = ''; prompt.value = ''; if (context) void restoreSavedRequest(context, state.generation); }
+    if (!sameBoard(state.context, context)) { void beforeLeave(); state.context = context; state.baseImageId = ''; state.assets = []; state.baseAssets.clear(); state.lastRun = null; state.result = null; state.configLoaded = false; state.config = null; state.error = ''; state.phase = ''; prompt.value = ''; if (context) void restoreSavedRequest(context, state.generation); }
     else state.context = context;
     const bases = (state.context?.images || []).filter(image => image.role === 'base'); if (!bases.some(image => image.elementId === state.baseImageId)) state.baseImageId = bases.at(-1)?.elementId || '';
     render(); if (state.open && state.context && !state.configLoaded) void loadConfig();
   }
-  render(); return { contextChanged, beforeLeave, open() { state.open = true; if (!state.configLoaded) void loadConfig(); render(); }, close() { state.open = false; } };
+  render(); return { contextChanged, beforeLeave, open() { state.open = true; void loadConfig(); render(); }, close() { state.open = false; } };
 }

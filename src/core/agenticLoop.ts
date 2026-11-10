@@ -53,7 +53,7 @@ import {
   activateConditionalSkillsForPaths,
   extractToolFilePaths,
 } from "../services/skills/conditional.js";
-import { estimateSystemPromptTokens, getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
+import { estimateSystemPromptTokens, estimateToolDefinitionTokens, getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
 import { resolveProfile } from "../services/api/providers/profile.js";
 import { fileHistoryTrackEdit } from "../session/fileHistory.js";
 import { setToolStatus } from "../state/toolStatusStore.js";
@@ -175,6 +175,7 @@ export interface AgenticLoopResult {
   lastCallUsage: Usage;
   lastCallUsageAnchorIndex: number;
   lastCallSystemPromptTokens?: number;
+  lastCallToolDefinitionTokens?: number;
   reason: LoopTerminationReason;
 }
 
@@ -195,6 +196,9 @@ export interface QueryParams {
   initialCallUsage?: Usage;
   initialUsageAnchorIndex?: number;
   initialSystemPromptTokens?: number;
+  initialToolDefinitionTokens?: number;
+  /** The parent just failed to summarize this history; avoid an immediate duplicate request. */
+  initialCompactionFailed?: boolean;
   abortSignal?: AbortSignal;
   toolContext: ToolContext;
   maxTurns?: number;
@@ -1284,11 +1288,13 @@ export async function* query(
   }) };
   let lastCallUsageAnchorIndex = params.initialUsageAnchorIndex ?? -1;
   let lastCallSystemPromptTokens = params.initialSystemPromptTokens;
-  const usageSnapshot = () => ({ lastCallUsage, lastCallUsageAnchorIndex, lastCallSystemPromptTokens });
+  let lastCallToolDefinitionTokens = params.initialToolDefinitionTokens;
+  const usageSnapshot = () => ({ lastCallUsage, lastCallUsageAnchorIndex, lastCallSystemPromptTokens, lastCallToolDefinitionTokens });
   const invalidateUsageAnchor = () => {
     lastCallUsage = { input_tokens: 0, output_tokens: 0 };
     lastCallUsageAnchorIndex = -1;
     lastCallSystemPromptTokens = undefined;
+    lastCallToolDefinitionTokens = undefined;
   };
 
   // Stop-hook re-entry guard — see the call site below for context.
@@ -1307,6 +1313,7 @@ export async function* query(
   let maxOutputTokensRecoveryCount = 0;
   let hasAttemptedReactiveCompact = false;
   let consecutiveProactiveCompactFailures = 0;
+  let skipInitialProactiveCompaction = params.initialCompactionFailed === true;
   let activeContextWindow = params.contextWindow;
   if (activeContextWindow === undefined) {
     try {
@@ -1344,12 +1351,17 @@ export async function* query(
     }
     if (params.abortSignal?.aborted) continue;
 
+    // Snapshot the schemas once: the budget and the request must describe the
+    // same tools, including MCP connections/mode changes since the last call.
+    const currentTools = params.getTools ? params.getTools() : params.tools;
     // Token budget check and recovery before every API call.
     let estimatedTokens = tokenCountWithEstimation(state.messages, {
       usage: lastCallUsage,
       usageAnchorIndex: lastCallUsageAnchorIndex,
       usageSystemPromptTokens: lastCallSystemPromptTokens,
+      usageToolDefinitionTokens: lastCallToolDefinitionTokens,
       systemPrompt: params.systemPrompt,
+      toolDefinitions: currentTools,
     });
     let warningState = calculateTokenWarningState(
       estimatedTokens,
@@ -1357,11 +1369,14 @@ export async function* query(
       activeContextWindow,
     );
     let compactError: unknown;
+    const skipProactiveThisIteration = skipInitialProactiveCompaction;
+    skipInitialProactiveCompaction = false;
 
     // A large user message or tool result can cross the threshold after the
     // between-turn check. Compact here before blocking, including turn one.
     if (
       (warningState.state === "error" || warningState.state === "blocking") &&
+      !skipProactiveThisIteration &&
       consecutiveProactiveCompactFailures < 3 &&
       state.messages.length > 0
     ) {
@@ -1369,6 +1384,7 @@ export async function* query(
         const compactResult = await compactMessages(state.messages, undefined, {
           signal: params.abortSignal,
           systemPrompt: params.systemPrompt,
+          toolDefinitions: currentTools,
           model: params.model,
           contextWindow: activeContextWindow,
           force: true,
@@ -1385,6 +1401,7 @@ export async function* query(
           };
           estimatedTokens = tokenCountWithEstimation(state.messages, {
             systemPrompt: params.systemPrompt,
+            toolDefinitions: currentTools,
           });
           warningState = calculateTokenWarningState(
             estimatedTokens,
@@ -1419,7 +1436,6 @@ export async function* query(
     }
 
     await requirePlatformScope(0);
-    const currentTools = params.getTools ? params.getTools() : params.tools;
     const stream = streamMessage({
       messages: [...state.messages],
       model: params.model,
@@ -1455,6 +1471,7 @@ export async function* query(
         // The output is not covered by a history index until it is committed.
         lastCallUsageAnchorIndex = -1;
         lastCallSystemPromptTokens = params.systemPrompt ? estimateSystemPromptTokens(params.systemPrompt) : 0;
+        lastCallToolDefinitionTokens = estimateToolDefinitionTokens(currentTools);
         totalUsage.input_tokens += streamResult.usage.input_tokens;
         totalUsage.output_tokens += streamResult.usage.output_tokens;
         totalUsage.cache_creation_input_tokens =
@@ -1515,6 +1532,7 @@ export async function* query(
           const compactResult = await compactMessages(state.messages, undefined, {
             signal: params.abortSignal,
             systemPrompt: params.systemPrompt,
+            toolDefinitions: currentTools,
             model: params.model,
             contextWindow: activeContextWindow,
             force: true,

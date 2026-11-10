@@ -23,10 +23,20 @@ export interface TokenWarningResult {
   contextWindow: number;
 }
 
-let consecutiveAutoCompactFailures = 0;
+export interface AutoCompactState {
+  consecutiveFailures: number;
+}
 
-export function resetAutoCompactFailures(): void {
-  consecutiveAutoCompactFailures = 0;
+/** A Web worker hosts multiple engines; one session must not disable another's recovery. */
+export function createAutoCompactState(): AutoCompactState {
+  return { consecutiveFailures: 0 };
+}
+
+// Retain the public helper's legacy default for callers outside QueryEngine.
+const defaultAutoCompactState = createAutoCompactState();
+
+export function resetAutoCompactFailures(state = defaultAutoCompactState): void {
+  state.consecutiveFailures = 0;
 }
 
 function scaleBuffer(buffer: number, effectiveWindow: number): number {
@@ -84,13 +94,14 @@ export function shouldAutoCompact(
   model: string,
   querySource?: string,
   contextWindow?: number,
+  state: AutoCompactState = defaultAutoCompactState,
 ): boolean {
   if (querySource === "compact" || querySource === "session_memory") {
     return false;
   }
-  if (consecutiveAutoCompactFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
+  if (state.consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
     debugLog("autoCompact", "circuit_breaker", {
-      consecutiveFailures: consecutiveAutoCompactFailures,
+      consecutiveFailures: state.consecutiveFailures,
     });
     return false;
   }
@@ -107,21 +118,28 @@ export async function autoCompactIfNeeded(
     systemPrompt?: string;
     querySource?: string;
     contextWindow?: number;
+    signal?: AbortSignal;
+    state?: AutoCompactState;
+    toolDefinitions?: readonly unknown[];
+    usageToolDefinitionTokens?: number;
   },
-): Promise<{ result: CompactionResult; didAutoCompact: boolean }> {
+): Promise<{ result: CompactionResult; didAutoCompact: boolean; didAttemptAutoCompact: boolean }> {
+  options.signal?.throwIfAborted();
+  const state = options.state ?? defaultAutoCompactState;
   const estimatedTokens = tokenCountWithEstimation(messages, options);
 
-  if (!shouldAutoCompact(estimatedTokens, model, options.querySource, options.contextWindow)) {
+  if (!shouldAutoCompact(estimatedTokens, model, options.querySource, options.contextWindow, state)) {
     return {
       result: { messages, didCompact: false, didMicroCompact: false },
       didAutoCompact: false,
+      didAttemptAutoCompact: false,
     };
   }
 
   debugLog("autoCompact", "triggering", {
     estimatedTokens,
     threshold: getAutoCompactThreshold(model, options.contextWindow),
-    consecutiveFailures: consecutiveAutoCompactFailures,
+    consecutiveFailures: state.consecutiveFailures,
   });
 
   try {
@@ -129,22 +147,28 @@ export async function autoCompactIfNeeded(
       usage: options.usage,
       usageAnchorIndex: options.usageAnchorIndex,
       usageSystemPromptTokens: options.usageSystemPromptTokens,
+      usageToolDefinitionTokens: options.usageToolDefinitionTokens,
       systemPrompt: options.systemPrompt,
+      toolDefinitions: options.toolDefinitions,
       model,
       contextWindow: options.contextWindow,
       force: true,
+      signal: options.signal,
     });
-    consecutiveAutoCompactFailures = 0;
-    return { result, didAutoCompact: result.didCompact };
+    state.consecutiveFailures = 0;
+    return { result, didAutoCompact: result.didCompact, didAttemptAutoCompact: true };
   } catch (error) {
-    consecutiveAutoCompactFailures++;
+    // Cancellation is a user action, not a supplier failure or a circuit-breaker strike.
+    if (options.signal?.aborted) throw error;
+    state.consecutiveFailures++;
     debugLog("autoCompact", "failure", {
       error: error instanceof Error ? error.message : String(error),
-      consecutiveFailures: consecutiveAutoCompactFailures,
+      consecutiveFailures: state.consecutiveFailures,
     });
     return {
       result: { messages, didCompact: false, didMicroCompact: false },
       didAutoCompact: false,
+      didAttemptAutoCompact: true,
     };
   }
 }

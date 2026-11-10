@@ -72,7 +72,7 @@ try {
   await rejected({ ...body, baseImageId: "reference-0" }, "base_image_missing");
   await rejected({ ...body, baseImageId: "previous-output" }, "base_image_missing");
   config = { ...baseConfig, configured: false, hasKey: false };
-  await rejected(body, "config_not_ready");
+  await rejected(body, "DESIGN_IMAGE_UNAVAILABLE");
   config = { ...baseConfig, maxReferences: 1 };
   await rejected(body, "reference_limit");
   config = { ...baseConfig };

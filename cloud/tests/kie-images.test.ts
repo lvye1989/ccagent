@@ -9,6 +9,30 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { defaultRoutes } from '../src/core/service-defaults';
 
+test('reference uploads use exact multipart byte length and keep supplier errors safe', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFe0AAAAASUVORK5CYII=', 'base64');
+  const originalLookup = dns.lookup;
+  try {
+    dns.lookup = (async () => [{ address: '93.184.216.34', family: 4 }]) as unknown as typeof dns.lookup;
+    let response = () => Response.json({ code: 200, data: { downloadUrl: 'https://tempfile.redpandaai.co/test.png' } });
+    const client = createKieClient('fixture-secret', async (url, init, hosts) => {
+      assert.equal(url, 'https://kieai.redpandaai.co/api/file-stream-upload'); assert.deepEqual(hosts, ['kieai.redpandaai.co']);
+      assert(init.body instanceof Uint8Array); const body = Buffer.from(init.body), headers = new Headers(init.headers);
+      assert.equal(headers.get('content-length'), String(body.length));
+      const boundary = headers.get('content-type')!.split('boundary=')[1];
+      assert(body.includes(png)); assert(body.toString().includes('name="uploadPath"\r\n\r\nccagent/test')); assert(body.toString().endsWith(`\r\n--${boundary}--\r\n`));
+      return response();
+    });
+    assert.equal(await client.upload(png, 'image/png', 'ccagent/test', AbortSignal.timeout(5000)), 'https://tempfile.redpandaai.co/test.png');
+    for (const [status, code] of [[401, 'IMAGE_UPLOAD_AUTH_FAILED'], [403, 'IMAGE_UPLOAD_AUTH_FAILED'], [413, 'IMAGE_UPLOAD_TOO_LARGE'], [429, 'IMAGE_UPLOAD_RATE_LIMITED'], [500, 'IMAGE_UPLOAD_FAILED']] as const) {
+      response = () => Response.json({ code: status, msg: 'fixture-secret private upstream detail' }, { status });
+      await assert.rejects(client.upload(png, 'image/png', 'ccagent/test', AbortSignal.timeout(5000)), (error: any) => error.code === code && !error.message.includes('fixture-secret'));
+    }
+    response = () => new Response('<html>fixture-secret</html>');
+    await assert.rejects(client.upload(png, 'image/png', 'ccagent/test', AbortSignal.timeout(5000)), { code: 'IMAGE_UPLOAD_RESPONSE_INVALID' });
+  } finally { dns.lookup = originalLookup; }
+});
+
 test('all four official image modes expose only documented Kie 2.5 parameters and every valid size/aspect combination', () => {
   assert.deepEqual(defaultRoutes.parse({ chat: null, vision: null, decision: null, search: null, voice: null }), { chat: null, vision: null, decision: null, search: null, voice: null, image: null });
   const aspects = ['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9', '27:16', '16:27', '9:8', '8:9'];
