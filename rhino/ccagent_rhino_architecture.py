@@ -87,6 +87,25 @@ def _ring(section, parameters, fraction):
     return curve
 
 
+def _join_planar_loft_caps(breps, curves, tolerance):
+    # CapPlanarHoles can leave a periodic loft open. Reuse the exact end
+    # profiles at the document tolerance, never flatten or alter the crown.
+    # https://developer.rhino3d.com/api/rhinocommon/rhino.geometry.brep/createplanarbreps
+    ends = [curves[0], curves[-1]]
+    if any(not curve.IsClosed or not curve.IsPlanar(tolerance) for curve in ends):
+        raise ValueError("The loft has an open or non-planar end profile; cap:true requires closed planar ends. Use cap:false only if an open loft is intended.")
+    pieces = list(breps)
+    for curve in ends:
+        caps = Rhino.Geometry.Brep.CreatePlanarBreps(curve, tolerance)
+        if not caps or any(not cap.IsValid for cap in caps):
+            raise RuntimeError("Rhino could not create a valid planar end cap at the document tolerance; the loft was not added.")
+        pieces.extend(caps)
+    joined = Rhino.Geometry.Brep.JoinBreps(pieces, tolerance)
+    if not joined or len(joined) != 1 or any(not brep.IsValid or not brep.IsSolid for brep in joined):
+        raise RuntimeError("Rhino could not join the planar caps into a closed solid at the document tolerance; the loft was not added. Inspect the end curves and seam before retrying.")
+    return joined
+
+
 def _loft(doc, parameters):
     curves = []
     sections = parameters.get("sections")
@@ -117,8 +136,8 @@ def _loft(doc, parameters):
         raise RuntimeError("RhinoCommon loft did not create valid surfaces")
     if parameters.get("cap", False):
         capped = [brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) for brep in breps]
-        if any(brep is None or not brep.IsSolid for brep in capped):
-            raise ValueError("This loft cannot be capped; use cap:false for a non-planar crown")
+        if any(brep is None or not brep.IsValid or not brep.IsSolid for brep in capped):
+            capped = _join_planar_loft_caps(breps, curves, doc.ModelAbsoluteTolerance)
         breps = capped
     name = str(parameters.get("name", "Loft tower"))
     attributes = _attributes(doc, name, str(parameters.get("layer", "Loft")), (80, 114, 138), 1.0, "loft_skin")

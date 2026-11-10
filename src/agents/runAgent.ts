@@ -256,6 +256,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     notificationOwnerSessionId: params.parentToolContext.notificationOwnerSessionId ?? params.parentToolContext.sessionId,
     strictNotificationScope: params.parentToolContext.strictNotificationScope,
     temporaryChat: params.parentToolContext.temporaryChat,
+    onModelExport: params.parentToolContext.onModelExport,
     agentTeamsAllowed: params.parentToolContext.agentTeamsAllowed,
     // Sub-agent reads its own mode — isolating plan-mode transitions
     // (Enter/ExitPlanMode) from the parent's mode state.

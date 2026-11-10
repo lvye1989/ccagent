@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { database, type DatabaseReader } from './db';
 import { settings } from './db/schema';
 import { HttpError } from './http';
+import { UpstreamTransportError } from './upstream-failure';
 
 export const upstreamHostsKey = 'gateway.allowed_upstream_hosts';
 const builtins = ['api.deepseek.com', 'openrouter.ai', 'api.tavily.com', 'api.bochaai.com', 'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com', 'api.kie.ai'];
@@ -105,7 +106,7 @@ export async function requestUpstream(value: string, init: RequestInit, legacyFe
         incoming.destroy(); reject(new HttpError(502, 'UPSTREAM_RESPONSE_INVALID', '上游响应格式无效。'));
       }
     });
-    request.on('error', () => reject(new HttpError(502, 'UPSTREAM_TRANSPORT_FAILED', '上游连接未完成。')));
+    request.on('error', error => reject(new UpstreamTransportError(error, init.signal?.aborted)));
     request.end(init.body || undefined);
   });
 }
@@ -137,7 +138,7 @@ export async function requestPublicHttps(value: string, init: RequestInit, optio
       resolve(new Response(body, { status, headers: responseHeaders }));
       } catch { incoming.destroy(); reject(new HttpError(502, 'UPSTREAM_RESPONSE_INVALID', '上游响应格式无效。')); }
     });
-    request.on('error', () => reject(new HttpError(502, 'UPSTREAM_TRANSPORT_FAILED', '上游连接未完成。')));
+    request.on('error', error => reject(new UpstreamTransportError(error, init.signal?.aborted)));
     request.end(init.body || undefined);
   });
 }

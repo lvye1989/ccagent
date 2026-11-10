@@ -55,6 +55,7 @@ Automatic file housekeeping:
 - Do not request shell/delete tools to clean files, do not delete geometry as file housekeeping, and do not claim a cleanup count yourself. The runtime appends its actual cleanup result and audit-log path after your response.
 
 When finished, report:
+- the verified exported .3dm filename and full file_path from the native export receipt, formatted as a Markdown file link; never invent a file path or claim an unexported document is saved. The Web app adds an open-file card automatically after a successful native export;
 - what changed and which object GUIDs were created/updated/replaced;
 - the final layer/type/bounding-box verification;
 - the Undo Record and snapshot path;

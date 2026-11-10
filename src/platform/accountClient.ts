@@ -2,6 +2,7 @@ import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
 import { SecureCredentialStore } from "./secureStore.js";
 import { platformRequest } from "./transport.js";
+import { accountNetworkFailure, nativeNetworkAgent, NativeNetworkConfigurationError } from "./nativeNetwork.js";
 
 export interface AccountUser { id: string; email: string; name: string }
 export interface AccountSession { user: AccountUser; expiresAt: string }
@@ -87,8 +88,11 @@ function requestJson(origin: string, route: string, body?: Record<string, unknow
   const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   return new Promise((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http;
+    let agent: http.Agent | https.Agent;
+    try { agent = nativeNetworkAgent(url); }
+    catch (error) { reject(new AccountError(error instanceof NativeNetworkConfigurationError ? error.message : "应用网络配置暂不可用，请检查本机连接设置。", "configuration", 503)); return; }
     const request = transport.request(url, {
-      method: method ?? (bytes ? "POST" : "GET"), rejectUnauthorized: true,
+      method: method ?? (bytes ? "POST" : "GET"), rejectUnauthorized: true, agent,
       ...(url.hostname === "localhost" && url.protocol === "http:" ? { hostname: "127.0.0.1" } : {}),
       headers: { accept: "application/json", origin, "cache-control": "no-store", ...(cookie ? { cookie } : {}),
         ...(bytes ? { "content-type": "application/json", "content-length": bytes.length } : {}) },
@@ -100,8 +104,9 @@ function requestJson(origin: string, route: string, body?: Record<string, unknow
         if (size > 256 * 1024) response.destroy(new Error("limit"));
         else chunks.push(chunk);
       });
-      response.on("error", () => reject(new AccountError("账户服务响应中断，请重试。", "network")));
+      response.on("error", () => { clearTimeout(timer); reject(new AccountError("账户服务响应中断，请重试。", "network", 503)); });
       response.on("end", () => {
+        clearTimeout(timer);
         const status = response.statusCode ?? 503;
         if (status >= 300 && status < 400) {
           let target: URL | undefined;
@@ -126,8 +131,8 @@ function requestJson(origin: string, route: string, body?: Record<string, unknow
         resolve({ status, headers: response.headers, value });
       });
     });
-    request.setTimeout(15_000, () => request.destroy(new Error("timeout")));
-    request.on("error", () => reject(new AccountError("暂时无法连接账户服务，请检查网络后重试。", "network")));
+    const timer = setTimeout(() => request.destroy(Object.assign(new Error("Account request timed out"), { code: "CCAGENT_NETWORK_TIMEOUT" })), 15_000);
+    request.on("error", error => { clearTimeout(timer); const safe = accountNetworkFailure(error); reject(new AccountError(safe.message, safe.code, 503)); });
     request.end(bytes);
   });
 }

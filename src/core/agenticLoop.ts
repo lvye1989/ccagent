@@ -107,6 +107,7 @@ export type AgenticLoopEvent =
   | { type: "thinking_done"; thinking: string; signature?: string }
   | { type: "redacted_thinking"; data: string }
   | { type: "tool_use_start"; id: string; name: string }
+  | { type: "tool_use_ready"; id: string; name: string }
   | { type: "permission_request"; request: PermissionRequest }
   | {
       type: "tool_use_done";
@@ -1715,6 +1716,11 @@ export async function* query(
       return { state, usage: totalUsage, ...usageSnapshot(), reason: "completed" };
     }
 
+    // A streamed tool name is only a draft. Expose dispatch readiness only
+    // after the entire model turn has passed the completion/parser checks.
+    for (const block of assistantContent) {
+      if (block.type === "tool_use") yield { type: "tool_use_ready", id: block.id, name: block.name };
+    }
     const { toolResultsMessage, executions, permissionRequests } = await runTools(
       assistantContent,
       {

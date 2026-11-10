@@ -27,6 +27,9 @@ const MAX_STREAM_BUFFER_CHARS = 32 * 1024;
 let streamTextNode = null;
 let streamPendingText = "";
 let streamFlushTimer = null;
+let composeContext = 0;
+let submitRequest = 0;
+let taskConflict = null;
 
 function toast(message) {
   const node = $("toast");
@@ -47,9 +50,95 @@ async function api(route, options = {}) {
     const error = new Error(body.error || `HTTP ${response.status}`);
     error.status = response.status;
     error.code = body.code;
+    if (response.status === 409) error.conflict = taskConflictDetails(body);
     throw error;
   }
   return body;
+}
+
+function taskConflictDetails(body) {
+  const reasons = ["waiting_permission", "waiting_question", "task_running", "whiteboard_running", "configuration_busy", "team_active"];
+  if (!body || body.code !== "TASK_BUSY" || !reasons.includes(body.reason) || typeof body.canInterrupt !== "boolean"
+      || !(body.activeSessionId === null || typeof body.activeSessionId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(body.activeSessionId))) return null;
+  return { reason: body.reason, activeSessionId: body.activeSessionId, canInterrupt: body.canInterrupt && body.activeSessionId !== null && body.reason !== "whiteboard_running" };
+}
+
+function clearTaskConflict() {
+  const conflict = taskConflict;
+  taskConflict = null;
+  conflict?.controller?.abort();
+  conflict?.node.remove();
+}
+
+function showTaskConflict(details) {
+  clearTaskConflict();
+  const node = document.createElement("div");
+  node.id = "task-conflict";
+  node.className = "notice-line";
+  node.setAttribute("role", "status");
+  node.setAttribute("aria-live", "polite");
+  const summary = document.createElement("p");
+  summary.textContent = ({
+    waiting_permission: "后台还有任务等待你的授权。请查看原任务并处理授权，或主动停止原任务后再发送。",
+    waiting_question: "后台还有任务等待你的回答。请查看原任务并回答，或主动停止原任务后再发送。",
+    task_running: "后台还有任务正在执行。可查看执行进度，或主动停止原任务后再发送。",
+    whiteboard_running: "白板正在执行绘图任务。请到白板查看进度，完成后再发送。",
+    configuration_busy: "后台正在更新配置。请等待更新完成后重新发送。",
+    team_active: "后台还有团队任务正在执行。请查看原任务，完成后再发送。",
+  })[details.reason];
+  const status = document.createElement("p");
+  status.textContent = "当前消息与附件草稿已保留。";
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+  const conflict = { node, context: composeContext, sessionId: state.sessionId, controller: null };
+  taskConflict = conflict;
+  const current = () => taskConflict === conflict && composeContext === conflict.context && state.sessionId === conflict.sessionId && node.isConnected;
+  if (details.activeSessionId || details.reason === "whiteboard_running") {
+    const link = document.createElement("a");
+    link.className = "secondary-button";
+    link.textContent = details.reason === "whiteboard_running" ? "查看白板（新窗口）" : "查看占用任务（新窗口）";
+    link.href = details.reason === "whiteboard_running" ? "/?view=whiteboard" : `/?session=${encodeURIComponent(details.activeSessionId)}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    actions.append(link);
+  }
+  if (details.canInterrupt && details.activeSessionId) {
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "secondary-button";
+    stop.textContent = "停止占用任务";
+    stop.addEventListener("click", async () => {
+      if (!current() || conflict.controller) return;
+      const controller = new AbortController();
+      conflict.controller = controller;
+      const deadline = setTimeout(() => controller.abort(), 10000);
+      stop.disabled = true;
+      status.textContent = "正在停止占用任务并确认状态…";
+      try {
+        await api(`/api/sessions/${details.activeSessionId}/interrupt`, { method: "POST", body: "{}", signal: controller.signal });
+        for (let attempt = 0; attempt < 40 && current(); attempt++) {
+          controller.signal.throwIfAborted();
+          const session = await api(`/api/sessions/${details.activeSessionId}`, { signal: controller.signal });
+          if (!current()) return;
+          if (session.sessionId !== details.activeSessionId || typeof session.busy !== "boolean") throw new Error("Invalid task state");
+          if (!session.busy) {
+            status.textContent = "占用任务已停止。草稿已保留，请点击发送重新提交。";
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        if (current()) { status.textContent = "任务仍未停止，请查看原任务状态后重试。"; stop.disabled = false; }
+      } catch {
+        if (current()) { status.textContent = controller.signal.aborted ? "停止确认超时，请查看原任务状态后重试。" : "暂时无法停止任务，请查看原任务状态后重试。"; stop.disabled = false; }
+      } finally {
+        clearTimeout(deadline);
+        if (conflict.controller === controller) conflict.controller = null;
+      }
+    });
+    actions.append(stop);
+  }
+  node.append(summary, status, actions);
+  $(state.view === "thread" ? "thread-form" : "home-form").before(node);
 }
 
 function shortWorkspace() {
@@ -224,6 +313,7 @@ async function setView(view) {
   if (state.view === "whiteboard" && view !== "whiteboard") {
     if (!await whiteboardUI.beforeLeave() || request !== viewRequest) return false;
   }
+  if (view !== state.view) { composeContext++; clearTaskConflict(); }
   if (view !== state.view) voiceUI.stopDictation();
   state.view = view;
   workspaceFiles.setView(view);
@@ -572,6 +662,32 @@ function addAssistant(text) {
   scrollTimeline();
 }
 
+function addModelFile(file) {
+  const sessionId = state.sessionId;
+  if (!file || !/^[0-9a-f-]{36}$/i.test(file.id) || typeof file.path !== "string" || typeof file.name !== "string"
+    || file.openUrl !== `/api/sessions/${sessionId}/model-files/${file.id}/open`) return;
+  if ($("timeline").querySelector(`[data-model-file="${file.id}"]`)) return;
+  const row = document.createElement("div"); row.className = "message assistant model-file-message"; row.dataset.modelFile = file.id;
+  const card = document.createElement("div"); card.className = "model-file-card";
+  const heading = document.createElement("strong"); heading.textContent = "模型文件已保存";
+  const link = document.createElement("button"); link.type = "button"; link.className = "model-file-open";
+  link.title = `打开 ${file.path}`;
+  const name = document.createElement("span"); name.className = "model-file-name"; name.textContent = file.name;
+  const address = document.createElement("span"); address.className = "model-file-path"; address.textContent = file.path;
+  const hint = document.createElement("small"); hint.textContent = "点击文件名或地址，在本机打开模型";
+  link.append(folderIcon(), name, address, hint);
+  link.addEventListener("click", async () => {
+    if (state.sessionId !== sessionId || link.disabled) return;
+    link.disabled = true;
+    try { await api(file.openUrl, { method: "POST" }); toast("已发送打开请求，请查看 Rhino 窗口"); }
+    catch (error) { toast(error.message); }
+    finally { link.disabled = false; }
+  });
+  const copy = document.createElement("button"); copy.type = "button"; copy.className = "model-file-copy"; copy.textContent = "复制保存地址";
+  copy.addEventListener("click", () => void copyReply(file.path, copy));
+  card.append(heading, link, copy); row.append(card); appendTimeline(row);
+}
+
 const toolLabels = {
   Read: "读取文件", ReadImage: "查看图片", Glob: "查找文件", Grep: "搜索文件内容",
   Write: "写入文件", Edit: "编辑文件", MultiEdit: "编辑文件", Bash: "执行命令",
@@ -621,13 +737,24 @@ function addTool(id, name, status = "调用中") {
   return row;
 }
 
+function toolResultDetail(row, detail) {
+  row.querySelector(".tool-detail")?.remove();
+  if (!detail) return;
+  const disclosure = document.createElement("details"); disclosure.className = "tool-detail";
+  const summary = document.createElement("summary"); summary.textContent = "查看原因";
+  const content = document.createElement("pre"); content.textContent = detail.slice(0, 2500);
+  disclosure.append(summary, content); row.append(disclosure);
+}
+
 function updateTool(tool) {
-  const status = tool.completedAt ? tool.isError ? "失败" : "已完成"
-    : state.execution?.completedAt ? state.execution.reason === "aborted" ? "已停止" : "未完成" : "调用中";
+  const status = tool.completedAt ? tool.outcome === "handoff" ? "已暂停" : tool.isError ? "失败" : "已完成"
+    : state.execution?.completedAt ? tool.phase === "preparing" ? "未执行" : state.execution.reason === "aborted" ? "已停止" : "结果待确认"
+    : tool.phase === "preparing" ? "准备调用" : "调用中";
   const row = addTool(tool.id, tool.name, status);
   row.querySelector(".tool-state").textContent = status;
-  row.classList.toggle("error", Boolean(tool.isError) || status === "未完成");
-  row.classList.toggle("tool-running", status === "调用中");
+  row.classList.toggle("error", (Boolean(tool.isError) && tool.outcome !== "handoff") || status === "结果待确认");
+  row.classList.toggle("tool-running", status === "调用中" || status === "准备调用");
+  toolResultDetail(row, tool.detail);
 }
 
 function executionTime(value) {
@@ -665,7 +792,7 @@ function syncExecutionClock() {
   const start = executionTime(execution.startedAt);
   const end = executionTime(execution.completedAt);
   state.executionNode.querySelector(".turn-elapsed").textContent = start === null ? "本轮执行" : `已处理 ${elapsedLabel((end ?? Date.now() + state.serverClockOffset) - start)}`;
-  const terminal = { aborted: "已停止", completed: "已完成", max_turns: "已达轮数上限" };
+  const terminal = { aborted: "已停止", completed: "已完成", max_turns: "已达轮数上限", model_error: "模型回复中断" };
   state.executionNode.querySelector(".turn-outcome").textContent = execution.completedAt ? terminal[execution.reason] || "执行失败" : "执行中";
   state.executionNode.classList.toggle("turn-active", !execution.completedAt);
 }
@@ -770,6 +897,21 @@ function renderStoredMessages(messages) {
   state.toolNodes.clear();
   for (const message of messages) {
     if (message.role === "user") {
+      if (Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (block.type !== "tool_result") continue;
+          const row = state.toolNodes.get(block.tool_use_id);
+          if (row) {
+            let handoff = false, detail = typeof block.content === "string" ? block.content : "";
+            if (row.querySelector(".tool-name")?.textContent === "RhinoSequence") {
+              try { const report = JSON.parse(detail); handoff = report.status === "handoff"; if (handoff && typeof report.reason === "string") detail = report.reason; } catch { /* Ordinary tool error. */ }
+            }
+            row.querySelector(".tool-state").textContent = handoff ? "已暂停" : block.is_error ? "失败" : "已完成";
+            row.classList.toggle("error", Boolean(block.is_error) && !handoff);
+            if (block.is_error) toolResultDetail(row, detail);
+          }
+        }
+      }
       const text = messageText(message);
       if (text.trim()) {
         state.toolNodes.clear();
@@ -782,18 +924,18 @@ function renderStoredMessages(messages) {
     if (text) addAssistant(text);
     if (Array.isArray(message.content)) {
       for (const block of message.content) {
-        if (block.type === "tool_use") addTool(block.id, block.name, "已执行");
+        if (block.type === "tool_use") addTool(block.id, block.name, "结果未记录");
       }
     }
   }
 }
 
 function syncThreadProgress() {
-  const terminal = { model_error: "本轮失败，可重试", error: "本轮失败，可重试", aborted: "已停止", max_turns: "已达执行轮数上限", incomplete: "上次执行未完成，可重试" };
+  const terminal = { model_error: "模型回复中断，已完成的操作已保留", error: "本轮中断，请核对已完成的操作后继续", aborted: "已停止", max_turns: "已达执行轮数上限", incomplete: "上次执行未完成，请核对执行记录" };
   const activeTools = (state.execution?.tools || []).filter((tool) => !tool.completedAt);
   const tools = activeTools.slice(0, 2).map((tool) => `${toolLabel(tool.name)} · ${tool.name}`).join("、");
   const current = state.pending ? state.pending.kind === "question" ? "等待你的回答" : "等待你的批准"
-    : activeTools.length ? `正在调用：${tools}${activeTools.length > 2 ? ` 等 ${activeTools.length} 项工具` : ""}`
+    : activeTools.length ? `${activeTools.every(tool => tool.phase === "preparing") ? "准备调用" : "正在调用"}：${tools}${activeTools.length > 2 ? ` 等 ${activeTools.length} 项工具` : ""}`
     : state.streamNode ? "正在生成回复" : state.execution?.tools.length ? "正在整理结果" : "Thinking";
   const text = state.busy ? current : terminal[state.lastTurnReason] || "";
   $("thread-status-label").textContent = text;
@@ -951,24 +1093,29 @@ function handleEvent(event) {
     case "text": appendStream(event.text); break;
     case "stream_restart": clearStream(); break;
     case "assistant": clearStream(); addAssistant(messageText(event.message)); break;
+    case "model_file": addModelFile(event.file); scrollTimeline(); break;
     case "model": state.model = event.model; syncModelSelectors(); break;
     case "mode": state.mode = event.mode; $("thread-mode-select").value = event.mode; break;
     case "team": customizationUI.setSessionTeam(event.team); break;
+    case "tool_preparing":
     case "tool_start": {
       if (state.execution && !state.execution.tools.some((tool) => tool.id === event.id)) state.execution.tools.push({ id: event.id, name: event.name, startedAt: event.timestamp, completedAt: null });
       const tool = state.execution?.tools.find((tool) => tool.id === event.id);
+      if (tool) tool.phase = event.type === "tool_preparing" ? "preparing" : "running";
       if (tool) updateTool(tool);
-      else addTool(event.id, event.name);
+      else addTool(event.id, event.name, event.type === "tool_preparing" ? "准备调用" : "调用中");
       syncThreadProgress();
       break;
     }
     case "tool_done": {
       const tool = state.execution?.tools.find((tool) => tool.id === event.id);
-      if (tool) { tool.completedAt = event.timestamp || new Date(Date.now() + state.serverClockOffset).toISOString(); tool.isError = event.isError; updateTool(tool); }
+      if (tool) { tool.completedAt = event.timestamp || new Date(Date.now() + state.serverClockOffset).toISOString(); tool.isError = event.isError; tool.outcome = event.outcome; tool.detail = event.detail; updateTool(tool); }
       const row = state.toolNodes.get(event.id);
       if (row) {
-        row.querySelector(".tool-state").textContent = event.isError ? "失败" : "已完成";
-        if (event.isError) row.classList.add("error");
+        row.querySelector(".tool-state").textContent = event.outcome === "handoff" ? "已暂停" : event.isError ? "失败" : "已完成";
+        row.classList.toggle("error", Boolean(event.isError) && event.outcome !== "handoff");
+        row.classList.remove("tool-running");
+        if (!tool) toolResultDetail(row, event.detail);
       }
       syncThreadProgress();
       break;
@@ -995,8 +1142,9 @@ function handleEvent(event) {
           state.pending = null;
           $("interaction-overlay").classList.add("hidden");
           for (const row of state.toolNodes.values()) {
-            if (!["执行中", "调用中"].includes(row.querySelector(".tool-state").textContent)) continue;
-            row.querySelector(".tool-state").textContent = "未完成";
+            const label = row.querySelector(".tool-state");
+            if (!["执行中", "调用中", "准备调用"].includes(label.textContent)) continue;
+            label.textContent = label.textContent === "准备调用" ? "未执行" : "结果待确认";
             row.classList.remove("tool-running");
             row.classList.add("error");
           }
@@ -1015,18 +1163,19 @@ function handleEvent(event) {
       }
       for (const row of state.toolNodes.values()) {
         const label = row.querySelector(".tool-state");
-        if (["执行中", "调用中"].includes(label?.textContent)) { label.textContent = event.reason === "aborted" ? "已停止" : "未完成"; row.classList.add("error"); row.classList.remove("tool-running"); }
+        if (["执行中", "调用中", "准备调用"].includes(label?.textContent)) { label.textContent = label.textContent === "准备调用" ? "未执行" : event.reason === "aborted" ? "已停止" : "结果待确认"; row.classList.toggle("error", label.textContent === "结果待确认"); row.classList.remove("tool-running"); }
       }
       state.pending = null;
       $("interaction-overlay").classList.add("hidden");
       finishStream(); setBusy(false); refreshSessions(); refreshChanges();
-      if (event.reason && event.reason !== "completed") toast(`任务结束：${event.reason}`);
+      if (event.reason && event.reason !== "completed") toast({ model_error: "模型回复中断，已完成的操作已保留", aborted: "已停止", max_turns: "已达执行轮数上限" }[event.reason] || "本轮执行中断，请查看执行记录");
       break;
   }
 }
 
 async function openSession(id, initialSnapshot, recovery = false) {
   if (deletingSessions.has(id)) return false;
+  if (!recovery) { composeContext++; clearTaskConflict(); }
   const request = { id, recovery };
   const previousSource = state.source;
   clearTimeout(sessionRecoveryTimer);
@@ -1058,10 +1207,11 @@ async function openSession(id, initialSnapshot, recovery = false) {
     state.pending = null;
     $("interaction-overlay").classList.add("hidden");
     renderStoredMessages(data.messages);
+    for (const file of data.modelFiles || []) addModelFile(file);
     restoreExecution(data.execution, data.serverTime);
     for (const notice of data.recentNotices || []) addNotice(notice.message, notice.tone === "error");
     const lastContent = data.messages.at(-1)?.content;
-    state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || (block.type === "tool_result" && block.is_error)) ? "incomplete" : null);
+    state.lastTurnReason = data.lastTurnReason || (!data.busy && Array.isArray(lastContent) && lastContent.some((block) => block.type === "tool_use" || block.type === "tool_result") ? "incomplete" : null);
     setBusy(data.busy);
     if (data.pending) showInteraction(data.pending);
     if (!recovery && !await setView("thread")) return false;
@@ -1110,25 +1260,34 @@ async function submit(text, mode) {
   const input = composerTools.prepare(text.trim(), inputId);
   if (!input) return false;
   if (input.length > 50000) { toast("单条消息不能超过 50000 字符。"); return false; }
+  const request = ++submitRequest;
+  let context = composeContext;
+  const current = () => request === submitRequest && context === composeContext;
   try {
     if (!state.sessionId || state.view !== "thread") {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ mode, model: state.selectedModel || undefined, team: $("home-team").value }) });
+      if (!current()) return false;
       state.sessionId = created.sessionId;
       if (!(await openSession(created.sessionId, created.snapshot))) return false;
+      context = composeContext;
     }
     await api(`/api/sessions/${state.sessionId}/messages`, { method: "POST", body: JSON.stringify({ text: input }) });
+    if (!current()) return false;
+    clearTaskConflict();
     composerTools.clear(inputId);
     $("home-input").value = "";
     $("thread-input").value = "";
     composerTools.sync();
     return true;
   } catch (error) {
+    if (!current()) return false;
     if (inputId === "home-input" && state.view === "thread") {
       composerTools.move("home-input", "thread-input");
       $("thread-input").value = text;
       $("home-input").value = "";
       composerTools.sync();
     }
+    if (error.conflict) showTaskConflict(error.conflict);
     toast(error.message); return false;
   }
 }
@@ -1174,6 +1333,8 @@ async function refreshChanges() {
 }
 
 function clearOpenSession() {
+  composeContext++;
+  clearTaskConflict();
   clearStream();
   composerTools.clear("thread-input");
   voiceUI.stop();

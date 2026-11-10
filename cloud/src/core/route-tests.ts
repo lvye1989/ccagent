@@ -11,6 +11,7 @@ import { errorResponse, HttpError, json, readJson, requireSameOrigin } from './h
 import { measuredUsage, object, prepareUpstream, voiceDownloadUrl, type GatewayEndpoint } from './upstream';
 import { resolveRouteCredential } from './provider-credentials';
 import { requestUpstream } from './upstream-hosts';
+import { upstreamTransportFailure, type UpstreamTransportFailure } from './upstream-failure';
 import { createKieClient, imageTaskInput, kieBaseUrl, kieBody, type KieTransport } from './kie-images';
 
 const routeId = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,79}$/), fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
@@ -24,6 +25,7 @@ export type RouteTestResult = {
   provider: string; upstreamModel: string; pricing: ReturnType<typeof publicPricing>; requestSent: boolean | null; executionStartedAt?: string; estimateExceeded?: boolean;
   confirmationFingerprint: string; responseValidated: boolean; usageVerified: boolean; quantities?: Record<string, string>; upstreamStatus?: number; code?: string; message: string;
   priceTier?: { inputTokens: string; upToInputTokens: number; thinking: boolean };
+  transportFailure?: UpstreamTransportFailure;
 };
 type StoredStart = { hash: string; result: RouteTestResult };
 
@@ -161,6 +163,7 @@ export function createRouteTests(options: { fetch?: typeof fetch; imageTransport
       }
     } catch (error) {
       result = { ...initial, status: sent ? 'unknown' : 'failed', ...(sent ? {} : { publicCostMicro: '0' }), code: !sent && error instanceof HttpError ? error.code : controller.signal.aborted ? 'TEST_TIMEOUT' : 'TEST_RESULT_UNCONFIRMED',
+        ...(sent && status === undefined ? { transportFailure: upstreamTransportFailure(error, controller.signal.aborted) } : {}),
         message: !sent && error instanceof HttpError ? error.message : controller.signal.aborted ? '检测超时，结果尚未确认；请查询原检测记录，不会自动重试。' : '检测结果尚未确认，请核对供应商记录；不会自动重试或切换备用。' };
     } finally { clearTimeout(timer); }
     const completedAt = now(); result = { ...result, requestSent: sent, ...(sent ? { executionStartedAt: startedAt.toISOString() } : {}), ...(status === undefined ? {} : { upstreamStatus: status }), completedAt: completedAt.toISOString(), durationMs: Math.max(0, completedAt.getTime() - startedAt.getTime()) };

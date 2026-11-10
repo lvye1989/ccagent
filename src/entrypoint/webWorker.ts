@@ -66,6 +66,7 @@ import { loadMcpConfigs } from "../services/mcp/config.js";
 import { clearServerCache, getActiveMcpConnections } from "../services/mcp/client.js";
 import { VERSION } from "../version.js";
 import { getCCAgentPath } from "../utils/paths.js";
+import { WebModelFiles, type ModelFile } from "./webModelFiles.js";
 import { listWorkspaceDocuments, resolveWorkspaceDocument } from "./webLibrary.js";
 import { loadMemoryHeaders } from "../context/memory/memdir.js";
 import { WebScheduleStore, type WebScheduledTask } from "./webSchedules.js";
@@ -181,7 +182,7 @@ type WebExecution = {
   startedAt: string;
   completedAt: string | null;
   reason: string | null;
-  tools: Array<{ id: string; name: string; startedAt: string; completedAt: string | null; isError?: boolean }>;
+  tools: Array<{ id: string; name: string; startedAt: string; completedAt: string | null; phase?: "preparing" | "running"; isError?: boolean; outcome?: "handoff"; detail?: string }>;
 };
 
 type WebSession = {
@@ -201,6 +202,7 @@ type WebSession = {
   lastTurnReason?: string;
   execution?: WebExecution;
   pending?: PendingInteraction;
+  modelFiles?: ModelFile[];
 };
 
 function isSessionStorageError(error: unknown): boolean {
@@ -250,14 +252,19 @@ function publish(session: WebSession, data: Record<string, unknown>): void {
     data = { ...data, startedAt: timestamp };
   }
   const execution = session.execution;
-  if (execution && (data.type === "tool_start" || data.type === "tool_done") && typeof data.id === "string" && typeof data.name === "string") {
+  if (execution && ["tool_preparing", "tool_start", "tool_done"].includes(String(data.type)) && typeof data.id === "string" && typeof data.name === "string") {
     let tool = execution.tools.find(item => item.id === data.id);
     if (!tool) {
       // The timestamp describes when this worker observed the tool call, not CPU execution time.
       tool = { id: data.id, name: data.name, startedAt: timestamp, completedAt: null };
       execution.tools.push(tool);
     }
-    if (data.type === "tool_done") { tool.completedAt = timestamp; tool.isError = data.isError === true; }
+    tool.phase = data.type === "tool_preparing" ? "preparing" : "running";
+    if (data.type === "tool_done") {
+      tool.completedAt = timestamp; tool.isError = data.isError === true;
+      if (data.outcome === "handoff") tool.outcome = "handoff";
+      if (typeof data.detail === "string") tool.detail = data.detail;
+    }
   }
   if (data.type === "turn_complete") {
     session.lastTurnReason = String(data.reason || "completed");
@@ -298,8 +305,25 @@ function waitForQuestion(session: WebSession, request: UserQuestionRequest): Pro
 export function summarizeEvent(event: QueryEngineEvent): Record<string, unknown> | null {
   switch (event.type) {
     case "text": return { type: "text", text: event.text };
-    case "tool_use_start": return { type: "tool_start", id: event.id, name: event.name };
-    case "tool_use_done": return { type: "tool_done", id: event.id, name: event.name, input: event.input, isError: event.result.isError === true };
+    case "tool_use_start": return { type: "tool_preparing", id: event.id, name: event.name };
+    case "tool_use_ready": return { type: "tool_start", id: event.id, name: event.name };
+    case "tool_use_done": {
+      let detail = "", outcome: "handoff" | undefined;
+      if (event.result.isError) {
+        detail = typeof event.result.content === "string" ? event.result.content : "工具返回错误，请核对执行记录。";
+        if (event.name === "RhinoSequence") {
+          try {
+            const report = JSON.parse(detail);
+            if (report.status === "handoff") {
+              outcome = "handoff";
+              detail = `批量执行已暂停。已执行 ${Array.isArray(report.executed_steps) ? report.executed_steps.length : 0} 步，请检查原因后继续剩余步骤。\n${typeof report.reason === "string" ? report.reason : ""}`;
+            }
+          } catch { /* Keep the bounded original error. */ }
+        }
+      }
+      return { type: "tool_done", id: event.id, name: event.name, input: event.input, isError: event.result.isError === true,
+        ...(outcome ? { outcome } : {}), ...(detail ? { detail: detail.slice(0, 2500) } : {}) };
+    }
     case "assistant_message": return { type: "assistant", message: event.message };
     case "tool_result_message": return { type: "tool_result", message: event.message };
     // The Web client consumes incremental events and restores history with
@@ -324,6 +348,7 @@ function sessionSnapshot(session: WebSession) {
   return {
     sessionId: session.id, model: state.model, mode: session.engine.getPermissionMode(), temporary: session.temporary, browserUrl: session.browserUrl ?? null,
     messages: state.messages, usage: state.totalUsage, busy: session.busy, team: session.team,
+    modelFiles: session.modelFiles ?? [],
     execution: session.execution ?? null, serverTime: new Date().toISOString(),
     lastEventId: session.nextEventId - 1, lastTurnReason: session.lastTurnReason ?? null,
     recentNotices: session.events.map((item) => item.data).filter((item) => item.type === "notice").slice(-5),
@@ -404,6 +429,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
   let model = await bootstrap(workspace);
   let permissions = await loadPermissionSettings(workspace);
   const sessions = new Map<string, WebSession>();
+  const modelFiles = new WebModelFiles();
   const deletedSessions = new Set<string>();
   let activeTurn: string | null = null;
   let teamOwner: string | null = null;
@@ -446,6 +472,16 @@ export async function runWebWorker(args: string[]): Promise<void> {
   // Source-mode entrypoints and the packaged binary have different parents.
   const chartsPath = path.join(webRoot, "../dist/charts.js");
 
+  async function deliverModelFile(session: WebSession, filePath: string, projectDirectory: string): Promise<void> {
+    if (deletedSessions.has(session.id)) return;
+    const file = await modelFiles.register(session.id, filePath, projectDirectory, session.temporary);
+    (session.modelFiles ??= []).push(file);
+    publish(session, { type: "model_file", file });
+    if (!file.persistent && !session.temporary) publish(session, {
+      type: "notice", tone: "error", message: "模型文件已保存，但文件入口暂时无法写入聊天记录。请复制卡片中的保存地址。",
+    });
+  }
+
   async function openSession(id: string): Promise<WebSession> {
     if (deletedSessions.has(id)) throw new Error("Session not found");
     const existing = sessions.get(id);
@@ -460,6 +496,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: restored.summary.model,
       toolContext: {
         cwd: sessionWorkspace, sessionId: id,
+        onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
       },
@@ -472,6 +509,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     session = {
       id, model: restored.summary.model, temporary: false, scheduled: false, team: await readSessionTeam(sessionWorkspace, id), engine, busy: false,
       restoredSnapshots: restored.fileHistorySnapshots,
+      modelFiles: await modelFiles.list(id),
       clients: new Set(), events: [], nextEventId: 1, persistenceUnavailable: false,
     };
     if (workspace !== sessionWorkspace || deletedSessions.has(id)) throw new Error("Session not found");
@@ -499,6 +537,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: selectedModel,
       toolContext: {
         cwd: workspace, sessionId: id, temporaryChat: temporary,
+        onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
       },
@@ -611,6 +650,23 @@ export async function runWebWorker(args: string[]): Promise<void> {
     await loadMcpPreferences(true);
     await bootstrapMcp(workspace);
     await refreshActivePlugins(workspace);
+  }
+
+  function taskConflict(session: WebSession) {
+    // Report only the owning conversation and fixed state, never tool inputs
+    // or the pending permission payload. Each worker belongs to one account.
+    const owner = activeTurn ? sessions.get(activeTurn) : session.busy ? session : teamOwner ? sessions.get(teamOwner) : undefined;
+    if (owner) {
+      const reason = owner.pending?.kind === "permission" ? "waiting_permission"
+        : owner.pending?.kind === "question" ? "waiting_question" : owner.busy ? "task_running" : "team_active";
+      const message = reason === "waiting_permission" ? "另一个任务正在等待工具授权，请查看该任务或停止后再发送。"
+        : reason === "waiting_question" ? "另一个任务正在等待你的回答，请查看该任务或停止后再发送。"
+        : reason === "team_active" ? "另一个对话的 Agent 团队仍在使用工作区，请先返回该对话结束团队。"
+        : "另一个任务正在执行，请查看该任务或停止后再发送。";
+      return { error: message, code: "TASK_BUSY", reason, activeSessionId: owner.id, canInterrupt: owner.busy };
+    }
+    if (activeTurn) return { error: "白板任务正在执行，请在白板中查看或停止后再发送。", code: "TASK_BUSY", reason: "whiteboard_running", activeSessionId: null, canInterrupt: false };
+    return { error: "工作区或配置操作正在进行，请稍后再发送。", code: "TASK_BUSY", reason: "configuration_busy", activeSessionId: null, canInterrupt: false };
   }
 
   async function runTurn(session: WebSession, input: string): Promise<boolean> {
@@ -1295,6 +1351,13 @@ export async function runWebWorker(args: string[]): Promise<void> {
         return json(res, 201, { sessionId: session.id, model: session.model, temporary: session.temporary, team: session.team, snapshot: sessionSnapshot(session) });
       }
 
+      const modelFileMatch = /^\/api\/sessions\/([0-9a-f-]{36})\/model-files\/([0-9a-f-]{36})\/open$/.exec(route);
+      if (modelFileMatch && req.method === "POST") {
+        await openSession(modelFileMatch[1]!);
+        if (activeTurn || getRunningAsyncAgents().length) return json(res, 409, { error: "请等待当前建模任务完成后再打开模型，以免切换正在操作的文档。" });
+        await modelFiles.open(modelFileMatch[1]!, modelFileMatch[2]!);
+        return json(res, 200, { opened: true });
+      }
       const match = /^\/api\/sessions\/([0-9a-f-]{36})(?:\/(events|messages|interrupt|respond|model|mode|browser|team))?$/.exec(route);
       if (match) {
         const session = await openSession(match[1]!);
@@ -1335,7 +1398,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
           const input = typeof body.text === "string" ? body.text.trim() : "";
           if (!input || input.length > 50000) return json(res, 400, { error: "Message must be 1–50000 characters" });
           if (/^\/(resume|clear)\b/i.test(input)) return json(res, 400, { error: "Use the task list or New task button to switch conversations" });
-          if (activeTurn || scheduleDispatching || session.busy || pluginMutationBusy || (teamOwner && teamOwner !== session.id)) return json(res, 409, { error: "Another task, team or configuration operation is currently running" });
+          if (activeTurn || scheduleDispatching || session.busy || pluginMutationBusy || (teamOwner && teamOwner !== session.id)) return json(res, 409, taskConflict(session));
           // Reserve the process-wide file-history store before returning 202.
           activeTurn = session.id;
           void runTurn(session, input);

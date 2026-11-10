@@ -134,6 +134,8 @@ async function main(): Promise<void> {
   assert(["create_curve","surface","solid_edit","mesh","subd","group_manage"].every(a => (RHINO_ACTIONS as readonly string[]).includes(a)), "common modeling action families are registered");
   const loftInput = { action: "loft", observation_id: "obs-1", intent: "Reference tower", parameters: { sections: [{z:0,width:44,depth:44},{z:180,width:30.8,depth:30.8},{z:300,width:38,depth:38}], cap:false, crown_dip:2, expected_units:"Meters" } };
   assert(parseRhinoActionInput(loftInput, process.cwd()).action === "loft", "numerical section loft parses");
+  throws(() => parseRhinoActionInput({ ...loftInput, parameters: { ...loftInput.parameters, cap: true } }, process.cwd()), "non-planar", "dipped crown cap conflict is rejected before Jev or a Rhino mutation");
+  assert(parseRhinoActionInput({ ...loftInput, parameters: { ...loftInput.parameters, cap: true, crown_dip: 0 } }, process.cwd()).parameters.cap === true, "explicit planar crown can request capping");
   throws(() => parseRhinoActionInput({ ...loftInput, parameters: { target_guids: Array.from({length:65}, (_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`) } }, process.cwd()), "2-64", "curve loft and numerical loft share the 64-profile limit");
   throws(() => parseRhinoActionInput({ ...loftInput, parameters: {sections:[{z:10,width:4,depth:4},{z:0,width:3,depth:3}]} }, process.cwd()), "strictly increasing", "reversed profiles are rejected before Rhino mutation");
   throws(() => parseRhinoActionInput({ action:"curtain_wall", observation_id:"obs-1", intent:"facade", parameters:{target_guids:["00000000-0000-4000-8000-000000000001"],floors:200,bays_per_side:80} }, process.cwd()), "30000 panel", "unbounded facade generation is rejected");

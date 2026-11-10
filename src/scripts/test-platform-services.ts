@@ -125,6 +125,10 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
   call = { owner: user.id, body, taskId, status: JSON.stringify(body).includes("PENDING_STREAM_CASE") ? "pending" : "settled", result: resultText, contentType, id: randomUUID() }; calls.set(requestId, call);
   if (JSON.stringify(body).includes("DROP_CONNECTION_CASE")) { req.socket.destroy(); return true; }
   res.setHeader("content-type", contentType); res.setHeader("x-ccagent-call-id", call.id);
+  if (JSON.stringify(body).includes("DROP_PARTIAL_CASE")) {
+    res.write(Buffer.from(resultText).subarray(0, 31));
+    setTimeout(() => req.socket.destroy(), 20); return true;
+  }
   if (call.status === "pending") { res.write("event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n"); setTimeout(() => req.socket.destroy(), 20); return true; }
   res.end(resultText); return true;
 } });
@@ -232,6 +236,20 @@ try {
     const response = await client.call("responses", input, { taskId: "pending-task" }); await assert.rejects(response.text());
     await assert.rejects(client.call("responses", input, { taskId: "pending-task" }), /原调用仍在执行/);
     assert.equal(modelRequests - before, 1);
+  });
+  await test("a settled partial response resumes its saved bytes once without duplicate content or billing", async () => {
+    for (const stream of [false, true]) {
+      const before = suppliers, posts = modelRequests, checkedBefore = lookups;
+      const response = await client.call("responses", { ...baseInput("DROP_PARTIAL_CASE"), stream });
+      const text = await response.text();
+      assert.equal(suppliers - before, 1);
+      assert.equal(modelRequests - posts, 2);
+      assert(lookups > checkedBefore);
+      assert.equal(sent.at(-1)!.requestId, sent.at(-2)!.requestId);
+      assert.equal(text, calls.get(sent.at(-1)!.requestId)!.result);
+      const records = JSON.parse(await readFile(servicePaths().journal, "utf8"));
+      assert.equal(records.find((item: any) => item.requestId === sent.at(-1)!.requestId).state, "received");
+    }
   });
   await test("large JSON uses private upload, exact required headers, finalization and cleanup", async () => {
     const before = uploads, deletedBefore = deletes;

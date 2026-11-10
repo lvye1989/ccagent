@@ -177,6 +177,9 @@ function validateActionParameters(
       if (parameters.center !== undefined) assertPoint(parameters.center, "center");
       for (const [key, max] of [["corner_ratio", 0.4], ["concavity", 0.15], ["crown_dip", 20]] as const) if (parameters[key] !== undefined) assertNumber(parameters[key], key, { min: 0, max });
       assertBoolean(parameters.cap, "cap");
+      if (parameters.sections && parameters.cap === true && Number(parameters.crown_dip ?? 0) > 0) {
+        throw new Error("A dipped crown is non-planar and cannot be capped. Use cap:false to preserve the requested crown, or explicitly choose a planar crown with crown_dip:0.");
+      }
       for (const key of ["name", "layer", "expected_units"]) if (parameters[key] !== undefined) parameters[key] = requiredString(parameters[key], key, 128);
       break;
     }
@@ -566,6 +569,14 @@ export const rhinoActionTool: Tool = {
         observation,
         context.abortSignal,
       );
+      if (parsed.action === "import_export" && parsed.parameters.operation === "export"
+        && result.operation === "export" && typeof result.file_path === "string") {
+        try { await context.onModelExport?.(result.file_path, getRhinoProjectDirectory()); }
+        catch (error) {
+          // Delivery failure must not turn an already saved export into a failed modeling action.
+          result.delivery_warning = `模型已保存，但文件入口未能生成：${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
       return {
         content: JSON.stringify({
           ...result,
@@ -578,7 +589,7 @@ export const rhinoActionTool: Tool = {
             destructive: decision.destructive,
             expected_progress: decision.expectedProgress,
           },
-          next_step: "Call RhinoObserve again before another RhinoAction.",
+          next_step: "Call RhinoObserve again before another RhinoAction. After a successful export, include the actual file_path and filename in the final reply; the Web chat also displays a clickable model file card.",
         }, null, 2),
         ...(result.solution_ok === false ? {isError:true} : {}),
       };

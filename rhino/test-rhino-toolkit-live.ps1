@@ -1,9 +1,9 @@
-param([switch]$Execute)
+param([switch]$Execute, [ValidateSet('toolkit','architecture')][string]$Suite = 'toolkit')
 $ErrorActionPreference = 'Stop'
 if (-not $Execute) { throw 'Pass -Execute to run native Rhino regressions in an isolated headless document.' }
 $running = @(Get-Process -Name Rhino -ErrorAction SilentlyContinue)
 if ($running.Count -ne 1) { throw 'Exactly one running Rhino instance is required.' }
-$testPath = Join-Path $PSScriptRoot 'test_toolkit_live.py'
+$testPath = Join-Path $PSScriptRoot ("test_{0}_live.py" -f $Suite)
 $testStartedUtc = [DateTime]::UtcNow
 $rhino = New-Object -ComObject Rhino.Interface.8
 try {
@@ -13,7 +13,7 @@ try {
 } finally {
     try { $rhino.ReleaseWithoutClosing = 1 } catch {}
 }
-$reportPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CCAGENT-Rhino/native-tests/toolkit-live-results.json'
+$reportPath = Join-Path ([Environment]::GetFolderPath('Desktop')) ("CCAGENT-Rhino/native-tests/{0}-live-results.json" -f $Suite)
 if ((Get-Item -LiteralPath $reportPath).LastWriteTimeUtc -lt $testStartedUtc) { throw 'Rhino did not produce a fresh test report; refusing stale results.' }
 $result = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
 Write-Output ("Native tests: {0} passed, {1} failed" -f $result.passed, $result.failed)

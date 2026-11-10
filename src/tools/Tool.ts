@@ -76,6 +76,8 @@ export interface ToolContext {
   strictNotificationScope?: boolean;
   /** Temporary Web chat: suppress durable conversation memory. */
   temporaryChat?: boolean;
+  /** Runtime-only delivery hook for verified native model exports; inherited by child agents. */
+  onModelExport?: (filePath: string, projectDirectory: string) => Promise<void>;
   /** Web conversation preference; undefined retains the CLI's global default. */
   agentTeamsAllowed?: boolean;
   sessionInstructions?: string;

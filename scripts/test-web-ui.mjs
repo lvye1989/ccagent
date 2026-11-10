@@ -26,6 +26,8 @@ const skill = { name: "test-skill", description: "Skill", source: "project", ena
 const teams = [{ id: "qa-team", name: "QA Team", description: "Evidence", enabled: true, roles: [{ name: "reviewer", agentType: "qa", prompt: "Check facts" }] }];
 let teamEnabled = true;
 const sessionId = "11111111-1111-4111-8111-111111111111";
+const modelFile = { id: "44444444-4444-4444-8444-444444444444", name: "中国尊模型.3dm", path: "C:\\Users\\Test\\Desktop\\CCAGENT-Rhino\\中国尊\\models\\中国尊模型.3dm", persistent: true };
+modelFile.openUrl = `/api/sessions/${sessionId}/model-files/${modelFile.id}/open`;
 const removableSessionId = "33333333-3333-4333-8333-333333333333";
 let recentSessions = [{ sessionId, firstPrompt: "保留的历史任务" }, { sessionId: removableSessionId, firstPrompt: "待删除任务" }];
 let sessionMode = "default", failUpload = false, failSubmit = false, effortLevel = "", useCreationSnapshot = true;
@@ -76,6 +78,7 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === `/api/sessions/${sessionId}/mode`) { sessionMode = payload.mode; data = {}; }
   else if (route === `/api/sessions/${sessionId}/messages`) { if (failSubmit) throw new Error("Fixture submit failure"); data = { accepted: true }; }
   else if (route === `/api/sessions/${sessionId}/interrupt`) data = { interrupted: true };
+  else if (route === modelFile.openUrl) data = { opened: true };
   else if (route === "/api/composer-tools") data = { commands: [{ name: "test-skill", description: "Fixture skill", kind: "技能" }, { name: "help", description: "Help", kind: "命令" }] };
   else if (route === "/api/files/upload") { if (failUpload) throw new Error("Fixture upload failure"); data = { path: `.ccagent/attachments/id/${payload.name}`, name: payload.name, size: 4 }; }
   else if (route.startsWith("/api/files")) {
@@ -218,14 +221,36 @@ try {
   assert.match(document.querySelector(".turn-elapsed").textContent, /已处理 3分/, "Elapsed uses the server clock");
   emit({ type: "tool_done", id: "read-state", name: "Read", isError: false, timestamp: new Date().toISOString() });
   assert.match($("thread-status-label").textContent, /正在整理结果/);
-  lastEventSource.onmessage({ data: JSON.stringify({ type: "tool_start", id: "failed-image", name: "ReadImage" }) });
+  emit({ type: "tool_preparing", id: "failed-image", name: "ReadImage" });
+  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("ReadImage")).querySelector(".tool-state").textContent, "准备调用");
   const completedAt = new Date(Date.parse(startedAt) + 125000).toISOString();
   emit({ type: "turn_complete", reason: "model_error", completedAt }); await settle();
-  assert.match($("thread-status-label").textContent, /失败/); assert(![...document.querySelectorAll(".tool-state")].some((node) => ["执行中", "调用中"].includes(node.textContent)), "Failed turns leave no tool card looking active");
-  const finishedExecution = { ...runningExecution, completedAt, reason: "model_error", tools: [{ ...runningExecution.tools[0], completedAt, isError: false }, { id: "failed-image", name: "ReadImage", startedAt, completedAt: null }] };
+  assert.match($("thread-status-label").textContent, /模型回复中断/); assert(![...document.querySelectorAll(".tool-state")].some((node) => ["执行中", "调用中", "准备调用"].includes(node.textContent)), "Failed turns leave no tool card looking active");
+  const finishedExecution = { ...runningExecution, completedAt, reason: "model_error", tools: [{ ...runningExecution.tools[0], completedAt, isError: false }, { id: "failed-image", name: "ReadImage", startedAt, completedAt: null, phase: "preparing" }] };
   emit({ type: "execution_state", execution: finishedExecution, serverTime: new Date(Date.now() + 3600000).toISOString() });
   assert.equal(document.querySelector(".turn-elapsed").textContent, "已处理 2分 5秒", "Completed elapsed stays frozen across reconnect and server clock changes");
-  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("ReadImage")).querySelector(".tool-state").textContent, "未完成", "An interrupted tool is not marked as completed");
+  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("ReadImage")).querySelector(".tool-state").textContent, "未执行", "A draft tool interrupted during model generation was never executed");
+  emit({ type: "turn_started", turnId: "handoff-state", startedAt });
+  emit({ type: "tool_preparing", id: "sequence-state", name: "RhinoSequence" });
+  emit({ type: "tool_start", id: "sequence-state", name: "RhinoSequence" });
+  assert.equal(document.querySelectorAll(".tool-card").length, 3, "Dispatch readiness updates the draft card rather than duplicating it");
+  emit({ type: "tool_done", id: "sequence-state", name: "RhinoSequence", isError: true, outcome: "handoff", detail: "审查后继续 <img src=x>" });
+  const handoffCard = [...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("RhinoSequence"));
+  assert.equal(handoffCard.querySelector(".tool-state").textContent, "已暂停");
+  assert.equal(handoffCard.querySelector(".tool-detail pre").textContent, "审查后继续 <img src=x>");
+  assert.equal(handoffCard.querySelector("img"), null, "Tool diagnostics are rendered as literal text");
+  assert(!handoffCard.classList.contains("error"));
+  const beforeModelFile = calls.length;
+  emit({ type: "model_file", file: modelFile });
+  emit({ type: "model_file", file: modelFile });
+  assert.equal(document.querySelectorAll(".model-file-card").length, 1, "Event replay never duplicates an export card");
+  assert.equal(document.querySelector(".model-file-path").textContent, modelFile.path);
+  assert.equal(calls.length, beforeModelFile, "Receiving a file never automatically opens Rhino");
+  await click(".model-file-open");
+  assert.equal(calls.at(-1).route, modelFile.openUrl);
+  emit({ type: "model_file", file: { ...modelFile, id: "55555555-5555-4555-8555-555555555555", openUrl: "javascript:alert(1)" } });
+  assert.equal(document.querySelectorAll(".model-file-card").length, 1, "Only the current session's exact open route can be rendered");
+  emit({ type: "turn_complete", reason: "completed" });
   console.log("Execution DOM: early-snapshot ordering, server-clock elapsed, current tools, reconnect deduplication, terminal tool state and frozen duration passed.");
   lastEventSource.onmessage({ data: JSON.stringify({ type: "model", model: "ccagent:fixture" }) });
   lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
@@ -308,8 +333,11 @@ try {
   const staleSource = lastEventSource;
   recoveredSessionSnapshot = {
     sessionId, mode: sessionMode, model: "fixture", team: "off", busy: true, lastEventId: 901,
+    modelFiles: [modelFile],
     messages: [
       { role: "user", content: [{ type: "text", text: "断线前带图的任务" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "historical-failure", name: "RhinoAction", input: {} }, { type: "tool_use", id: "historical-success", name: "RhinoObserve", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "historical-failure", is_error: true, content: "原失败原因" }, { type: "tool_result", tool_use_id: "historical-success", content: "ok" }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "internal-result", content: "工具结果不能作为用户消息显示" }] },
       { role: "assistant", content: "断线期间完整回复" },
     ],
@@ -331,6 +359,10 @@ try {
   assert.equal(calls.slice(beforeGapRecovery).filter(call => call.route === `/api/sessions/${sessionId}`).length, 2, "A replay gap retries a transient read failure without duplicate queued reloads");
   assert.equal(calls.slice(beforeGapRecovery).filter(call => call.route.endsWith("/messages")).length, 0, "Snapshot recovery never resubmits a task");
   assert.match($("timeline").textContent, /断线期间完整回复/);
+  assert.equal(document.querySelectorAll(".model-file-card").length, 1, "File cards survive history reload and response interruption");
+  assert.equal(document.querySelector(".model-file-path").textContent, modelFile.path);
+  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("RhinoAction")).querySelector(".tool-state").textContent, "失败", "History restores the recorded failure rather than inventing execution success");
+  assert.equal([...document.querySelectorAll(".tool-card")].find(row => row.textContent.includes("RhinoObserve")).querySelector(".tool-state").textContent, "已完成");
   assert.match($("timeline").textContent, /断线前带图的任务/);
   assert(!$("timeline").textContent.includes("工具结果不能作为用户消息显示"));
   assert(!$("timeline").textContent.includes("过期连接不能写入"));

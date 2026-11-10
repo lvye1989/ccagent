@@ -40,6 +40,12 @@ export async function startWhiteboardAIFixture() {
         res.write(`data: ${JSON.stringify({ id: `fixture-${calls}`, choices: [{ index: 0, delta: { role: "assistant", content: "WEB_RESUMED_EXPLICITLY" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 } })}\n\ndata: [DONE]\n\n`);
         res.end(); return;
       }
+      if (lastUser.includes("WAIT_WEB_PERMISSION")) {
+        const delta = { role: "assistant", tool_calls: [{ index: 0, id: "permission-write", type: "function", function: { name: "Write", arguments: JSON.stringify({ file_path: path.join(workspace, "permission-must-not-exist.txt"), content: "Never approve this isolated fixture write" }) } }] };
+        res.write(`data: ${JSON.stringify({ id: `fixture-${calls}`, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+        res.end(`data: ${JSON.stringify({ id: `fixture-${calls}`, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 } })}\n\ndata: [DONE]\n\n`);
+        return;
+      }
       if (lastUser.includes("HOLD_AI_DRAWING")) {
         held++; res.flushHeaders(); const pulse = setInterval(() => res.write(": waiting\n\n"), 1000);
         res.on("close", () => { clearInterval(pulse); held--; }); return;

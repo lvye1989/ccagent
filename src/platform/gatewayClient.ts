@@ -4,6 +4,7 @@ import { requirePlatformScope, getPlatformAccountClient, getPlatformSessionFile 
 import { AccountError, type PlatformAccountClient } from "./accountClient.js";
 import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
 import { platformRequest, PlatformTransportError } from "./transport.js";
+import { recoverableResponseBody } from "./recoverableResponse.js";
 import { currentPlatformTaskId } from "./taskScope.js";
 import { platformKeyPattern, readServiceBinding, readServiceConfiguration, serviceConfigurationSchema, serviceCredentialStore, servicePaths, serviceRouteSchema,
   validateServiceRoles, catalogDefaultRoles, type OfficialRole, type ServiceConfiguration, type ServiceCredential, type OfficialServiceRoute, type ServiceRoles } from "./serviceState.js";
@@ -376,17 +377,22 @@ export class PlatformGatewayClient {
       await checked(response);
       const callId = response.headers.get("x-ccagent-call-id");
       if (callId && uuid.test(callId)) await mark({ callId });
-      const reader = response.body?.getReader();
-      if (!reader) throw new PlatformTransportError();
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          try {
-            const item = await reader.read();
-            if (!item.done) { controller.enqueue(item.value); return; }
-            await mark({ state: "received" }); controller.close(); await cleanup();
-          } catch { await status().catch(() => null); await mark({ state: "unknown" }).catch(() => {}); controller.error(new PlatformServiceError(`调用结果尚未确认，请查看用户中心。请求编号：${record.requestId}`, "CALL_RESULT_UNKNOWN", 0, record.requestId)); }
+      if (!response.body) throw new PlatformTransportError();
+      const body = recoverableResponseBody(response, {
+        signal: options.signal,
+        replay: async () => {
+          if (endpoint === "images/tasks" || options.signal?.aborted) return null;
+          const previous = await status().catch(() => null);
+          if (!previous || !["settled", "released"].includes(String(previous.status)) || previous.resultAvailable !== true || options.signal?.aborted) return null;
+          // Same identity, body and price pins: this fetches stored bytes only.
+          return checked(await send());
         },
-        async cancel() { await reader.cancel().catch(() => {}); await mark({ state: "unknown" }).catch(() => {}); },
+        complete: async () => { await mark({ state: "received" }); await cleanup(); },
+        interrupted: async () => {
+          await mark({ state: "unknown" }).catch(() => {});
+          return new PlatformServiceError(`模型回复接收中断，尚未取回完整结果。已完成的工具操作会保留，请先核对原调用状态。请求编号：${record.requestId}`, "CALL_RESULT_UNKNOWN", 0, record.requestId);
+        },
+        cancelled: async () => { await mark({ state: "unknown" }).catch(() => {}); },
       });
       return new Response(body, { status: response.status, headers: response.headers });
     } catch (error) {

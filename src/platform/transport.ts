@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
+import { nativeNetworkAgent } from "./nativeNetwork.js";
 
 export class PlatformTransportError extends Error {
   constructor() { super("官方服务连接中断，请查看调用状态后再重试。"); this.name = "PlatformTransportError"; }
@@ -17,7 +18,7 @@ export function platformRequest(url: URL, options: {
     let settled = false, size = 0;
     let responseBody: ReadableStreamDefaultController<Uint8Array> | undefined;
     const request = transport.request(url, {
-      method: options.method ?? "GET", rejectUnauthorized: true,
+      method: options.method ?? "GET", rejectUnauthorized: true, agent: nativeNetworkAgent(url),
       ...(url.hostname === "localhost" && url.protocol === "http:" ? { hostname: "127.0.0.1" } : {}),
       headers: { ...options.headers, ...(options.body ? { "content-length": String(options.body.byteLength) } : {}) },
     });

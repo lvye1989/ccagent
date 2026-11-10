@@ -15,7 +15,11 @@ import { summarizeEvent } from "../entrypoint/webWorker.js";
 
 assert.equal(summarizeEvent({ type: "messages_updated", get messages(): never { throw new Error("Full history must not be read for live SSE"); } }), null);
 assert.deepEqual(summarizeEvent({ type: "text", text: "first chunk" }), { type: "text", text: "first chunk" });
-assert.deepEqual(summarizeEvent({ type: "tool_use_start", id: "tool-1", name: "Read" }), { type: "tool_start", id: "tool-1", name: "Read" });
+assert.deepEqual(summarizeEvent({ type: "tool_use_start", id: "tool-1", name: "Read" }), { type: "tool_preparing", id: "tool-1", name: "Read" });
+assert.deepEqual(summarizeEvent({ type: "tool_use_ready", id: "tool-1", name: "Read" }), { type: "tool_start", id: "tool-1", name: "Read" });
+const sequenceHandoff = summarizeEvent({ type: "tool_use_done", id: "sequence-1", name: "RhinoSequence", input: {}, result: { isError: true, content: JSON.stringify({ status: "handoff", reason: "Jev requires review", executed_steps: ["tower"] }) } });
+assert.equal(sequenceHandoff?.outcome, "handoff");
+assert.match(String(sequenceHandoff?.detail), /已执行 1 步/);
 
 const root = path.resolve(import.meta.dirname, "../..");
 const entry = path.join(root, "dist", "ccagent.js");
