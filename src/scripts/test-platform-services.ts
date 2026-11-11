@@ -99,6 +99,7 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
   assert.match(requestId, /^[a-f0-9-]{36}$/); assert(taskId && taskId !== "undefined");
   modelRequests++; sent.push({ body, requestId, taskId, path: url.pathname, pins: Object.fromEntries(['x-ccagent-price-version','x-ccagent-price-fingerprint','x-ccagent-fallback-route','x-ccagent-fallback-price-version','x-ccagent-fallback-price-fingerprint'].map(name => [name, req.headers[name]])) });
   if (JSON.stringify(body).includes("INSUFFICIENT_CASE")) return reply(402, { code: "INSUFFICIENT_BALANCE", message: keys.get(user.id) });
+  if (body.input === "UPSTREAM_BALANCE_CASE") return reply(502, { code: "UPSTREAM_INSUFFICIENT_BALANCE", message: keys.get(user.id) });
   if (typeof body.input === "string" && body.input.startsWith("GATEWAY_ERROR_CASE:")) return reply(400, { code: body.input.slice("GATEWAY_ERROR_CASE:".length), message: `SUPPLIER_TEXT_MUST_NOT_REACH_UI:${keys.get(user.id)}`, fields: ["SUPPLIER_FIELD_MUST_NOT_REACH_UI"] });
   let call = calls.get(requestId);
   if (call) {
@@ -212,12 +213,26 @@ try {
     for (const [code, message] of cases) {
       await assert.rejects(client.call("responses", baseInput(`GATEWAY_ERROR_CASE:${code}`)), (error: unknown) => {
         assert(error instanceof PlatformServiceError);
-        assert.equal(error.code, code); assert.equal(error.status, 400); assert.equal(error.message, message);
+        assert.equal(error.code, code); assert.equal(error.status, 400);
+        assert.match(error.requestId ?? "", /^[a-f0-9-]{36}$/);
+        assert.equal(error.message, `${message} 请求编号：${error.requestId}`);
         assert(!JSON.stringify(error).includes(key)); assert(!error.message.includes("SUPPLIER_"));
         return true;
       });
     }
     assert.equal(suppliers, before, "Rejected validation requests never reach the synthetic supplier");
+  });
+  await test("upstream balance failure is actionable, uncharged and terminal without exposing secrets", async () => {
+    const requestId = randomUUID(), before = modelRequests;
+    await assert.rejects(client.call("responses", baseInput("UPSTREAM_BALANCE_CASE"), {requestId}), (error: unknown) => {
+      assert(error instanceof PlatformServiceError);
+      assert.equal(error.code, "UPSTREAM_INSUFFICIENT_BALANCE"); assert.equal(error.requestId, requestId);
+      assert.match(error.message, /供应商.*管理员.*无需充值 CCAGENT 用户钱包.*未扣费/);
+      assert(!error.message.includes(key)); return true;
+    });
+    assert.equal(modelRequests - before, 1, "An unfunded supplier does not trigger retries");
+    const records = JSON.parse(await readFile(servicePaths().journal, "utf8"));
+    assert.equal(records.find((record: any) => record.requestId === requestId).state, "rejected", "A confirmed rejection is not an unresolved billable call");
   });
   await test("native request identity and result replay execute one synthetic supplier operation", async () => {
     const requestId = randomUUID(), input = baseInput("SYNTHETIC_PROMPT_NOT_STORED"), before = suppliers;

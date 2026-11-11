@@ -124,7 +124,17 @@
 .message.assistant { font-size: 14px; line-height: 1.7; }
 .message.assistant { display: flex; align-items: flex-start; gap: 12px; padding: 5px 0 9px; }
 .message.assistant .message-avatar { display: none; }
-.turn-activity { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 0 0 auto; min-height: 38px; margin-top: 12px; padding-bottom: 9px; border-bottom: 1px solid #ececec; color: #909090; font-size: 13px; line-height: 20px; }
+.turn-activity { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; min-width: 0; margin-top: 12px; color: #909090; font-size: 13px; line-height: 20px; }
+.turn-activity-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; padding-bottom: 9px; border-bottom: 1px solid #ececec; }
+.turn-live-tool { min-height: 40px; padding: 6px 0; }
+.turn-live-status { color: #777; font-size: 12px; }
+.tool-history { min-width: 0; font-size: 12px; }
+.tool-history > summary { width: fit-content; cursor: pointer; padding: 4px 0; color: #888; }
+.tool-history > summary:hover { color: #444; }
+.tool-history > summary:focus-visible { outline: 2px solid #8375d8; outline-offset: 3px; border-radius: 3px; }
+.tool-history-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 6px 12px; border-left: 1px solid #ededed; margin: 4px 0; }
+.turn-activity [hidden] { display: none !important; }
+.tool-duration { color: #999; font-size: 11px; }
 .turn-outcome { flex: 0 0 auto; font-size: 12px; color: #929292; }
 .turn-active .turn-outcome { color: #666; }
 .tool-card { flex: 0 0 auto; min-width: 0; gap: 7px; padding: 3px 0; border: 0; border-radius: 0; background: transparent; color: #858585; font-size: 12px; line-height: 20px; }
@@ -137,6 +147,30 @@
 .tool-card.error .tool-icon { color: #b45d55; background: transparent; }
 .tool-card.error .tool-state { color: #b45d55; }
 .tool-card { flex-wrap: wrap; }
+#account-menu, .version-updates-entry { position: relative; }
+.has-version-update::after { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #e34c4c; top: 2px; right: 2px; border: 2px solid #fff; }
+.version-updates-entry.has-version-update::after { top: 50%; right: 12px; transform: translateY(-50%); }
+.version-updates-dialog { width: min(620px, 90vw); max-height: 82vh; overflow: auto; border: 1px solid #e2e2e2; border-radius: 16px; padding: 28px; color: #292929; background: white; box-shadow: 0 18px 70px #14233830; }
+.version-updates-dialog::backdrop { background: #17233c45; }
+.version-updates-dialog h2 { font-size: 21px; margin: 0 0 12px; }
+.version-updates-dialog h3 { font-size: 17px; margin-top: 24px; overflow-wrap: anywhere; }
+.version-updates-dialog [role=status], .version-release-date { color: #777; font-size: 12px; }
+.version-release-notes { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; margin: 18px 0 24px; }
+.version-download { display: inline-block; padding: 10px 18px; border-radius: 8px; background: #222; color: white; text-decoration: none; font-size: 13px; }
+.version-updates-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 26px; }
+.version-updates-actions button { border: 1px solid #ddd; border-radius: 7px; padding: 8px 15px; background: white; cursor: pointer; }
+.tool-command, .tool-progress-text { flex-basis: 100%; min-width: 0; margin-left: 24px; color: #8b8b8b; font-size: 12px; line-height: 1.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-command { font-family: Consolas, "Cascadia Code", monospace; }
+.tool-progress-text { color: #666; }
+.turn-live-tool .tool-running .tool-icon { animation: tool-pulse 1.6s ease-in-out infinite; }
+@keyframes tool-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .turn-live-tool .tool-running .tool-icon { animation: none; } }
+.generated-image-result { width: min(100%, 640px); margin: 15px 0 20px; }
+.generated-image-preview { display: block; width: 100%; padding: 0; overflow: hidden; border: 1px solid #e8e8e8; border-radius: 12px; background: #f7f7f7; cursor: zoom-in; }
+.generated-image-preview img { display: block; max-width: 100%; max-height: 500px; width: 100%; object-fit: contain; }
+.generated-image-result figcaption { display: flex; align-items: baseline; gap: 16px; margin-top: 8px; font-size: 12px; }
+.generated-image-result figcaption button { min-width: 0; border: 0; padding: 0; color: #666; background: transparent; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.generated-image-result figcaption a { flex-shrink: 0; color: #555; }
 .tool-detail { flex-basis: 100%; min-width: 0; padding-left: 24px; }
 .tool-detail summary { cursor: pointer; color: #777; }
 .tool-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; margin: 6px 0; font: inherit; }

@@ -231,8 +231,11 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
       if (!response) throw new Error('UPSTREAM_RESPONSE_MISSING');
       if (!response.ok) {
         await response.body?.cancel();
-        if (response.status >= 400 && response.status < 500 && response.status !== 408) await finishUsage({ userId: current.user.id, reservationId: reservation.id, charged: 0n, release: true, usage: { reason: 'supplier_rejected', attempts, ...execution() } });
+        if (response.status >= 400 && response.status < 500 && response.status !== 408) await finishUsage({ userId: current.user.id, reservationId: reservation.id, charged: 0n, release: true, usage: { reason: 'supplier_rejected', upstreamStatus: response.status, attempts, ...execution() } });
         else await pending('supplier_http_unknown');
+        // An upstream 402 is an operator issue, not a request to top up the user's wallet.
+        // Return it only after releasing this call's authorization; never expose supplier bodies.
+        if (response.status === 402) throw new HttpError(502, 'UPSTREAM_INSUFFICIENT_BALANCE', '官方模型供应商余额或额度不足，请联系管理员补充上游额度。本次调用未扣费。');
         throw new HttpError(502, 'UPSTREAM_REQUEST_FAILED', '供应商暂未完成请求，请查看调用状态后重试。');
       }
       if (!active.prepared.streaming) {

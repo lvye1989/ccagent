@@ -58,6 +58,8 @@ export interface ToolContext {
   officialVisionOnly?: boolean;
   /** Entrypoint-owned application policy; never supplied or disabled by model input. */
   applicationProtection?: boolean;
+  /** Verified main-conversation identity; a child must not substitute its own model. */
+  conversationMainModel?: string;
   /** Abort signal for cancellation */
   abortSignal?: AbortSignal;
   /** Callback to switch permission mode at runtime (set by QueryEngine). */
@@ -80,6 +82,8 @@ export interface ToolContext {
   temporaryChat?: boolean;
   /** Runtime-only delivery hook for verified native model exports; inherited by child agents. */
   onModelExport?: (filePath: string, projectDirectory: string) => Promise<void>;
+  /** Runtime-owned, bounded progress updates; never a model-controlled callback. */
+  onToolProgress?: (progress: { id: string; name: string; detail: string }) => void;
   /** Web conversation preference; undefined retains the CLI's global default. */
   agentTeamsAllowed?: boolean;
   sessionInstructions?: string;

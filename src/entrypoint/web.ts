@@ -362,6 +362,15 @@ export async function runWebServer(args: string[]): Promise<void> {
           } finally { loginBusy.delete(lockKey); if (action === "login" && !signedIn && !native) locals.delete(local.id); }
         }
         const local = await localClient(req);
+        if (req.method === "GET" && route === "/api/account/releases") {
+          const revision = local.revision;
+          const session = await local.client.requireSession();
+          const response = await local.client.serviceRequest("/api/account/releases", session.user.id, { timeoutMs: 12000, maximumBytes: 65536 });
+          if (local.revision !== revision || local.closing || local.loggingOut || loginBusy.has(local.id)) throw new AccountError("当前账户已改变。", "account_changed", 401);
+          if (!response.ok) throw new AccountError("版本信息暂时不可用，请稍后重试。", "release_unavailable", response.status === 401 || response.status === 403 ? response.status : 503);
+          const value = await response.json() as { release?: unknown };
+          return json(res, 200, { release: value.release ?? null, currentVersion: VERSION, userId: session.user.id, origin: local.client.origin });
+        }
         if (req.method === "GET" && route === "/api/account/access") {
           const revision = local.revision;
           const unchanged = () => !stopping && !local.closing && !local.loggingOut && !loginBusy.has(local.id)

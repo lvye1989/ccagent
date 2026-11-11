@@ -92,7 +92,7 @@ export function createImagesGateway(options: {
       }
       createSent = true;
       const result = await client.create(route.upstreamModel, input, urls, controller.signal);
-      if (result.rejected) await settle({ userId: value.userId, reservationId: value.id, charged: 0n, release: true, usage: { imageTask: { version: 1, status: 'failed', code: 'IMAGE_SUPPLIER_REJECTED' } } });
+      if (result.rejected) await settle({ userId: value.userId, reservationId: value.id, charged: 0n, release: true, usage: { imageTask: { version: 1, status: 'failed', code: result.failureCode || 'IMAGE_SUPPLIER_REJECTED' } } });
       else await update(value, { version: 1, status: result.taskId ? 'queued' : 'unknown', ...(result.taskId ? { upstreamTaskId: result.taskId } : { code: 'IMAGE_CREATE_UNCONFIRMED' }) });
     } catch (error) {
       if (!createSent) {

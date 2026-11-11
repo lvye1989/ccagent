@@ -13,6 +13,10 @@ const error = (message: string, code = "DESIGN_IMAGE_UNKNOWN"): never => { throw
 const taskMessages: Record<string, string> = {
   IMAGE_INPUT_UPLOAD_FAILED: "参考图上传失败，尚未提交生成，预留额度已释放。请重新发起生成；若仍失败，请联系管理员检查图像上传服务。",
   IMAGE_SUPPLIER_REJECTED: "图像服务未接受本次请求，预留额度已释放。请检查生成参数或联系管理员。",
+  IMAGE_SUPPLIER_BALANCE: "后台图像供应商账户额度不足，请管理员补充图像服务额度。本次未扣款，无需充值 CCAGENT 用户钱包。",
+  IMAGE_SUPPLIER_AUTH: "后台图像服务凭据无效或无访问权限，请管理员检查图像服务配置。本次未扣款。",
+  IMAGE_SUPPLIER_RATE_LIMIT: "后台图像服务请求过多，请稍后重新生成。本次未扣款。",
+  IMAGE_SUPPLIER_MODEL_UNAVAILABLE: "后台图像模型当前不可用，请管理员检查图像路由。本次未扣款。",
   IMAGE_GENERATION_FAILED: "图像服务生成失败，预留额度已释放。请调整绘图要求后重新生成。",
   IMAGE_CREATE_UNCONFIRMED: "图像请求的提交结果待确认，请继续查询原任务。",
   IMAGE_RESULT_UNCONFIRMED: "图像结果暂未核实，请继续查询原任务。",
@@ -38,9 +42,9 @@ async function saveReceipt(receipt: Receipt) {
     await writeJsonAtomically(receiptsFile(), data);
   });
 }
-async function completedResult(receipt: Receipt, gateway: Gateway, signal: AbortSignal, initial?: Record<string, unknown>) {
+async function completedResult(receipt: Receipt, gateway: Gateway, signal: AbortSignal, initial?: Record<string, unknown>, onProgress?: (detail: string) => void) {
   try {
-    const images = await result(receipt.taskId!, gateway, signal, initial);
+    const images = await result(receipt.taskId!, gateway, signal, initial, onProgress);
     await saveReceipt({ ...receipt, state: "completed", updatedAt: Date.now() }); return { images, model: receipt.model };
   } catch (failure) {
     if (failure instanceof PlatformServiceError && failure.code === "DESIGN_IMAGE_FAILED") await saveReceipt({ ...receipt, state: "failed", updatedAt: Date.now() });
@@ -68,9 +72,12 @@ async function wait(ms: number, signal: AbortSignal) {
     signal.addEventListener("abort", stop, { once: true }); if (signal.aborted) stop();
   });
 }
-async function result(taskId: string, gateway: Gateway, signal: AbortSignal, initial?: Record<string, unknown>) {
+async function result(taskId: string, gateway: Gateway, signal: AbortSignal, initial?: Record<string, unknown>, onProgress?: (detail: string) => void) {
+  onProgress?.("正在查询图像任务");
+  let lastStatus: unknown;
   let value = initial ?? await (await gateway.imageTaskStatus(taskId, signal)).json() as Record<string, unknown>;
   while (value.status === "queued" || value.status === "processing") {
+    if (value.status !== lastStatus) { onProgress?.(value.status === "queued" ? "图像任务已提交，正在排队" : "后台正在生成图片"); lastStatus = value.status; }
     if (value.id !== taskId) return error("图像任务回执不匹配。");
     await wait(Math.max(500, Math.min(10000, Number(value.poll_after_ms) || 1500)), signal);
     value = await (await gateway.imageTaskStatus(taskId, signal)).json() as Record<string, unknown>;
@@ -82,13 +89,14 @@ async function result(taskId: string, gateway: Gateway, signal: AbortSignal, ini
   }
   if (!Array.isArray(value.images) || value.images.length !== 1) return error("图像任务未返回一张有效结果。");
   const output: { mimeType: DesignRaster["mimeType"]; bytes: Uint8Array }[] = [];
+  onProgress?.("生成完成，正在下载图片");
   for (const image of value.images) {
     if (!image || typeof image.file_id !== "string" || !uuid.test(image.file_id) || !["image/png", "image/jpeg", "image/webp"].includes(image.mime_type)) return error("图像结果回执无效。");
     output.push({ mimeType: image.mime_type, bytes: await gateway.download(image.file_id, signal) });
   }
   return output;
 }
-export async function runOfficialImageTask(input: { requestId: string; model: string; prompt: string; images: DesignRaster[]; options: Record<string, string>; signal: AbortSignal }, injected?: Gateway) {
+export async function runOfficialImageTask(input: { requestId: string; model: string; prompt: string; images: DesignRaster[]; options: Record<string, string>; signal: AbortSignal; onProgress?: (detail: string) => void }, injected?: Gateway) {
   if (!uuid.test(input.requestId)) return error("图像请求编号无效。");
   const current = await binding(), gateway = injected ?? await getPlatformGatewayClient();
   const hash = createHash("sha256").update(JSON.stringify([input.model, input.prompt, input.options]));
@@ -105,11 +113,13 @@ export async function runOfficialImageTask(input: { requestId: string; model: st
     const save = async () => { receipt!.updatedAt = Date.now(); await saveReceipt(receipt!); };
     if (receipt.state === "uploading") {
       for (let index = receipt.inputFileIds.length; index < input.images.length; index++) {
+        input.onProgress?.(`正在上传参考图 ${index + 1}/${input.images.length}`);
         input.signal.throwIfAborted(); const image = input.images[index]!;
         receipt.inputFileIds.push(await gateway.uploadPrivateImage(Buffer.from(image.dataURL.split(",")[1]!, "base64"), image.mimeType, input.signal)); await save();
       }
       // Durable send barrier: any crash/timeout after this point permits only GET recovery.
       receipt.state = "sending"; await save();
+      input.onProgress?.("正在提交图像生成任务");
       try {
         initial = await (await gateway.call("images/tasks", { model: input.model, prompt: input.prompt, ...(receipt.inputFileIds.length ? { input_images: receipt.inputFileIds.map(id => `ccagent-file:${id}`) } : {}), ...input.options }, { requestId: input.requestId, signal: input.signal })).json() as Record<string, unknown>;
         if (typeof initial.id !== "string" || !uuid.test(initial.id)) return error("图像任务创建结果待确认，请继续查询原任务。");
@@ -118,10 +128,10 @@ export async function runOfficialImageTask(input: { requestId: string; model: st
     } else if (!receipt.taskId) { receipt.taskId = await knownTask(receipt, gateway); receipt.state = "created"; await save(); }
     return { ...receipt };
   });
-  return completedResult(receipt, gateway, input.signal, initial);
+  return completedResult(receipt, gateway, input.signal, initial, input.onProgress);
 }
 /** Resume never needs images, uploads or another createTask request. */
-export async function resumeOfficialImageTask(requestId: string, signal: AbortSignal, injected?: Gateway) {
+export async function resumeOfficialImageTask(requestId: string, signal: AbortSignal, injected?: Gateway, onProgress?: (detail: string) => void) {
   if (!uuid.test(requestId)) return error("图像请求编号无效。");
   const current = await binding(), gateway = injected ?? await getPlatformGatewayClient();
   const receipt = await withFileTransaction(`${receiptsFile()}.${requestId}`, async () => {
@@ -131,5 +141,5 @@ export async function resumeOfficialImageTask(requestId: string, signal: AbortSi
     if (!receipt.taskId) { receipt.taskId = await knownTask(receipt, gateway); receipt.state = "created"; receipt.updatedAt = Date.now(); await saveReceipt(receipt); }
     return { ...receipt };
   });
-  return completedResult(receipt, gateway, signal);
+  return completedResult(receipt, gateway, signal, undefined, onProgress);
 }

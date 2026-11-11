@@ -1,4 +1,5 @@
 import { openAccountCenter } from './account-center.js';
+import { createVersionUpdates } from './version-updates.js';
 
 const button = document.getElementById('account-menu');
 let busy = false, userId;
@@ -41,6 +42,7 @@ if (button) {
     finally { busy = false; logout.disabled = false; }
   });
   menu.append(title, email, balance, center, admin, logout, close, message); document.body.append(menu);
+  const updates = createVersionUpdates({ accountButton: button, accountMenu: menu, after: admin });
   button.addEventListener('click', async () => {
     menu.showModal(); message.textContent = '正在读取账户信息…'; admin.hidden = true;
     try {
@@ -53,7 +55,7 @@ if (button) {
     } catch (error) { message.textContent = error.message; }
   });
   async function refresh() {
-    try { const data = await request('status'); if (userId && userId !== data.user.id) { window.dispatchEvent(new window.Event('ccagent:account-changing')); window.location.replace('/'); return; } userId = data.user.id; email.textContent = data.user.email; button.textContent = (data.user.name || data.user.email).slice(0, 1).toUpperCase(); button.title = data.user.email; center.href = new URL('/account', data.origin).href; }
+    try { const data = await request('status'); if (userId && userId !== data.user.id) { window.dispatchEvent(new window.Event('ccagent:account-changing')); window.location.replace('/'); return; } userId = data.user.id; email.textContent = data.user.email; button.textContent = (data.user.name || data.user.email).slice(0, 1).toUpperCase(); button.title = data.user.email; center.href = new URL('/account', data.origin).href; updates.setAccount(data.user, data.origin); }
     catch (error) { message.textContent = error.message; }
   }
   await refresh();

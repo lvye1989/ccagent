@@ -263,7 +263,7 @@ export class PlatformAccountClient {
     method?: string; headers?: Record<string, string>; body?: Uint8Array; signal?: AbortSignal;
     timeoutMs?: number; maximumBytes?: number;
   } = {}): Promise<Response> {
-    if (!/^\/(?:v1\/(?:models|responses|chat\/completions|decisions|search|voice|images\/tasks(?:\/[a-f0-9-]{36})?)|api\/(?:account\/(?:me|wallet|calls\/[A-Za-z0-9][A-Za-z0-9._:-]{0,199})|files(?:\/[a-f0-9-]{36})?))$/.test(route)) {
+    if (!/^\/(?:v1\/(?:models|responses|chat\/completions|decisions|search|voice|images\/tasks(?:\/[a-f0-9-]{36})?)|api\/(?:account\/(?:me|wallet|releases|calls\/[A-Za-z0-9][A-Za-z0-9._:-]{0,199})|files(?:\/[a-f0-9-]{36})?))$/.test(route)) {
       throw new AccountError("官方服务接口无效。", "invalid_route");
     }
     // Each destination endpoint performs authoritative session validation. Avoid

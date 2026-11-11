@@ -15,6 +15,7 @@ import {
   type PermissionSettings,
 } from "../permissions/permissions.js";
 import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
+import { formatMainModelIdentity } from "../context/modelIdentity.js";
 import { compactMessages } from "../context/compaction.js";
 import { autoCompactIfNeeded, calculateTokenWarningState, createAutoCompactState, resetAutoCompactFailures } from "../context/autoCompact.js";
 import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
@@ -846,12 +847,16 @@ export class QueryEngine {
       abortSignal.throwIfAborted();
       const configuration = this.getActiveModel().startsWith("ccagent:") ? await readServiceConfiguration() : null;
       const officialRoute = configuration?.routes.find(route => "ccagent:" + route.id === this.getActiveModel());
-      const systemParts = previewSystemParts;
+      const activeProfile = officialRoute?.upstreamModel ? undefined
+        : await resolveProfile(this.getActiveModel(), this.toolContext.cwd).catch(() => undefined);
+      const conversationMainModel = officialRoute?.upstreamModel || activeProfile?.officialUpstreamModel || activeProfile?.model;
+      const systemParts = [...previewSystemParts, formatMainModelIdentity(conversationMainModel)];
       const systemPrompt = renderSystemPrompt(systemParts);
       const enrichedToolContext: ToolContext = {
         ...this.toolContext,
         abortSignal,
         officialVisionOnly: officialRoute?.limits.maxImages === 0,
+        conversationMainModel,
         setPermissionMode: (mode: string) => this.setPermissionMode(mode as PermissionMode),
         getPermissionMode: () => this.currentPermissionMode,
         addSessionAllowRules: (rules: string[]) => this.addSessionAllowRules(rules),

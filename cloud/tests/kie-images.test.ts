@@ -57,7 +57,10 @@ test('supplier body errors, exact task IDs, result lists and image signatures ar
   let payload: unknown = { code: 200, data: { taskId: 'task_1' } };
   const client = createKieClient('fixture-secret', async (_url, init) => { assert.equal(new Headers(init.headers).get('authorization'), 'Bearer fixture-secret'); return Response.json(payload); });
   assert.deepEqual(await client.create(kieImageModels[0], input, [], new AbortController().signal), { rejected: false, taskId: 'task_1' });
-  payload = { code: 402, msg: 'fixture-secret' }; assert.deepEqual(await client.create(kieImageModels[0], input, [], new AbortController().signal), { rejected: true, taskId: null });
+  for (const [code, failureCode] of [[402, 'IMAGE_SUPPLIER_BALANCE'], [401, 'IMAGE_SUPPLIER_AUTH'], [403, 'IMAGE_SUPPLIER_AUTH'], [429, 'IMAGE_SUPPLIER_RATE_LIMIT'], [404, 'IMAGE_SUPPLIER_MODEL_UNAVAILABLE'], [422, 'IMAGE_SUPPLIER_REJECTED']] as const) {
+    payload = { code, msg: 'fixture-secret' };
+    assert.deepEqual(await client.create(kieImageModels[0], input, [], new AbortController().signal), { rejected: true, taskId: null, failureCode });
+  }
   payload = { code: 200, data: { taskId: 'wrong-task', state: 'success', resultJson: '{"resultUrls":["https://example.com/1.png"]}' } }; await assert.rejects(client.query('task_1', new AbortController().signal));
   assert.equal(imageType(Buffer.from('<html>bad</html>')), null);
 });

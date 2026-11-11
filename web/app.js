@@ -16,7 +16,7 @@ import { folderIcon } from "./app-icons.js";
 
 const $ = (id) => document.getElementById(id);
 const initialWorkspace = new URLSearchParams(location.search).get("workspace") || "";
-const state = { workspace: initialWorkspace, model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), execution: null, executionNode: null, executionTimer: null, serverClockOffset: 0, storageWarningShown: false };
+const state = { workspace: initialWorkspace, model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), toolGroupNode: null, execution: null, executionNode: null, executionTimer: null, serverClockOffset: 0, storageWarningShown: false };
 let toastTimer;
 let sessionListRequest = 0;
 let openingSession = null;
@@ -715,7 +715,7 @@ function addModelFile(file) {
 
 const toolLabels = {
   Read: "读取文件", ReadImage: "查看图片", Glob: "查找文件", Grep: "搜索文件内容",
-  Write: "写入文件", Edit: "编辑文件", MultiEdit: "编辑文件", Bash: "执行命令",
+  Write: "写入文件", Edit: "编辑文件", MultiEdit: "编辑文件", Bash: "执行命令", PowerShell: "执行命令", GenerateImage: "生成图片",
   WebSearch: "搜索网页", WebFetch: "读取网页", Task: "调用 Agent", Agent: "调用 Agent",
   WhiteboardRead: "读取画布", WhiteboardDraw: "绘制画布", AskUserQuestion: "询问用户",
 };
@@ -727,6 +727,7 @@ function toolIcon(name) {
   const paths = /Search|Grep|Glob|Fetch/.test(name)
     ? ["M21 21l-4.3-4.3", "M19 10.5a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0"]
     : /Bash|Shell|Terminal/.test(name) ? ["M4 5h16v14H4z", "m8 9 3 3-3 3", "M13 15h3"]
+    : /Image/.test(name) ? ["M3 3h18v18H3z", "m3 16 5-5 4 4 3-3 6 6", "M8 7h.01"]
     : /Edit|Write|Draw/.test(name) ? ["m15 5 4 4", "m4 16-1 5 5-1L21 7a2.8 2.8 0 0 0-4-4Z"]
     : ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z", "M14 2v6h6", "M8 13h8", "M8 17h5"];
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -755,9 +756,17 @@ function addTool(id, name, status = "调用中") {
   const stateLabel = document.createElement("span");
   stateLabel.className = "tool-state";
   stateLabel.textContent = status;
-  row.append(icon, title, toolName, stateLabel);
-  appendTimeline(row);
+  const duration = document.createElement("span"); duration.className = "tool-duration";
+  row.append(icon, title, toolName, duration, stateLabel);
+  const command = document.createElement("div"); command.className = "tool-command"; command.hidden = true;
+  const progress = document.createElement("div"); progress.className = "tool-progress-text"; progress.hidden = true; progress.setAttribute("role", "status");
+  row.append(command, progress);
+  row.dataset.order = String(state.toolNodes.size);
+  row.classList.toggle("tool-running", status === "调用中" || status === "准备调用");
+  if (!state.toolGroupNode) createActivityNode();
+  state.toolGroupNode.querySelector(".tool-history-list").append(row);
   if (id) state.toolNodes.set(id, row);
+  syncToolGroup();
   scrollTimeline();
   return row;
 }
@@ -779,12 +788,48 @@ function updateTool(tool) {
   row.querySelector(".tool-state").textContent = status;
   row.classList.toggle("error", (Boolean(tool.isError) && tool.outcome !== "handoff") || status === "结果待确认");
   row.classList.toggle("tool-running", status === "调用中" || status === "准备调用");
+  row.dataset.startedAt = tool.startedAt || "";
+  row.dataset.completedAt = tool.completedAt || "";
+  for (const [selector, value] of [[".tool-command", tool.summary], [".tool-progress-text", tool.progress]]) {
+    const detail = row.querySelector(selector);
+    detail.textContent = typeof value === "string" ? value.slice(0, 300) : "";
+    detail.title = detail.textContent;
+    detail.hidden = !detail.textContent;
+  }
   toolResultDetail(row, tool.detail);
+  syncToolGroup();
 }
 
 function executionTime(value) {
   const time = Date.parse(value);
   return Number.isFinite(time) ? time : null;
+}
+
+function addGeneratedImages(content) {
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter(block => block.type === "text").map(block => block.text).join("\n") : "";
+  const match = text.match(/```ccagent-image-result\s*\n([\s\S]*?)\n```/);
+  if (!match || match[1].length > 20000) return;
+  let result;
+  try { result = JSON.parse(match[1]); } catch { return; }
+  if (!result || !/^[a-f0-9-]{36}$/.test(result.request_id) || !Array.isArray(result.files)) return;
+  for (const file of result.files.slice(0, 16)) {
+    if (!file || typeof file.relativePath !== "string") continue;
+    const relative = normalizeArtifactPath(file.relativePath);
+    if (!relative || /[:\x00-\x1f]/.test(relative) || !/\.(png|jpe?g|webp)$/i.test(relative)) continue;
+    const key = `${result.request_id}:${relative}`;
+    if ([...$("timeline").querySelectorAll(".generated-image-result")].some(row => row.dataset.imageKey === key)) continue;
+    const card = document.createElement("figure"); card.className = "generated-image-result"; card.dataset.imageKey = key;
+    const preview = document.createElement("button"); preview.type = "button"; preview.className = "generated-image-preview"; preview.title = "打开生成图片";
+    const image = document.createElement("img"); image.alt = "生成图片"; image.loading = "lazy";
+    const query = new URLSearchParams({ workspace: state.workspace, path: relative });
+    image.src = `/api/files/content?${query}`;
+    preview.append(image); preview.addEventListener("click", () => void workspaceFiles.openPath(relative));
+    const caption = document.createElement("figcaption");
+    const link = document.createElement("button"); link.type = "button"; link.textContent = relative; link.title = "打开文件";
+    link.addEventListener("click", () => void workspaceFiles.openPath(relative));
+    const download = document.createElement("a"); download.textContent = "下载图片"; download.href = `/api/files/download?${query}`; download.download = relative.split("/").at(-1);
+    caption.append(link, download); card.append(preview, caption); appendTimeline(card);
+  }
 }
 
 function elapsedLabel(milliseconds) {
@@ -794,19 +839,65 @@ function elapsedLabel(milliseconds) {
   return `${seconds}秒`;
 }
 
-function ensureExecutionNode(after) {
-  if (!state.execution || state.executionNode) return;
+function createActivityNode(after) {
   const row = document.createElement("div");
   row.className = "turn-activity";
   row.setAttribute("aria-live", "off");
-  row.dataset.turnId = state.execution.id;
+  const header = document.createElement("div"); header.className = "turn-activity-header"; header.hidden = true;
   const elapsed = document.createElement("span");
   elapsed.className = "turn-elapsed";
   const status = document.createElement("span");
   status.className = "turn-outcome";
-  row.append(elapsed, status);
+  header.append(elapsed, status);
+  const live = document.createElement("div"); live.className = "turn-live-tool"; live.hidden = true;
+  const current = document.createElement("div"); current.className = "turn-live-status"; current.setAttribute("role", "status");
+  live.append(current);
+  const history = document.createElement("details"); history.className = "tool-history"; history.hidden = true;
+  const summary = document.createElement("summary"); summary.textContent = "调用记录";
+  const list = document.createElement("div"); list.className = "tool-history-list";
+  history.append(summary, list); row.append(header, live, history);
   if (after) after.after(row);
   else appendTimeline(row);
+  state.toolGroupNode = history;
+  return row;
+}
+
+function syncToolGroup(finish = false) {
+  const history = state.toolGroupNode;
+  if (!history) return;
+  const group = history.parentElement, live = group.querySelector(".turn-live-tool"), list = history.querySelector(".tool-history-list");
+  const rows = [...group.querySelectorAll(".tool-card")].sort((a, b) => Number(a.dataset.order) - Number(b.dataset.order));
+  const isLive = !finish && Boolean(state.execution ? !state.execution.completedAt : state.busy && rows.some(row => row.classList.contains("tool-running")));
+  const running = isLive ? rows.filter(row => row.classList.contains("tool-running")) : [];
+  const current = running.filter(row => row.querySelector(".tool-state").textContent === "调用中").at(-1) || running.at(-1);
+  // Reuse the actual row: exactly one current call is visible, all previous calls live in the disclosure.
+  for (const row of rows) if (row !== current && row.parentElement !== list) {
+    const next = [...list.children].find(candidate => Number(candidate.dataset.order) > Number(row.dataset.order));
+    list.insertBefore(row, next || null);
+  }
+  if (current && current.parentElement !== live) live.prepend(current);
+  live.hidden = !isLive;
+  const detail = live.querySelector(".turn-live-status");
+  detail.textContent = state.pending ? state.pending.kind === "question" ? "等待你的回答" : "等待你的批准"
+    : current ? running.length > 1 ? `另有 ${running.length - 1} 项工具同时执行` : ""
+    : state.streamNode ? "正在生成回复" : rows.length ? "正在整理结果" : "正在思考";
+  detail.hidden = !detail.textContent;
+  const archived = rows.filter(row => row !== current);
+  const errors = archived.filter(row => row.classList.contains("error")).length;
+  history.hidden = archived.length === 0;
+  history.querySelector("summary").textContent = `调用记录 · ${archived.length} 项${errors ? ` · ${errors} 项需关注` : ""}`;
+  if (finish) history.open = false;
+  for (const row of rows) {
+    const start = executionTime(row.dataset.startedAt), end = executionTime(row.dataset.completedAt);
+    if (start !== null) row.querySelector(".tool-duration").textContent = elapsedLabel((end ?? executionTime(state.execution?.completedAt) ?? Date.now() + state.serverClockOffset) - start);
+  }
+}
+
+function ensureExecutionNode(after) {
+  if (!state.execution || state.executionNode) return;
+  const row = state.toolGroupNode?.parentElement || createActivityNode(after);
+  row.dataset.turnId = state.execution.id;
+  row.querySelector(".turn-activity-header").hidden = false;
   state.executionNode = row;
   syncExecutionClock();
 }
@@ -820,6 +911,7 @@ function syncExecutionClock() {
   const terminal = { aborted: "已停止", completed: "已完成", max_turns: "已达轮数上限", model_error: "模型回复中断" };
   state.executionNode.querySelector(".turn-outcome").textContent = execution.completedAt ? terminal[execution.reason] || "执行失败" : "执行中";
   state.executionNode.classList.toggle("turn-active", !execution.completedAt);
+  syncToolGroup();
 }
 
 function restoreExecution(execution, serverTime) {
@@ -833,6 +925,7 @@ function restoreExecution(execution, serverTime) {
       state.executionNode.classList.remove("turn-active");
       state.executionNode.querySelector(".turn-outcome").textContent = "未完成";
     }
+    syncToolGroup(true);
     state.executionNode = null;
     return;
   }
@@ -840,6 +933,7 @@ function restoreExecution(execution, serverTime) {
   if (!state.executionNode) ensureExecutionNode([...$("timeline").querySelectorAll(".message.user")].at(-1));
   for (const tool of state.execution.tools) updateTool(tool);
   syncExecutionClock();
+  if (execution.completedAt) syncToolGroup(true);
   if (!execution.completedAt) state.executionTimer = setInterval(syncExecutionClock, 1000);
 }
 
@@ -917,6 +1011,7 @@ function renderStoredMessages(messages) {
   state.executionTimer = null;
   state.execution = null;
   state.executionNode = null;
+  state.toolGroupNode = null;
   $("timeline").replaceChildren($("thread-progress"));
   clearStream();
   state.toolNodes.clear();
@@ -927,6 +1022,7 @@ function renderStoredMessages(messages) {
           if (block.type !== "tool_result") continue;
           const row = state.toolNodes.get(block.tool_use_id);
           if (row) {
+            if (!block.is_error && row.querySelector(".tool-name")?.textContent === "GenerateImage") addGeneratedImages(block.content);
             let handoff = false, detail = typeof block.content === "string" ? block.content : "";
             if (row.querySelector(".tool-name")?.textContent === "RhinoSequence") {
               try { const report = JSON.parse(detail); handoff = report.status === "handoff"; if (handoff && typeof report.reason === "string") detail = report.reason; } catch { /* Ordinary tool error. */ }
@@ -934,12 +1030,14 @@ function renderStoredMessages(messages) {
             row.querySelector(".tool-state").textContent = handoff ? "已暂停" : block.is_error ? "失败" : "已完成";
             row.classList.toggle("error", Boolean(block.is_error) && !handoff);
             if (block.is_error) toolResultDetail(row, detail);
+            syncToolGroup(true);
           }
         }
       }
       const text = messageText(message);
       if (text.trim()) {
         state.toolNodes.clear();
+        state.toolGroupNode = null;
         addUser(text);
       }
       continue;
@@ -964,10 +1062,11 @@ function syncThreadProgress() {
     : state.streamNode ? "正在生成回复" : state.execution?.tools.length ? "正在整理结果" : "Thinking";
   const text = state.busy ? current : terminal[state.lastTurnReason] || "";
   $("thread-status-label").textContent = text;
-  $("thread-progress").classList.toggle("hidden", !text);
+  $("thread-progress").classList.toggle("hidden", !text || Boolean(state.busy && state.executionNode));
   $("thread-status-dot").classList.toggle("busy", state.busy && Boolean(text));
   $("thread-status-dot").classList.toggle("hidden", !state.busy);
   syncExecutionClock();
+  syncToolGroup();
 }
 
 function setBusy(busy) {
@@ -1108,6 +1207,7 @@ function handleEvent(event) {
       clearInterval(state.executionTimer);
       state.toolNodes.clear();
       state.executionNode = null;
+      state.toolGroupNode = null;
       state.execution = { id: event.turnId || `live-${state.sessionId}`, startedAt: event.startedAt || event.timestamp, completedAt: null, reason: null, tools: [] };
       state.pending = null;
       ensureExecutionNode();
@@ -1127,9 +1227,21 @@ function handleEvent(event) {
       if (state.execution && !state.execution.tools.some((tool) => tool.id === event.id)) state.execution.tools.push({ id: event.id, name: event.name, startedAt: event.timestamp, completedAt: null });
       const tool = state.execution?.tools.find((tool) => tool.id === event.id);
       if (tool) tool.phase = event.type === "tool_preparing" ? "preparing" : "running";
+      if (tool && typeof event.summary === "string") tool.summary = event.summary;
       if (tool) updateTool(tool);
       else addTool(event.id, event.name, event.type === "tool_preparing" ? "准备调用" : "调用中");
       syncThreadProgress();
+      break;
+    }
+    case "tool_progress": {
+      const tool = state.execution?.tools.find(tool => tool.id === event.id);
+      if (tool && !tool.completedAt && !state.execution.completedAt) { tool.progress = event.detail; updateTool(tool); scrollTimeline(); }
+      break;
+    }
+    case "tool_result": {
+      if (Array.isArray(event.message?.content)) for (const block of event.message.content) {
+        if (block.type === "tool_result" && !block.is_error && state.toolNodes.get(block.tool_use_id)?.querySelector(".tool-name")?.textContent === "GenerateImage") addGeneratedImages(block.content);
+      }
       break;
     }
     case "tool_done": {
@@ -1193,6 +1305,7 @@ function handleEvent(event) {
       state.pending = null;
       $("interaction-overlay").classList.add("hidden");
       finishStream(); setBusy(false); refreshSessions(); refreshChanges();
+      syncToolGroup(true);
       if (event.reason && event.reason !== "completed") toast({ model_error: "模型回复中断，已完成的操作已保留", aborted: "已停止", max_turns: "已达执行轮数上限" }[event.reason] || "本轮执行中断，请查看执行记录");
       break;
   }
@@ -1409,6 +1522,7 @@ function clearOpenSession() {
   state.executionTimer = null;
   state.execution = null;
   state.executionNode = null;
+  state.toolGroupNode = null;
   state.sessionId = null;
   state.temporary = false;
   state.pending = null;

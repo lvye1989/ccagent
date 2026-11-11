@@ -16,6 +16,7 @@ import { fileEditTool } from "./fileEditTool.js";
 import { multiEditTool } from "./multiEditTool.js";
 import { fileReadTool } from "./fileReadTool.js";
 import { readImageTool } from "./readImageTool.js";
+import { generateImageTool } from "./generateImageTool.js";
 import { analyzeDataTool } from "./analyzeDataTool.js";
 import { fileWriteTool } from "./fileWriteTool.js";
 import { globTool } from "./globTool.js";
@@ -66,6 +67,7 @@ import type { PermissionMode } from "../permissions/permissions.js";
 const BUILTIN_TOOLS: Tool[] = [
   fileReadTool,
   readImageTool,
+  generateImageTool,
   analyzeDataTool,
   fileWriteTool,
   fileEditTool,

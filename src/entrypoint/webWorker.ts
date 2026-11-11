@@ -95,6 +95,7 @@ import { createWhiteboardAIManager, WhiteboardAIError } from "./webWhiteboardAI.
 import { createWhiteboardDesignManager, WhiteboardDesignError } from "./webWhiteboardDesign.js";
 import { getDesignImageConfig, saveDesignImageConfig, DesignImageError } from "../services/images/designImageProvider.js";
 import { bootstrapWorkfriendScheduler, clearWorkfriendTimers } from "../workfriend/scheduler.js";
+import { sanitizeToolProgress, toolProgressSummary } from "../tools/toolProgress.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -136,7 +137,7 @@ type WebExecution = {
   startedAt: string;
   completedAt: string | null;
   reason: string | null;
-  tools: Array<{ id: string; name: string; startedAt: string; completedAt: string | null; phase?: "preparing" | "running"; isError?: boolean; outcome?: "handoff"; detail?: string }>;
+  tools: Array<{ id: string; name: string; startedAt: string; completedAt: string | null; phase?: "preparing" | "running"; isError?: boolean; outcome?: "handoff"; detail?: string; summary?: string; progress?: string }>;
 };
 
 type WebSession = {
@@ -214,11 +215,19 @@ function publish(session: WebSession, data: Record<string, unknown>): void {
       execution.tools.push(tool);
     }
     tool.phase = data.type === "tool_preparing" ? "preparing" : "running";
+    if (typeof data.summary === "string") tool.summary = data.summary;
     if (data.type === "tool_done") {
       tool.completedAt = timestamp; tool.isError = data.isError === true;
       if (data.outcome === "handoff") tool.outcome = "handoff";
       if (typeof data.detail === "string") tool.detail = data.detail;
     }
+  }
+  if (data.type === "tool_progress") {
+    const tool = execution?.tools.find(item => item.id === data.id);
+    // Ignore late callbacks and detached child tools; never reopen a finished call.
+    if (!tool || tool.completedAt || execution?.completedAt) return;
+    tool.progress = sanitizeToolProgress(String(data.detail || ""));
+    data = { ...data, detail: tool.progress };
   }
   if (data.type === "turn_complete") {
     session.lastTurnReason = String(data.reason || "completed");
@@ -260,7 +269,10 @@ export function summarizeEvent(event: QueryEngineEvent): Record<string, unknown>
   switch (event.type) {
     case "text": return { type: "text", text: event.text };
     case "tool_use_start": return { type: "tool_preparing", id: event.id, name: event.name };
-    case "tool_use_ready": return { type: "tool_start", id: event.id, name: event.name };
+    case "tool_use_ready": {
+      const summary = toolProgressSummary(event.name, event.input);
+      return { type: "tool_start", id: event.id, name: event.name, ...(summary ? { summary } : {}) };
+    }
     case "tool_use_done": {
       let detail = "", outcome: "handoff" | undefined;
       if (event.result.isError) {
@@ -445,6 +457,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         cwd: sessionWorkspace, sessionId: id,
         applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
+        onToolProgress: progress => publish(session, { type: "tool_progress", ...progress }),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
       },
@@ -488,6 +501,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         cwd: workspace, sessionId: id, temporaryChat: temporary,
         applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
+        onToolProgress: progress => publish(session, { type: "tool_progress", ...progress }),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
       },

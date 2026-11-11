@@ -146,6 +146,20 @@ test('authenticated gateway executes native protocols with real isolated ledger 
       assert.equal(result.status, 502); assert.equal((await result.text()).includes(process.env[credentialEnv]!), false);
       assert.equal((await record('rejected')).status, 'released'); assert.equal((await record('rejected')).charged, 0n);
     });
+    await t.test('supplier balance failures are distinct from user funds, release holds and never retry', async () => {
+      const before = calls, wallet = await walletFor(userId);
+      queued.push(() => new Response(`supplier secret ${process.env[credentialEnv]}`, { status: 402 }));
+      const result = await gateway.execute(request('supplier-no-balance', payload), 'responses');
+      assert.equal(result.status, 502);
+      const failure = await result.json();
+      assert.equal(failure.code, 'UPSTREAM_INSUFFICIENT_BALANCE');
+      assert.match(failure.message, /供应商.*管理员.*未扣费/);
+      assert(!JSON.stringify(failure).includes(process.env[credentialEnv]!));
+      const call = await record('supplier-no-balance');
+      assert.equal(call.status, 'released'); assert.equal(call.charged, 0n);
+      assert.equal((call.usage as Record<string, unknown>).upstreamStatus, 402);
+      assert.equal(calls - before, 1); assert.deepEqual(await walletFor(userId), wallet);
+    });
     await t.test('large request files and image references enforce ownership before authorization', async () => {
       const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr4kAAAAASUVORK5CYII=', 'base64');
       const upload = await initializeUpload(otherId, { purpose: 'image', contentType: 'image/png', size: image.length });

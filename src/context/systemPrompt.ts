@@ -14,6 +14,7 @@ import { getActiveOutputStyleConfig } from "../styles/registry.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolTempRoot } from "../utils/paths.js";
 import { APPLICATION_PROTECTION_GUIDANCE, DESIGN_WORKFLOW_GUIDANCE } from "./designGuidance.js";
+import { MODEL_IDENTITY_GUIDANCE } from "./modelIdentity.js";
 import {
   BROWSER_SEARCH_FAST_PATH_GUIDANCE,
   COMPUTER_USE_BROWSER_FAST_PATH_GUIDANCE,
@@ -76,8 +77,8 @@ const CODING_INSTRUCTION_SECTIONS = [
 
 function getStaticPromptSections(keepCodingInstructions: boolean): string[] {
   return keepCodingInstructions
-    ? [...IDENTITY_SECTIONS, DESIGN_WORKFLOW_GUIDANCE, ...COMPUTER_USE_INSTRUCTION_SECTIONS, ...CODING_INSTRUCTION_SECTIONS]
-    : [...IDENTITY_SECTIONS, DESIGN_WORKFLOW_GUIDANCE, ...COMPUTER_USE_INSTRUCTION_SECTIONS];
+    ? [...IDENTITY_SECTIONS, MODEL_IDENTITY_GUIDANCE, DESIGN_WORKFLOW_GUIDANCE, ...COMPUTER_USE_INSTRUCTION_SECTIONS, ...CODING_INSTRUCTION_SECTIONS]
+    : [...IDENTITY_SECTIONS, MODEL_IDENTITY_GUIDANCE, DESIGN_WORKFLOW_GUIDANCE, ...COMPUTER_USE_INSTRUCTION_SECTIONS];
 }
 
 async function getGitContext(cwd: string): Promise<Pick<RuntimeEnvironmentContext, "gitBranch" | "gitStatus" | "gitRecentCommit">> {

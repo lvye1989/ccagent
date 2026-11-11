@@ -27,6 +27,7 @@
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { query, type LoopTerminationReason } from "../core/agenticLoop.js";
 import { APPLICATION_PROTECTION_GUIDANCE, DESIGN_WORKFLOW_GUIDANCE } from "../context/designGuidance.js";
+import { MODEL_IDENTITY_GUIDANCE, formatMainModelIdentity } from "../context/modelIdentity.js";
 import { toolToApiParam, type Tool, type ToolContext } from "../tools/Tool.js";
 import type {
   PermissionDecision,
@@ -252,6 +253,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     scopedTools: Object.freeze([...resolved.resolvedTools]),
     officialVisionOnly: params.parentToolContext.officialVisionOnly,
     applicationProtection: params.parentToolContext.applicationProtection,
+    conversationMainModel: params.parentToolContext.conversationMainModel,
     abortSignal,
     defaultModel: params.model,
     sessionId: subSessionId,
@@ -259,6 +261,10 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     strictNotificationScope: params.parentToolContext.strictNotificationScope,
     temporaryChat: params.parentToolContext.temporaryChat,
     onModelExport: params.parentToolContext.onModelExport,
+    onToolProgress: progress => {
+      const parent = params.parentToolContext;
+      if (parent.toolUseId) parent.onToolProgress?.({ id: parent.toolUseId, name: "Agent", detail: `${progress.name}：${progress.detail}` });
+    },
     agentTeamsAllowed: params.parentToolContext.agentTeamsAllowed,
     // Sub-agent reads its own mode — isolating plan-mode transitions
     // (Enter/ExitPlanMode) from the parent's mode state.
@@ -317,7 +323,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
 
   const loop = query({
     messages: initialMessages,
-    systemPrompt: [def.getSystemPrompt(), DESIGN_WORKFLOW_GUIDANCE, ...(subToolContext.applicationProtection ? [APPLICATION_PROTECTION_GUIDANCE] : [])].join("\n\n"),
+    systemPrompt: [def.getSystemPrompt(), MODEL_IDENTITY_GUIDANCE, formatMainModelIdentity(subToolContext.conversationMainModel), DESIGN_WORKFLOW_GUIDANCE, ...(subToolContext.applicationProtection ? [APPLICATION_PROTECTION_GUIDANCE] : [])].join("\n\n"),
     tools: toolApiParams,
     model: params.model,
     abortSignal,

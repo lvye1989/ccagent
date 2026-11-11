@@ -165,7 +165,7 @@ command[info]:
   | - Output style: default
   | - Messages in context: 2
   | - Session tokens: in 100 / out 50
-  | - Tools enabled (46): Read, ReadImage, AnalyzeData, Write, Edit, MultiEdit, Glob, Grep, Bash, PowerShell, ComputerObserve, ComputerActionGroup, ComputerAction, ComputerNavigate, RhinoObserve, RhinoInspect, RhinoAction, RhinoSequence, Mail, KnowledgeSearch, MarkdownToPdf, WordToPdf, PdfToWord, PdfToMarkdown, WebFetch, WebSearch, classic_words, ListMcpResources, ReadMcpResource, MemoryWrite, TaskCreate, TaskUpdate, TaskGet, TaskList, EnterPlanMode, ExitPlanMode, Skill, AskUserQuestion, WorkfriendAssess, WorkfriendSchedule, WorkfriendDeliver, AgentTeamMode, Agent, TeamCreate, TeamDelete, SendMessage
+  | - Tools enabled (47): Read, ReadImage, GenerateImage, AnalyzeData, Write, Edit, MultiEdit, Glob, Grep, Bash, PowerShell, ComputerObserve, ComputerActionGroup, ComputerAction, ComputerNavigate, RhinoObserve, RhinoInspect, RhinoAction, RhinoSequence, Mail, KnowledgeSearch, MarkdownToPdf, WordToPdf, PdfToWord, PdfToMarkdown, WebFetch, WebSearch, classic_words, ListMcpResources, ReadMcpResource, MemoryWrite, TaskCreate, TaskUpdate, TaskGet, TaskList, EnterPlanMode, ExitPlanMode, Skill, AskUserQuestion, WorkfriendAssess, WorkfriendSchedule, WorkfriendDeliver, AgentTeamMode, Agent, TeamCreate, TeamDelete, SendMessage
   | - MCP servers: none configured
 <<< handled=true
 
@@ -176,13 +176,13 @@ command[info]:
   |
   | Context window: 200,000 tokens
   |
-  |   System prompt          ░░░░░░░░░░░░░░░░░░░░   1.7%  3,484 tok
+  |   System prompt          ░░░░░░░░░░░░░░░░░░░░   2.1%  4,102 tok
   |   AGENT.md + memory      ░░░░░░░░░░░░░░░░░░░░   0.0%  4 tok
-  |   Tool definitions       ███░░░░░░░░░░░░░░░░░  13.1%  26,137 tok
+  |   Tool definitions       ███░░░░░░░░░░░░░░░░░  13.6%  27,109 tok
   |   Conversation history   ░░░░░░░░░░░░░░░░░░░░   0.0%  42 tok
-  |   Free space             █████████████████░░░  85.2%  170,333 tok
+  |   Free space             █████████████████░░░  84.4%  168,743 tok
   |
-  | Estimated used: 29,667 / 200,000 (14.8%)
+  | Estimated used: 31,257 / 200,000 (15.6%)
 <<< handled=true
 
 ### doctor

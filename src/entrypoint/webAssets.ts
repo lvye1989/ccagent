@@ -4,6 +4,7 @@ export const WEB_ASSET_MIME: Record<string, string> = {
   "/index.html": "text/html; charset=utf-8",
   "/app.js": "text/javascript; charset=utf-8",
   "/account-menu.js": "text/javascript; charset=utf-8",
+  "/version-updates.js": "text/javascript; charset=utf-8",
   "/account-center.js": "text/javascript; charset=utf-8",
   "/plugins.js": "text/javascript; charset=utf-8",
   "/app-catalog.js": "text/javascript; charset=utf-8",

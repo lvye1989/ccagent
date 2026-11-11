@@ -3,7 +3,7 @@ import { Brand } from './brand';
 import { Logout } from './logout';
 
 export const accountNavigation = [['/account', '账户概览', '◈'], ['/account/keys', '个人 API Key', '⚿'], ['/account/billing', '余额与充值', '¥'], ['/account/usage', '使用明细', '↗']] as const;
-export const adminNavigation = [['/admin', '运营概览', '◈'], ['/admin/users', '用户与权限', '◎'], ['/admin/keys', 'API Key 管理', '⚿'], ['/admin/orders', '余额与订单', '¥'], ['/admin/refunds', '退款与对账', '↶'], ['/admin/usage', '用量与任务费用', '↗'], ['/admin/data', '后端数据', '▤'], ['/admin/routes', '服务网关', '⇄'], ['/admin/settings', '系统设置', '⚙']] as const;
+export const adminNavigation = [['/admin', '运营概览', '◈'], ['/admin/users', '用户与权限', '◎'], ['/admin/keys', 'API Key 管理', '⚿'], ['/admin/orders', '余额与订单', '¥'], ['/admin/refunds', '退款与对账', '↶'], ['/admin/usage', '用量与任务费用', '↗'], ['/admin/data', '后端数据', '▤'], ['/admin/routes', '服务网关', '⇄'], ['/admin/releases', '版本更新', '↓'], ['/admin/settings', '系统设置', '⚙']] as const;
 export function Shell({ children, title, path, user, admin = false, canAdmin = false }: {
   children: React.ReactNode; title: string; path: string; user: { name: string; email: string }; admin?: boolean; canAdmin?: boolean;
 }) {

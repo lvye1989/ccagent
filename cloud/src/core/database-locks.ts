@@ -20,7 +20,7 @@ export async function lockAccount(tx: Executor, userId: string): Promise<void> {
   catch (error) { lockError(error); }
 }
 
-export async function lockAdministration(tx: Executor, key: 804714031 | 804714032 | 804714033): Promise<void> {
+export async function lockAdministration(tx: Executor, key: 804714031 | 804714032 | 804714033 | 804714035): Promise<void> {
   try { await tx.execute(sql`select ${target('acquire_mutex')}(${key}::bigint)`); }
   catch (error) { lockError(error); }
 }

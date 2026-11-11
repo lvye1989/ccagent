@@ -7,7 +7,7 @@ export type Raster = DesignRaster;
 export interface DesignImageConfig { configured: boolean; provider: DesignImageProvider; model: string; baseURL: string; source: "user" | "environment" | "none" | "official"; hasKey: boolean; maxReferences: number; routes?: { id: string; name: string; upstreamModel?: string }[]; modes?: { textToImage: boolean; imageToImage: boolean }; defaultExplicit?: boolean }
 type PrivateConfig = DesignImageConfig;
 type ObjectValue = Record<string, unknown>;
-export interface DesignImageInput { prompt: string; kind: "architecture" | "urban-analysis"; base?: DesignRaster; annotated?: DesignRaster; references: DesignRaster[]; signal: AbortSignal; requestId: string; /** Frozen by trusted backend selection; never accepted from the whiteboard renderer. */ model?: string; generationMode?: "text-to-image" | "image-to-image"; aspect_ratio?: string; resolution?: string; background?: string }
+export interface DesignImageInput { prompt: string; kind: "architecture" | "urban-analysis"; base?: DesignRaster; annotated?: DesignRaster; references: DesignRaster[]; signal: AbortSignal; requestId: string; /** Frozen by trusted backend selection; never accepted from the whiteboard renderer. */ model?: string; generationMode?: "text-to-image" | "image-to-image"; aspect_ratio?: string; resolution?: string; background?: string; onProgress?: (detail: string) => void }
 export interface DesignImageDependencies {
   gateway?: Pick<Awaited<ReturnType<typeof getPlatformGatewayClient>>, "uploadPrivateImage" | "call" | "callStatus" | "imageTaskStatus" | "download">;
 }
@@ -130,12 +130,12 @@ async function generateOfficialImage(input: DesignImageInput, config: PrivateCon
   if (imageMode ? images.length < 1 || images.length > 16 : images.length !== 0) return problem(imageMode ? "图生图需要 1 至 16 张输入图片（含原图、勾画和参考图）。" : "当前绘图模式暂未开放，请稍后重试。");
   let prompt = input.prompt.trim();
   if (input.base && input.annotated) { const contextual = designPrompt(input, input.references.length); if (contextual.length <= 20000) prompt = contextual; }
-  const result = await runOfficialImageTask({ requestId: input.requestId, model, prompt, images, options, signal: input.signal }, dependencies.gateway);
+  const result = await runOfficialImageTask({ requestId: input.requestId, model, prompt, images, options, signal: input.signal, onProgress: input.onProgress }, dependencies.gateway);
   return { images: result.images.map(image => validateDesignRaster({ dataURL: `data:${image.mimeType};base64,${Buffer.from(image.bytes).toString("base64")}` }, "output")), provider: "official" as const, model: result.model };
 }
-export async function resumeDesignImage(requestId: string, signal: AbortSignal): Promise<{ images: DesignRaster[]; provider: DesignImageProvider; model: string }> {
+export async function resumeDesignImage(requestId: string, signal: AbortSignal, onProgress?: (detail: string) => void): Promise<{ images: DesignRaster[]; provider: DesignImageProvider; model: string }> {
   try {
-    const result = await resumeOfficialImageTask(requestId, signal);
+    const result = await resumeOfficialImageTask(requestId, signal, undefined, onProgress);
     return { images: result.images.map(image => validateDesignRaster({ dataURL: `data:${image.mimeType};base64,${Buffer.from(image.bytes).toString("base64")}` }, "output")), provider: "official", model: result.model };
   } catch (error) {
     if (signal.aborted) return problem("已停止本地等待，原图像任务可能继续执行，可稍后继续查询。", 409, "DESIGN_IMAGE_STOPPED");
@@ -149,6 +149,7 @@ export async function generateDesignImage(input: DesignImageInput, workspace: st
   if (!input.signal || typeof input.signal.addEventListener !== "function" || typeof input.requestId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(input.requestId)) return problem("生成请求标识无效。");
   if (!Array.isArray(input.references)) return problem("输入参考图格式无效。");
   const snapshot: { gateway?: DesignImageDependencies["gateway"] } = {}, config = await loadConfig(workspace, snapshot);
+  input.onProgress?.("已连接后台图像服务");
   const imageCount = (input.base ? 1 : 0) + (input.annotated ? 1 : 0) + input.references.length;
   const selected = input.model ? config.routes?.find(route => route.id === input.model) : selectDesignImageRoute(config, imageCount);
   if (!selected) return problem("图像生成服务暂未开放，请稍后重试。", 503, "DESIGN_IMAGE_UNAVAILABLE");

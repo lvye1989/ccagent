@@ -84,7 +84,9 @@ export function createKieClient(secret: string, transport: KieTransport = kieTra
       const payload = await json(response), taskId = record(payload.data).taskId;
       if (!response.ok || payload.code !== 200) {
         const rejected = [400, 401, 402, 403, 404, 422, 429].includes(response.status) || [400, 401, 402, 403, 404, 422, 429].includes(Number(payload.code));
-        return { rejected, taskId: null };
+        const status = response.ok ? Number(payload.code) : response.status;
+        const failureCode = status === 402 ? 'IMAGE_SUPPLIER_BALANCE' : [401, 403].includes(status) ? 'IMAGE_SUPPLIER_AUTH' : status === 429 ? 'IMAGE_SUPPLIER_RATE_LIMIT' : status === 404 ? 'IMAGE_SUPPLIER_MODEL_UNAVAILABLE' : 'IMAGE_SUPPLIER_REJECTED';
+        return { rejected, taskId: null, failureCode };
       }
       return { rejected: false, taskId: typeof taskId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(taskId) ? taskId : null };
     },

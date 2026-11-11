@@ -35,6 +35,7 @@ async function checked(response: Response): Promise<Response> {
     410: "调用结果或临时文件已过期，请查看调用记录。", 413: "请求超过官方服务允许的大小。", 429: "官方服务请求过于频繁，请稍后重试。",
   };
   const specific: Record<string, string> = { PRICE_CHANGED: "官方服务价格、限制或汇率已更新，请刷新服务目录并核对后再调用。", ACCOUNT_DISABLED: "账户已被禁用，请联系管理员。",
+    UPSTREAM_INSUFFICIENT_BALANCE: "官方模型供应商余额或额度不足，请联系管理员补充上游额度，无需充值 CCAGENT 用户钱包。本次调用未扣费。",
     TOO_MANY_IMAGES: "本次图片数量超出所选官方路由的限制，请减少图片，或使用已配置的读图工具处理。",
     PROTOCOL_MISMATCH: "所选官方模型与本次请求协议不匹配，请刷新服务目录并重新选择模型。",
     UNPRICED_CAPABILITY: "本次请求使用了官方服务尚未开放的能力，请使用本地工具或普通文本请求。",
@@ -404,10 +405,14 @@ export class PlatformGatewayClient {
       });
       return new Response(body, { status: response.status, headers: response.headers });
     } catch (error) {
-      const pending = (sent || record.reused) && (!(error instanceof PlatformServiceError) || error.status >= 500 || error.status === 0 || error.code === "CALL_IN_PROGRESS");
+      const supplierRejected = error instanceof PlatformServiceError && error.code === "UPSTREAM_INSUFFICIENT_BALANCE";
+      const pending = !supplierRejected && (sent || record.reused) && (!(error instanceof PlatformServiceError) || error.status >= 500 || error.status === 0 || error.code === "CALL_IN_PROGRESS");
       await mark({ state: pending ? "unknown" : "rejected" }).catch(() => {});
       if (!pending) await cleanup();
-      if (error instanceof PlatformServiceError) throw error;
+      if (error instanceof PlatformServiceError) {
+        if (error.requestId) throw error;
+        throw new PlatformServiceError(`${error.message} 请求编号：${record.requestId}`, error.code, error.status, record.requestId);
+      }
       throw new PlatformServiceError(`官方服务连接未完成，请先查看调用状态。请求编号：${record.requestId}`, "CALL_RESULT_UNKNOWN", 0, record.requestId);
     }
   }
