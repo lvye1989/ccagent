@@ -10,6 +10,7 @@ __pycache__/
 .env.*
 !.env.example
 .tmp/
+.tmp-*.log
 src/scripts/__dbg*.ts
 .DS_Store
 .claude
