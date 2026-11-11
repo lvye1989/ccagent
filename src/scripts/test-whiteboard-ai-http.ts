@@ -37,7 +37,16 @@ try {
   assert.equal((await completed(hostile.runId)).status, "completed"); assert.equal(await fs.stat(path.join(workspace, "must-not-exist.txt")).then(() => true, () => false), false, "out-of-scope Bash cannot dispatch");
   const held = await (await request("/api/whiteboards/ai/start", cookie, { ...startBody, prompt: "HOLD_AI_DRAWING" })).json() as typeof run;
   for (let i = 0; i < 100 && !fixture.held(); i++) await pause(); assert.ok(fixture.held());
-  assert.equal((await request("/api/workspaces/select", cookie, { path: fixture.secondWorkspace })).status, 409, "running AI prevents workspace/global state mutation");
+  assert.equal((await request("/api/workspaces/select", cookie, { path: fixture.secondWorkspace })).status, 200, "another project can open while this project's AI keeps running");
+  assert.ok(fixture.held(), "switching projects preserves the original model connection");
+  const heldRoute = `/api/whiteboards/ai/run?workspace=${encodeURIComponent(workspace)}&runId=${held.runId}`;
+  const background = await request(heldRoute, cookie); assert.equal(background.status, 200);
+  assert.equal((await background.json() as { status: string }).status, "running", "an explicit workspace query reads the background AI run");
+  assert.equal((await request("/api/whiteboards/ai/stop", cookie, { workspace: fixture.secondWorkspace, runId: held.runId })).status, 404, "project B cannot stop project A's run");
+  assert.ok(fixture.held(), "a foreign project's rejected stop leaves the original run active");
+  assert.equal((await request("/api/workspaces/select", cookie, { path: workspace })).status, 200);
+  assert.equal((await (await request(heldRoute, cookie)).json() as { status: string }).status, "running", "returning to the original project preserves its run");
+  assert.equal((await request("/api/customize/settings", cookie, { effortLevel: "low" })).status, 409, "the running project's own configuration mutations remain blocked");
   const stopping = await request("/api/whiteboards/ai/stop", cookie, { workspace, runId: held.runId }); assert.equal(stopping.status, 200);
   const stopped = await completed(held.runId); assert.equal(stopped.status, "stopped"); assert.equal(stopped.drawings.length, 0);
   assert.equal((await request("/api/whiteboards/ai/start", cookie, { ...startBody, workspace: fixture.secondWorkspace })).status, 409);

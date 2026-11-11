@@ -1,3 +1,4 @@
+import { WEB_ASSET_MIME as MIME } from "./webAssets.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { lstat, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -30,6 +31,7 @@ import { loadProfiles } from "../services/api/providers/profile.js";
 import { prepareBrowserSearchInput } from "../tools/browserSearchTool.js";
 import { readMergedStringSetting, readTrustedStringArraySetting } from "../utils/settings.js";
 import { loadEnv } from "../utils/loadEnv.js";
+import { syncWebSecrets } from "../utils/webSecrets.js";
 import { resolveApiKeyFromHelper } from "../services/api/apiKeyHelper.js";
 import { cleanupOldFileHistoryBackups } from "../session/fileHistory.js";
 import { refreshHookDisableFromSettings } from "../hooks/settings.js";
@@ -80,7 +82,7 @@ import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWor
 import { handleVisualization } from "./webVisualization.js";
 import { getAllUserCommands } from "../commands/userCommands/registry.js";
 import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
-import { requirePlatformScope } from "../platform/account.js";
+import { requirePlatformScope, withVerifiedPlatformRequest } from "../platform/account.js";
 import { AccountError } from "../platform/accountClient.js";
 import { readServiceConfiguration } from "../platform/serviceState.js";
 import { changeWebApp, webAppsView } from "./webApps.js";
@@ -96,55 +98,7 @@ import { bootstrapWorkfriendScheduler, clearWorkfriendTimers } from "../workfrie
 
 const execFileAsync = promisify(execFile);
 const MAX_BODY_BYTES = 64 * 1024;
-const MIME: Record<string, string> = {
-  "/": "text/html; charset=utf-8",
-  "/index.html": "text/html; charset=utf-8",
-  "/app.js": "text/javascript; charset=utf-8",
-  "/account-menu.js": "text/javascript; charset=utf-8",
-  "/account-center.js": "text/javascript; charset=utf-8",
-  "/plugins.js": "text/javascript; charset=utf-8",
-  "/app-catalog.js": "text/javascript; charset=utf-8",
-  "/app-icons.js": "text/javascript; charset=utf-8",
-  "/promotion.js": "text/javascript; charset=utf-8",
-  "/promotion.css": "text/css; charset=utf-8",
-  "/voice.js": "text/javascript; charset=utf-8",
-  "/browser-panel.js": "text/javascript; charset=utf-8",
-  "/cloudtv.js": "text/javascript; charset=utf-8",
-  "/cloudtv.css": "text/css; charset=utf-8",
-  "/cloudtv-logo.jpg": "image/jpeg",
-  "/caiyunjian-logo.jpg": "image/jpeg",
-  "/library.js": "text/javascript; charset=utf-8",
-  "/memory.js": "text/javascript; charset=utf-8",
-  "/schedules.js": "text/javascript; charset=utf-8",
-  "/customization.js": "text/javascript; charset=utf-8",
-  "/customization.css": "text/css; charset=utf-8",
-  "/workspace-picker.js": "text/javascript; charset=utf-8",
-  "/workspace-picker.css": "text/css; charset=utf-8",
-  "/workspace-files.js": "text/javascript; charset=utf-8",
-  "/composer-tools.js": "text/javascript; charset=utf-8",
-  "/visualization.js": "text/javascript; charset=utf-8",
-  "/visualization-model.js": "text/javascript; charset=utf-8",
-  "/visualization.css": "text/css; charset=utf-8",
-  "/whiteboard.js": "text/javascript; charset=utf-8",
-  "/whiteboard.css": "text/css; charset=utf-8",
-  "/whiteboard-ai.js": "text/javascript; charset=utf-8",
-  "/whiteboard-ai.css": "text/css; charset=utf-8",
-  "/whiteboard-design.js": "text/javascript; charset=utf-8",
-  "/whiteboard-design-canvas.js": "text/javascript; charset=utf-8",
-  "/whiteboard-design.css": "text/css; charset=utf-8",
-  "/whiteboard-editor.html": "text/html; charset=utf-8",
-  "/whiteboard-editor-shell.css": "text/css; charset=utf-8",
-  "/charts.js": "text/javascript; charset=utf-8",
-  "/workbench.css": "text/css; charset=utf-8",
-  "/styles.css": "text/css; charset=utf-8",
-  "/codex-layout.css": "text/css; charset=utf-8",
-  "/plugins.css": "text/css; charset=utf-8",
-  "/chatgpt-web.css": "text/css; charset=utf-8",
-  "/voice.css": "text/css; charset=utf-8",
-  "/browser-panel.css": "text/css; charset=utf-8",
-  "/workspace-features.css": "text/css; charset=utf-8",
-  "/favicon.svg": "image/svg+xml",
-};
+
 
 type GitChange = { status: string; path: string; displayPath: string; previousPath?: string };
 
@@ -421,7 +375,7 @@ async function bootstrap(workspace: string): Promise<string> {
 export async function runWebWorker(args: string[]): Promise<void> {
   await requirePlatformScope(0);
   const { port, workspace: initialWorkspace } = parseArgs(args);
-  let workspace = await resolveWorkingFolder(initialWorkspace);
+  const workspace = await resolveWorkingFolder(initialWorkspace);
   process.chdir(workspace);
   // The CLI initially loads env from its launch directory; --workspace may
   // select a different trusted project, so re-evaluate the same trust rules.
@@ -451,13 +405,6 @@ export async function runWebWorker(args: string[]): Promise<void> {
     try { saved = JSON.parse(await readFile(workspaceListPath, "utf8")); }
     catch { /* The default workspace is always available. */ }
     return [...new Set([workspace, ...(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === "string" && path.isAbsolute(item)) : [])])].slice(0, 20);
-  }
-  async function rememberWorkspace(selected: string, previous: string): Promise<void> {
-    const recent = [selected, previous, ...(await listWebWorkspaces()).filter((item) => item !== selected && item !== previous)].slice(0, 20);
-    await mkdir(path.dirname(workspaceListPath), { recursive: true });
-    const temporary = workspaceListPath + "." + randomUUID() + ".tmp";
-    await writeFile(temporary, JSON.stringify(recent, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
-    await rename(temporary, workspaceListPath);
   }
   const entryDir = path.dirname(path.resolve(process.argv[1] ?? ""));
   const webRoots = [path.resolve(entryDir, "../web"), path.resolve(entryDir, "../../web")];
@@ -496,6 +443,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: restored.summary.model,
       toolContext: {
         cwd: sessionWorkspace, sessionId: id,
+        applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
@@ -516,6 +464,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     const opened = sessions.get(id);
     if (opened) return opened;
     sessions.set(id, session);
+    if (process.connected) process.send?.({ type: "ccagent:session-owned", sessionId: id }, () => {});
     return session;
   }
 
@@ -537,6 +486,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: selectedModel,
       toolContext: {
         cwd: workspace, sessionId: id, temporaryChat: temporary,
+        applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         strictNotificationScope: true,
         requestUserQuestion: (request) => waitForQuestion(session, request),
@@ -548,6 +498,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     session = { id, model: selectedModel, temporary, scheduled, team, engine, busy: false, restoredSnapshots: [], clients: new Set(), events: [], nextEventId: 1, persistenceUnavailable };
     if (!temporary) await saveSessionTeam(workspace, id, team);
     sessions.set(id, session);
+    if (process.connected) process.send?.({ type: "ccagent:session-owned", sessionId: id }, () => {});
     if (persistenceUnavailable) publish(session, {
       type: "notice", tone: "error",
       message: "会话记录暂时无法写入。当前对话可以继续，但重启后新增内容无法恢复。请检查 .ccagent 会话目录的访问权限。",
@@ -675,6 +626,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     publish(session, { type: "turn_started" });
     let succeeded = true;
     try {
+      await syncWebSecrets();
       session.engine.selectSessionTeam(session.team !== "off", await sessionTeamInstructions(session.team));
       await configureFileHistory(workspace, session.id, session.temporary);
       if (session.restoredSnapshots.length) restoreFileHistorySnapshots(session.restoredSnapshots);
@@ -761,7 +713,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     } finally { scheduleDispatching = false; schedulePoll = null; finishPoll(); }
   }
 
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => withVerifiedPlatformRequest(req.headers["x-ccagent-verified-account"], async () => {
     try {
       // Desktop owns a private service instance. Its token is added by the
       // Electron main process, never exposed through a renderer bridge.
@@ -782,6 +734,11 @@ export async function runWebWorker(args: string[]): Promise<void> {
 
       if (req.method === "GET" && route === "/api/health") return json(res, 200, { ok: true, version: VERSION });
       await requirePlatformScope();
+      // Other project processes may have saved account-level credentials.
+      // Refresh only the generated credential namespace between turns; static
+      // assets/status polling never contend on the credential transaction.
+      if (!activeTurn && !scheduleDispatching && !pluginMutationBusy && (req.method === "POST" || route === "/api/models"
+        || route.startsWith("/api/customize/") || route === "/api/whiteboards/design/config")) await syncWebSecrets();
       // Polling the shared schedule file is a short transaction, not a running
       // user task. Wait for it before deciding whether a mutation must be blocked.
       if (schedulePoll && (req.method === "POST" || route === "/api/desktop/status")) {
@@ -789,7 +746,11 @@ export async function runWebWorker(args: string[]): Promise<void> {
         await requirePlatformScope(0);
       }
       if (req.method === "GET" && route === "/api/desktop/status" && desktopToken) {
-        return json(res, 200, { busy: Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) });
+        const owner = activeTurn ? sessions.get(activeTurn) : teamOwner ? sessions.get(teamOwner) : undefined;
+        return json(res, 200, {
+          busy: Boolean(activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length),
+          activeSessionId: owner?.id ?? null, pending: owner?.pending?.kind ?? null,
+        });
       }
       if (route.startsWith("/api/customize/")) {
         const resource = route.slice("/api/customize/".length);
@@ -1024,45 +985,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
         return res.end(await readFile(document.filePath));
       }
       if (req.method === "POST" && route === "/api/workspaces/select") {
-        if (activeTurn || scheduleDispatching || pluginMutationBusy || getActiveTeam() || getRunningAsyncAgents().length) return json(res, 409, { error: "请先等待当前任务、后台 Agent 或团队结束，再切换工作文件夹。" });
-        pluginMutationBusy = true;
-        try {
         const body = await readJson(req);
         const target = await resolveWorkingFolder(typeof body.path === "string" ? body.path : "");
-        const previousWorkspace = workspace;
-        if (target !== workspace) {
-          const previous = workspace;
-          try {
-            clearWorkfriendTimers();
-            process.chdir(target);
-            await loadEnv();
-            const nextConfigs = await loadMcpConfigs(target);
-            for (const name of configuredMcpNames) {
-              if (Object.hasOwn(nextConfigs.servers, name)) continue;
-              const old = getMcpRegistryEntry(name); if (!old) continue;
-              deleteMcpRegistryEntry(name); refreshGlobalToolRegistry();
-              await clearServerCache(name, old.connection.config);
-            }
-            model = await bootstrap(target);
-            permissions = await loadPermissionSettings(target);
-            workspace = target;
-            configuredMcpNames = new Set(Object.keys(nextConfigs.servers));
-          } catch (error) {
-            process.chdir(previous);
-            await loadEnv();
-            model = await bootstrap(previous);
-            permissions = await loadPermissionSettings(previous);
-            throw error;
-          }
-          for (const session of sessions.values()) for (const client of session.clients) client.end();
-          sessions.clear();
-          deletedSessions.clear();
-        }
-        let warning: string | undefined;
-        try { await rememberWorkspace(target, previousWorkspace); }
-        catch { warning = "工作文件夹已切换，但最近项目列表暂时无法保存。"; }
-        return json(res, 200, { workspace: target, ...(warning ? { warning } : {}) });
-        } finally { pluginMutationBusy = false; }
+        if (target !== workspace) return json(res, 409, { error: "请通过项目列表打开工作文件夹。", code: "workspace_bound" });
+        return json(res, 200, { workspace });
       }
       if (req.method === "GET" && route === "/api/bootstrap") {
         let stored: Awaited<ReturnType<typeof listProjectSessions>>;
@@ -1527,7 +1453,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
       // an idle transition; do not make it wait for the fallback poll.
       notificationDispatcher?.request();
     }
-  });
+  }));
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

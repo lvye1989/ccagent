@@ -193,6 +193,7 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
   const toolContext: ToolContext = {
     cwd,
     sessionId,
+    applicationProtection: true,
     // No interactive frontend in headless mode: AskUserQuestion resolves null
     // so the awaiting tool call unblocks instead of hanging.
     requestUserQuestion: async () => null,

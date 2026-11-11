@@ -671,6 +671,7 @@ export class QueryEngine {
         temporaryChat: this.toolContext.temporaryChat,
         additionalInstructions: this.toolContext.sessionInstructions,
         agentTeamsAllowed: this.toolContext.agentTeamsAllowed,
+        applicationProtection: this.toolContext.applicationProtection,
       });
       const previewSystemPrompt = renderSystemPrompt(previewSystemParts);
       const activeContextWindow = await this.getActiveContextWindow();
@@ -1013,6 +1014,7 @@ export class QueryEngine {
   private commandContext(): CommandContext {
     return {
       cwd: this.toolContext.cwd,
+      applicationProtection: this.toolContext.applicationProtection,
       sessionId: this.toolContext.sessionId,
       defaultModel: this.defaultModel,
       getMessages: () => this.messages,
@@ -1270,7 +1272,7 @@ export class QueryEngine {
         const signal = this.toolContext.abortSignal ? AbortSignal.any([controller.signal, this.toolContext.abortSignal]) : controller.signal;
         try {
           const focus = args.join(" ").trim();
-          const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd, temporaryChat: this.toolContext.temporaryChat });
+          const manualSystemParts = await buildSystemPrompt({ cwd: this.toolContext.cwd, temporaryChat: this.toolContext.temporaryChat, applicationProtection: this.toolContext.applicationProtection });
           const manualSystemPrompt = renderSystemPrompt(manualSystemParts);
           const result = await compactMessages(this.messages, focus || undefined, { ...this.usageEstimate(), systemPrompt: manualSystemPrompt, toolDefinitions: this.getActiveTools(), model: this.getActiveModel(), contextWindow: await this.getActiveContextWindow(), force: true, signal });
           this.messages = [...result.messages];

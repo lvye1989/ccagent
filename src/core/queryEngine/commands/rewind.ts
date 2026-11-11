@@ -8,6 +8,7 @@
  */
 
 import { relative as relativePath } from "node:path";
+import { assertApplicationProtection } from "../../../permissions/applicationProtection.js";
 import {
   fileHistoryEnabled,
   fileHistoryGetDiffStats,
@@ -85,6 +86,7 @@ export async function* handleRewindCommand(
 
   let changed: string[];
   try {
+    await assertApplicationProtection("Rewind", { paths: stats.filesChanged }, ctx);
     changed = await fileHistoryRewind(target.messageId);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

@@ -65,7 +65,7 @@ export function nativeNetworkAgent(url: URL): http.Agent | https.Agent {
   let agent = agents.get(key);
   if (!agent) {
     const options = { keepAlive: true, maxFreeSockets: 4, timeout: 5000,
-      proxyEnv: proxy ? { HTTP_PROXY: config.httpProxy, HTTPS_PROXY: config.httpsProxy, NO_PROXY: config.noProxy } : {} };
+      proxyEnv: { NODE_ENV: process.env.NODE_ENV, ...(proxy ? { HTTP_PROXY: config.httpProxy, HTTPS_PROXY: config.httpsProxy, NO_PROXY: config.noProxy } : {}) } };
     agent = url.protocol === "https:" ? new https.Agent(options) : new http.Agent(options);
     agents.set(key, agent);
     // Do not destroy evicted agents: an in-flight request may still own one.

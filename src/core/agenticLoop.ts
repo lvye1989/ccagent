@@ -16,6 +16,7 @@ import {
   type PermissionSettings,
 } from "../permissions/permissions.js";
 import { streamMessage } from "../services/api/streaming.js";
+import { assertApplicationProtection } from "../permissions/applicationProtection.js";
 import { DEFAULT_MAX_TOKENS, ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
 import { officialModelPrefix } from "../platform/serviceState.js";
 import type { QuerySource } from "../services/api/withRetry.js";
@@ -415,6 +416,8 @@ async function runOneToolBlock(
         throw new Error(`Rhino fast lane stopped by an explicit ${block.name} deny rule`);
       }
     }
+    // Hard application boundary precedes hooks, Full Mode and skill allow rules.
+    await assertApplicationProtection(block.name, toolInput, context);
     // ─── Stage 22: PreToolUse hooks ────────────────────────────────
     // Fire user-defined PreToolUse hooks BEFORE the permission check.
     // A hook can:
@@ -749,6 +752,7 @@ async function runOneToolBlock(
       input: toolInput,
       cwd: context.cwd,
       mode: effectiveMode,
+      applicationProtection: context.applicationProtection,
       settings: options.permissionSettings,
       sessionRules: options.sessionPermissionRules,
       messages: options.conversationMessages,
@@ -1072,6 +1076,7 @@ async function runOneToolBlock(
     // A confirmation can remain open while logout/reset/disable revokes login.
     // Recheck immediately before dispatch, including custom and local tools.
     await requirePlatformScope(0);
+    await assertApplicationProtection(block.name, toolInput, context);
     setToolStatus(block.id, "running");
     toolDispatched = true;
     const rawResult = await dispatchTool.call(toolInput, callContext);

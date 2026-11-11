@@ -35,7 +35,7 @@ export function catalogDefaultRoles(input: unknown, routes: OfficialServiceRoute
 }
 export const serviceConfigurationSchema = z.object({
   version: z.literal(1), revision: z.uuid(), userId: z.string().min(1).max(200), origin: z.string().transform(normalizePlatformOrigin),
-  auxiliaryEnabled: z.boolean(), fallbackEnabled: z.boolean().default(false), roles: rolesSchema, routes: z.array(serviceRouteSchema).max(100), updatedAt: z.iso.datetime(),
+  auxiliaryEnabled: z.boolean(), automaticAuxiliary: z.boolean().default(false), fallbackEnabled: z.boolean().default(false), roles: rolesSchema, routes: z.array(serviceRouteSchema).max(100), updatedAt: z.iso.datetime(),
 }).strict();
 export type ServiceConfiguration = z.infer<typeof serviceConfigurationSchema>;
 export type ServiceCredential = { userId: string; origin: string; revision: string; apiKey: string };

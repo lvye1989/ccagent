@@ -35,7 +35,7 @@ const routes = [
   { id: "official-voice", name: "Official voice", service: "voice", protocol: "dashscope-tts" },
 ].map(route => ({ ...route, pricing: { currency: "CNY", definition: { rates: [{ metric: "requests", price: "1", unitQuantity: "1" }], tariff: { kind: "constant" } }, markup: "1.3", usdCny: null, version: 1, sourceUrl: "https://example.com/pricing", fingerprint: undefined as string | undefined }, limits: { contextWindow: 131072, maxOutputTokens: 64, maxImages: 20, fallbackRouteId: null as string | null, fallbackEnabled: false } }));
 const roles = { main: "official-main", image: "official-vision", decision: "official-decision", search: "official-search", voice: "official-voice" };
-const recommended = { chat: 'official-main', vision: 'official-vision', decision: 'official-decision', search: 'official-bocha', voice: 'official-voice' };
+const recommended: Record<string, string | null> = { chat: 'official-main', vision: 'official-vision', decision: 'official-decision', search: 'official-bocha', voice: 'official-voice' };
 let catalogMode: 'normal' | 'invalid' | 'legacy' = 'normal';
 let heldCatalog: { arrived: () => void; wait: Promise<void> } | undefined;
 type StoredFile = { owner: string; bytes: Buffer; token: string; ready: boolean; deleted?: boolean };
@@ -181,10 +181,11 @@ try {
   });
   await test('first platform Key verification uses published defaults without enabling auxiliary services or calling suppliers', async () => {
     const before = modelRequests;
-    await saveOfficialServices({ apiKey: key });
+    await saveOfficialServices({ apiKey: key, automaticAuxiliary: true });
     const configuration = (await readServiceBinding())!.configuration;
     assert.deepEqual(configuration.roles, { ...roles, search: 'official-bocha' });
-    assert.equal(configuration.auxiliaryEnabled, false); assert.equal(modelRequests, before);
+    assert.equal(configuration.automaticAuxiliary, true); assert.equal(configuration.auxiliaryEnabled, false); assert.equal(modelRequests, before);
+    await saveOfficialServices({ automaticAuxiliary: false });
   });
   await test("platform Key validation saves encrypted credentials and public catalog separately", async () => {
     await saveOfficialServices({ apiKey: key, roles, auxiliaryEnabled: false });
@@ -317,6 +318,49 @@ try {
       catalogMode = 'legacy'; await saveOfficialServices({});
       assert.deepEqual((await readServiceBinding())!.configuration.roles, {});
     } finally { catalogMode = 'normal'; await saveOfficialServices({ roles: before.roles }); }
+  });
+  await test('automatic auxiliary roles follow the current catalog while preserving the chosen or cleared main model and the enable checkbox', async () => {
+    const before = (await readServiceBinding())!.configuration, requestsBefore = modelRequests;
+    const beforeRecommendations = { ...recommended };
+    try {
+      await saveOfficialServices({ automaticAuxiliary: true, roles: { main: 'official-main' }, auxiliaryEnabled: false });
+      let configuration = (await readServiceBinding())!.configuration;
+      assert.equal(configuration.automaticAuxiliary, true);
+      assert.deepEqual(configuration.roles, { ...roles, search: 'official-bocha' });
+      assert.equal(configuration.auxiliaryEnabled, false); assert.equal(await officialRole('search'), null);
+
+      recommended.chat = null; recommended.search = 'official-search'; recommended.vision = null;
+      await saveOfficialServices({});
+      configuration = (await readServiceBinding())!.configuration;
+      assert.equal(configuration.roles.main, 'official-main', 'A new catalog default never replaces the user main choice');
+      assert.equal(configuration.roles.search, 'official-search');
+      assert.equal(configuration.roles.image, undefined, 'A null backend default disables that role even when its route still exists');
+      assert.equal(configuration.auxiliaryEnabled, false); assert.equal(await officialRole('search'), null);
+
+      await saveOfficialServices({ roles: {}, auxiliaryEnabled: true });
+      await saveOfficialServices({});
+      configuration = (await readServiceBinding())!.configuration;
+      assert.equal(configuration.roles.main, undefined, 'Saving an empty main choice survives later refreshes');
+      assert.equal(configuration.roles.search, 'official-search'); assert.equal(configuration.auxiliaryEnabled, true);
+      assert.equal((await officialRole('search'))!.id, 'official-search');
+
+      const index = routes.findIndex(route => route.id === 'official-voice'), [removed] = routes.splice(index, 1);
+      try {
+        await saveOfficialServices({});
+        assert.equal((await readServiceBinding())!.configuration.roles.voice, undefined, 'Withdrawn backend services are removed');
+        await assert.rejects(officialRole('voice'), /后台尚未开放.*刷新服务目录/);
+      } finally { routes.splice(index, 0, removed!); }
+
+      catalogMode = 'legacy'; await saveOfficialServices({});
+      assert.deepEqual((await readServiceBinding())!.configuration.roles, {}, 'A catalog without recommendations never chooses arbitrary paid routes');
+      catalogMode = 'normal'; await saveOfficialServices({});
+      assert.equal((await readServiceBinding())!.configuration.roles.search, 'official-search', 'The persisted automatic mode follows later recommendations again');
+      assert.equal((await readServiceBinding())!.configuration.roles.main, undefined);
+      assert.equal(modelRequests, requestsBefore, 'Selecting or refreshing automatic services never dispatches inference');
+    } finally {
+      Object.assign(recommended, beforeRecommendations); catalogMode = 'normal';
+      await saveOfficialServices({ automaticAuxiliary: before.automaticAuxiliary, roles: before.roles, auxiliaryEnabled: before.auxiliaryEnabled });
+    }
   });
   await test('invalid recommendations do not alter the saved configuration or stored Key and never trigger inference', async () => {
     const before = await readFile(servicePaths().state), stored = await readFile(servicePaths().key), requestsBefore = modelRequests;

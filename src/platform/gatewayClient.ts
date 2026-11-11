@@ -54,7 +54,7 @@ function catalogConsent(routes: OfficialServiceRoute[]) {
     pricing: route.pricing, fallbackRouteId: route.limits.fallbackRouteId, fallbackEnabled: route.limits.fallbackEnabled })))));
 }
 type ServiceSaveGuard = { assertCurrent(): Promise<void>; expectedRevision: string | null };
-export async function saveOfficialServices(input: { apiKey?: unknown; roles?: unknown; auxiliaryEnabled?: unknown; fallbackEnabled?: unknown; catalogRevision?: unknown }, guard?: ServiceSaveGuard): Promise<void> {
+export async function saveOfficialServices(input: { apiKey?: unknown; roles?: unknown; auxiliaryEnabled?: unknown; automaticAuxiliary?: unknown; fallbackEnabled?: unknown; catalogRevision?: unknown }, guard?: ServiceSaveGuard): Promise<void> {
   const session = await requirePlatformScope(0), account = await getPlatformAccountClient();
   const old = await readServiceBinding().catch(error => { if (typeof input.apiKey === "string" && input.apiKey.trim()) return null; throw error; });
   const apiKey = typeof input.apiKey === "string" && input.apiKey.trim() ? input.apiKey.trim() : old?.credential.apiKey;
@@ -69,6 +69,7 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
     defaults = catalogDefaultRoles(data.defaults, routes);
   } catch { throw new PlatformServiceError("官方服务目录格式无效，请稍后重新验证。", "INVALID_CATALOG"); }
   if (input.auxiliaryEnabled !== undefined && typeof input.auxiliaryEnabled !== "boolean") throw new Error("请选择是否启用官方辅助服务。");
+  if (input.automaticAuxiliary !== undefined && typeof input.automaticAuxiliary !== "boolean") throw new Error("请选择是否使用后台默认辅助服务。");
   if (input.fallbackEnabled !== undefined && typeof input.fallbackEnabled !== 'boolean') throw new Error('请选择是否允许管理员备用服务。');
   const store = serviceCredentialStore(), paths = servicePaths();
   await guard?.assertCurrent();
@@ -83,7 +84,12 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
     }
     const kinds = { main: "chat", image: "vision", decision: "decision", search: "search", voice: "voice", imageGeneration: "image" };
     const retained = Object.fromEntries(Object.entries(current?.configuration.roles ?? {}).filter(([role, id]) => routes.some(route => route.id === id && route.service === kinds[role as OfficialRole])));
-    const roles = validateServiceRoles(input.roles ?? (current ? retained : defaults), routes);
+    const selected = validateServiceRoles(input.roles ?? (current ? retained : defaults), routes);
+    const automaticAuxiliary = input.automaticAuxiliary ?? current?.configuration.automaticAuxiliary ?? false;
+    // Main remains an explicit user choice, including an intentionally empty selection.
+    // In automatic mode only the current catalog decides which auxiliary roles are available.
+    const { main: _recommendedMain, ...auxiliaryDefaults } = defaults;
+    const roles = automaticAuxiliary ? { ...(selected.main ? { main: selected.main } : {}), ...auxiliaryDefaults } : selected;
     const sameCatalog = !!current && catalogConsent(current.configuration.routes) === catalogConsent(routes);
     if (input.fallbackEnabled === true) {
       if (!current || input.catalogRevision !== current.configuration.revision || !sameCatalog) throw new PlatformServiceError('目录或选择已更新，请先刷新、核对备用价格，再重新开启备用。', 'FALLBACK_CONFIRMATION_REQUIRED', 409);
@@ -93,7 +99,7 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
     }
     const fallbackEnabled = input.fallbackEnabled ?? (sameCatalog && current?.configuration.fallbackEnabled) ?? false;
     const configuration = serviceConfigurationSchema.parse({ version: 1, revision: randomUUID(), userId: session.user.id, origin: account.origin, routes, roles,
-      auxiliaryEnabled: input.auxiliaryEnabled ?? current?.configuration.auxiliaryEnabled ?? false, fallbackEnabled, updatedAt: new Date().toISOString() });
+      auxiliaryEnabled: input.auxiliaryEnabled ?? current?.configuration.auxiliaryEnabled ?? false, automaticAuxiliary, fallbackEnabled, updatedAt: new Date().toISOString() });
     const before = await store.read();
     const beforeState = await readFile(paths.state, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
     await guard?.assertCurrent();
@@ -114,9 +120,10 @@ export async function saveOfficialServices(input: { apiKey?: unknown; roles?: un
 type ConnectionAttempt = { version: 1; userId: string; origin: string; state: "pending" | "unknown" | "failed" | "complete"; completedAt?: number };
 
 /** Explicit POST only. A separate lock serializes callers without nesting the configuration lock. */
-export async function connectOfficialServices() {
+export async function connectOfficialServices(input: { automaticAuxiliary?: unknown } = {}) {
   const beganAt = Date.now();
   try {
+    if (input.automaticAuxiliary !== undefined && typeof input.automaticAuxiliary !== "boolean") throw new Error("请选择是否使用后台默认辅助服务。");
     const session = await requirePlatformScope(0), account = await getPlatformAccountClient();
     const source = getPlatformSessionFile(), paths = servicePaths(), connectionFile = paths.state + ".connect";
     const keySession = await account.applicationKeySession(session.user.id);
@@ -132,7 +139,7 @@ export async function connectOfficialServices() {
       const expectedRevision = (await readServiceConfiguration())?.revision ?? null;
       if (binding && binding.configuration.userId === session.user.id && binding.configuration.origin === account.origin) {
         try {
-          await saveOfficialServices({ fallbackEnabled: false }, { assertCurrent, expectedRevision });
+          await saveOfficialServices({ automaticAuxiliary: input.automaticAuxiliary, fallbackEnabled: false }, { assertCurrent, expectedRevision });
           const view = await officialServicesView(); await assertCurrent(); return view;
         } catch (error) {
           // Only an authoritative Key rejection permits replacement. Network/account errors do not.
@@ -159,7 +166,7 @@ export async function connectOfficialServices() {
         await assertCurrent();
         created = await keySession.create();
         await assertCurrent();
-        await saveOfficialServices({ apiKey: created.secret, fallbackEnabled: false }, { assertCurrent, expectedRevision });
+        await saveOfficialServices({ apiKey: created.secret, automaticAuxiliary: input.automaticAuxiliary, fallbackEnabled: false }, { assertCurrent, expectedRevision });
       } catch (error) {
         let compensated = false;
         if (created) { try { await keySession.revoke(created.id); compensated = true; } catch { /* Original-session cleanup is best effort, never retried blindly. */ } }
@@ -208,7 +215,8 @@ export async function refreshOfficialImageCatalog(): Promise<{ configuration: Se
     const images = routes.filter(route => route.service === "image"), otherRoutes = current.configuration.routes.filter(route => route.service !== "image");
     if (images.some(image => otherRoutes.some(route => route.id === image.id))) throw new PlatformServiceError("图像目录编号冲突，请联系管理员。", "INVALID_CATALOG", 503);
     const { imageGeneration: savedImage, ...otherRoles } = current.configuration.roles;
-    const imageGeneration = images.some(route => route.id === savedImage) ? savedImage : defaults.imageGeneration;
+    const imageGeneration = current.configuration.automaticAuxiliary ? defaults.imageGeneration
+      : images.some(route => route.id === savedImage) ? savedImage : defaults.imageGeneration;
     const roles: ServiceRoles = { ...otherRoles, ...(imageGeneration ? { imageGeneration } : {}) };
     const configuration = serviceConfigurationSchema.parse({ ...current.configuration, roles, routes: [...otherRoutes, ...images] });
     return { configuration, client: new PlatformGatewayClient(account, configuration, current.credential) };
@@ -220,15 +228,15 @@ export async function refreshOfficialImageCatalog(): Promise<{ configuration: Se
 export async function officialServicesView() {
   const session = await requirePlatformScope(0), account = await getPlatformAccountClient(), binding = await readServiceBinding().catch(() => null);
   const configured = Boolean(binding && binding.configuration.origin === account.origin);
-  const me = await checked(await account.serviceRequest("/api/account/me", session.user.id, { maximumBytes: 256 * 1024 }));
-  const identity = await me.json() as { permissions?: unknown };
-  const wallet = await checked(await account.serviceRequest("/api/account/wallet", session.user.id, { maximumBytes: 256 * 1024 }));
-  const balance = await wallet.json() as { wallet?: unknown };
-  return { origin: account.origin, configured, keyPrefix: configured ? binding!.credential.apiKey.slice(0, 16) : "", wallet: balance.wallet,
+  const [identity, balance] = await Promise.all([
+    account.serviceRequest("/api/account/me", session.user.id, { maximumBytes: 256 * 1024 }).then(checked).then(response => response.json() as Promise<{ permissions?: unknown }>),
+    account.serviceRequest("/api/account/wallet", session.user.id, { maximumBytes: 256 * 1024 }).then(checked).then(response => response.json() as Promise<{ wallet?: unknown }>),
+  ]);
+  return { origin: account.origin, user: session.user, configured, keyPrefix: configured ? binding!.credential.apiKey.slice(0, 16) : "", wallet: balance.wallet,
     permissions: Array.isArray(identity.permissions) ? identity.permissions.filter(value => typeof value === "string") : [],
-    ...(configured ? { routes: binding!.configuration.routes, roles: binding!.configuration.roles, auxiliaryEnabled: binding!.configuration.auxiliaryEnabled,
+    ...(configured ? { routes: binding!.configuration.routes, roles: binding!.configuration.roles, auxiliaryEnabled: binding!.configuration.auxiliaryEnabled, automaticAuxiliary: binding!.configuration.automaticAuxiliary,
       fallbackEnabled: binding!.configuration.fallbackEnabled, catalogRevision: binding!.configuration.revision, updatedAt: binding!.configuration.updatedAt }
-      : { routes: [], roles: {}, auxiliaryEnabled: false, fallbackEnabled: false, catalogRevision: null }) };
+      : { routes: [], roles: {}, auxiliaryEnabled: false, automaticAuxiliary: false, fallbackEnabled: false, catalogRevision: null }) };
 }
 
 type CallRecord = { requestId: string; taskId: string; endpoint: Endpoint; model: string; hash: string; keyHash: string;
@@ -418,6 +426,8 @@ export async function officialRole(role: OfficialRole): Promise<OfficialServiceR
   const binding = await readServiceBinding();
   if (!binding) throw new PlatformServiceError("官方辅助服务的平台 Key 需要重新验证。", "SERVICE_NOT_CONFIGURED");
   const id = binding.configuration.roles[role], route = binding.configuration.routes.find(item => item.id === id);
-  if (!route) throw new PlatformServiceError("尚未选择对应的官方辅助服务，请在设置中配置。", "SERVICE_NOT_CONFIGURED");
+  if (!route) throw new PlatformServiceError(binding.configuration.automaticAuxiliary
+    ? "后台尚未开放对应的官方辅助服务，请刷新服务目录后重试。"
+    : "尚未选择对应的官方辅助服务，请在设置中配置。", "SERVICE_NOT_CONFIGURED");
   return route;
 }

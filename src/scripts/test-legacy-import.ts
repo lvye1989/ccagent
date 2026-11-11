@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink, realpath, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -192,5 +192,9 @@ try {
   for (const [key, value] of Object.entries(previous)) if (value !== undefined) process.env[key] = value;
   const parent = await realpath(os.tmpdir());
   if (path.dirname(temp) !== parent || !path.basename(temp).startsWith("ccagent-import-test-")) throw new Error("Unsafe fixture cleanup");
-  await rm(temp, { recursive: true, force: true, maxRetries: 3 });
+  // Remove the fixture junction before its target: concurrent recursive removal
+  // can leave a dangling Windows junction and retry its parent indefinitely.
+  await unlink(path.join(base, "agents", "linked-folder")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+  // A bounded retry accommodates Windows handles on the just-written import tree.
+  await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 }

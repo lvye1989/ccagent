@@ -12,7 +12,40 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
   upload.id = "composer-upload"; upload.type = "file"; upload.multiple = true; upload.hidden = true;
   document.body.append(upload);
   const drafts = new Map(["home-input", "thread-input"].map((id) => [id, { files: [], search: false, uploading: 0 }]));
+  const editors = new Map();
   let anchor = null, inputId = "home-input", request = 0, generation = 0;
+
+  function resizeInput(id) {
+    const input = $(id), editor = editors.get(id);
+    if (!editor || !input.clientWidth) return; // Measure drafts once their view is visible.
+    const container = input.closest(".thread-main, .home-view");
+    const shell = input.closest(".thread-bottom, .composer-dock");
+    const bounds = container.getBoundingClientRect();
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    const available = Math.max(56, Math.min(bounds.height, viewportHeight - Math.max(0, bounds.top)));
+    const previousHeight = input.getBoundingClientRect().height, previousScroll = input.scrollTop;
+    const chrome = shell.getBoundingClientRect().height - previousHeight + (editor.toggle.hidden ? 30 : 0);
+    // Keep the send controls visible and some conversation context above the editor.
+    const expandedLimit = Math.max(56, Math.min(900, available - chrome - 120));
+    const automaticLimit = Math.max(56, Math.min(520, available * 0.55, expandedLimit));
+    const timeline = id === "thread-input" ? $("timeline") : null;
+    const atBottom = timeline && timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 24;
+    input.style.height = "0px";
+    input.style.overflowY = "hidden";
+    const naturalHeight = Math.max(56, input.scrollHeight);
+    const longText = naturalHeight > automaticLimit + 1;
+    if (!longText) editor.expanded = false;
+    editor.toggle.hidden = !longText;
+    editor.toggle.textContent = editor.expanded ? "收起编辑" : "展开编辑";
+    editor.toggle.setAttribute("aria-expanded", String(editor.expanded));
+    const height = Math.ceil(Math.min(naturalHeight, editor.expanded ? expandedLimit : automaticLimit));
+    input.style.height = `${height}px`;
+    const overflowing = input.scrollHeight > input.clientHeight + 1;
+    input.style.overflowY = overflowing ? "auto" : "hidden";
+    input.scrollTop = overflowing ? previousScroll : 0;
+    if (overflowing && document.activeElement === input && input.selectionEnd === input.value.length) input.scrollTop = input.scrollHeight;
+    if (atBottom && Math.abs(previousHeight - height) > 1) timeline.scrollTop = timeline.scrollHeight;
+  }
 
   function syncInput(id) {
     const input = $(id), prefix = id === "home-input" ? "home" : "thread";
@@ -20,13 +53,37 @@ export function createComposerTools({ api, toast, getWorkspace, getInput, files,
     $(`${prefix}-send`).classList.toggle("hidden", !content || input.disabled);
     $(`${prefix}-send`).disabled = input.disabled || draft.uploading > 0;
     $(`${prefix}-voice`).classList.toggle("hidden", content || input.disabled);
+    resizeInput(id);
   }
 
   for (const id of drafts.keys()) {
+    const toggle = document.createElement("button");
+    toggle.type = "button"; toggle.className = "composer-editor-toggle"; toggle.hidden = true;
+    toggle.textContent = "展开编辑"; toggle.setAttribute("aria-controls", id); toggle.setAttribute("aria-expanded", "false");
+    const editor = { toggle, expanded: false }; editors.set(id, editor);
+    toggle.addEventListener("click", () => { editor.expanded = !editor.expanded; resizeInput(id); $(id).focus({ preventScroll: true }); });
+    $(id).before(toggle);
     const chips = document.createElement("div"); chips.id = `${id}-attachments`; chips.className = "composer-attachments hidden";
     $(id).after(chips);
     for (const event of ["input", "focus"]) $(id).addEventListener(event, () => syncInput(id));
     syncInput(id);
+  }
+  const resizeInputs = () => { for (const id of drafts.keys()) resizeInput(id); };
+  window.addEventListener("resize", resizeInputs);
+  window.visualViewport?.addEventListener("resize", resizeInputs);
+  document.fonts?.ready.then(resizeInputs);
+  if (window.ResizeObserver) {
+    const widths = new Map();
+    const observer = new window.ResizeObserver(entries => {
+      for (const entry of entries) {
+        const size = entry.target.id === "content" ? `${entry.contentRect.width}:${entry.contentRect.height}` : entry.contentRect.width;
+        if (widths.get(entry.target) === size) continue;
+        widths.set(entry.target, size);
+        if (entry.target.id === "content") resizeInputs(); else resizeInput(entry.target.id);
+      }
+    });
+    for (const id of drafts.keys()) observer.observe($(id));
+    if ($("content")) observer.observe($("content"));
   }
   function render(id) {
     const draft = drafts.get(id), chips = $(`${id}-attachments`);

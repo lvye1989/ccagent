@@ -1,7 +1,7 @@
 /** Real local-store regressions. No browser, network, account data or mock store. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handleWhiteboard, WhiteboardConflictError, WhiteboardError, type Whiteboard, type WhiteboardMetadata } from "../entrypoint/webWhiteboards.js";
@@ -9,6 +9,7 @@ import { handleWhiteboard, WhiteboardConflictError, WhiteboardError, type Whiteb
 const temporaryParent = await realpath(os.tmpdir());
 const testRoot = await realpath(await mkdtemp(path.join(temporaryParent, "ccagent-whiteboards-")));
 const savedHome = process.env.CCAGENT_HOME;
+const fixtureLinks: string[] = [];
 const accountA = path.join(testRoot, "account-a"), accountB = path.join(testRoot, "account-b");
 const workspaceA = path.join(testRoot, "workspace-a"), workspaceB = path.join(testRoot, "workspace-b");
 const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==";
@@ -55,6 +56,7 @@ try {
   assert.equal((JSON.parse(await readFile(file, "utf8")) as Whiteboard).scene.elements.length, 3, "the real account-private file must contain the scene");
   const alias = path.join(testRoot, "workspace-alias");
   await symlink(workspaceA, alias, process.platform === "win32" ? "junction" : "dir");
+  fixtureLinks.push(alias);
   assert.deepEqual(opened(await handleWhiteboard("open", { id: created.id }, alias)), created, "canonical workspace aliases must share the same private store");
   assert.deepEqual(listed(await handleWhiteboard("list", {}, workspaceB)), []);
   await failure("open", { id: created.id }, workspaceB, 404);
@@ -148,6 +150,7 @@ try {
   await writeFile(outsideFile, "outside-file-must-stay-unchanged");
   await rename(privateDirectory, backupDirectory);
   await symlink(outside, privateDirectory, process.platform === "win32" ? "junction" : "dir");
+  fixtureLinks.push(privateDirectory);
   assert.equal((await lstat(privateDirectory)).isSymbolicLink(), true);
   await failure("list", {}, workspaceA, 500);
   await failure("create", { name: "不得写出" }, workspaceA, 500);
@@ -160,5 +163,7 @@ try {
   if (savedHome === undefined) delete process.env.CCAGENT_HOME; else process.env.CCAGENT_HOME = savedHome;
   const relative = path.relative(temporaryParent, testRoot);
   assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+  // Windows must unlink fixture junctions before recursively removing targets.
+  for (const file of fixtureLinks) await unlink(file).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
   await rm(testRoot, { recursive: true, force: true });
 }

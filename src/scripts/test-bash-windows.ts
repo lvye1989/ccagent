@@ -40,6 +40,12 @@ async function main(): Promise<void> {
       !/[/\\]Windows[/\\]System32[/\\]bash\.exe$/i.test(resolveBashExecutable()),
       "an inherited WSL bash.exe SHELL value is rejected",
     );
+    for (const nonBash of ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "C:\\Windows\\System32\\cmd.exe", "C:\\tools\\zsh.exe"]) {
+      process.env.SHELL = nonBash;
+      assert(resolveBashExecutable() !== nonBash, "an inherited non-Bash Windows shell is rejected");
+    }
+    process.env.SHELL = "C:\\tools\\Git\\bin\\bash.exe";
+    if (savedOverride === undefined) assert(resolveBashExecutable() === process.env.SHELL, "an explicit native Bash shell is preserved");
   }
   if (savedShell === undefined) delete process.env.SHELL;
   else process.env.SHELL = savedShell;

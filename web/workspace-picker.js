@@ -115,7 +115,17 @@ export function createWorkspacePicker({ api, onSelect, getWorkspace }) {
       if (!state.open || opening !== state.request) return;
       $("workspace-current").textContent = data.current; $("workspace-current").title = data.current;
       $("workspace-locations").replaceChildren(...data.locations.map((p) => locationButton(p.name, p.path)));
-      $("workspace-recent").replaceChildren(...data.recent.map((p) => locationButton(p.split(/[\\/]/).filter(Boolean).pop() || p, p, samePath(p, data.current))));
+      const workers = Array.isArray(data.activeWorkers) ? data.activeWorkers : [];
+      const active = workers.map((worker) => {
+        const label = worker.pending === "permission" ? "等待授权" : worker.pending === "question" ? "等待回答" : worker.busy ? "执行中" : "就绪";
+        const name = worker.workspace.split(/[\\/]/).filter(Boolean).pop() || worker.workspace;
+        const item = locationButton(`${name} · ${label}`, worker.workspace, samePath(worker.workspace, data.current));
+        item.dataset.workerWorkspace = worker.workspace;
+        item.title = `${worker.workspace} · 已打开 · ${label}；切换项目后任务继续执行`;
+        return item;
+      });
+      const recent = data.recent.filter((path) => !workers.some((worker) => samePath(worker.workspace, path)));
+      $("workspace-recent").replaceChildren(...active, ...recent.map((p) => locationButton(p.split(/[\\/]/).filter(Boolean).pop() || p, p, samePath(p, data.current))));
       $("workspace-native").classList.toggle("hidden", !data.nativePickerAvailable);
       await navigate(data.current);
       if (state.open) $("workspace-search").focus();

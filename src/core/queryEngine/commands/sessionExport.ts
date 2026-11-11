@@ -8,6 +8,7 @@
  */
 
 import { writeFile } from "node:fs/promises";
+import { assertApplicationProtection } from "../../../permissions/applicationProtection.js";
 import { resolve as resolvePath, isAbsolute as isAbsolutePath } from "node:path";
 import { extractAssistantText } from "../helpers.js";
 import { writeTextToClipboard } from "../../../utils/clipboard.js";
@@ -169,6 +170,7 @@ export async function* handleExportCommand(
   const outPath = isAbsolutePath(target) ? target : resolvePath(ctx.cwd, target);
 
   try {
+    await assertApplicationProtection("Write", { file_path: outPath }, ctx);
     await writeFile(outPath, md, "utf-8");
   } catch (error) {
     yield {

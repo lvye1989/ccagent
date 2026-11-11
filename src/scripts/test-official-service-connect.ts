@@ -96,10 +96,10 @@ try {
   await test("view/GET never creates a Key; explicit connect creates once and returns only safe state", async () => {
     assert.equal((await officialServicesView()).configured, false);
     await handleCustomization("official-services", "GET", {}, { workspace, defaultModel: "personal" }); assert.equal(creates, 0);
-    const result = await handleCustomization("official-services", "POST", { op: "connect", fallbackEnabled: false, makeDefault: true }, { workspace, defaultModel: "personal" });
+    const result = await handleCustomization("official-services", "POST", { op: "connect", automaticAuxiliary: true, fallbackEnabled: false, makeDefault: true }, { workspace, defaultModel: "personal" });
     assert.equal(creates, 1); noSecrets(result);
     const binding = (await readServiceBinding())!;
-    assert.equal(binding.configuration.roles.main, route.id); assert.equal(binding.configuration.auxiliaryEnabled, false); assert.equal(binding.configuration.fallbackEnabled, false);
+    assert.equal(binding.configuration.roles.main, route.id); assert.equal(binding.configuration.automaticAuxiliary, true); assert.equal(binding.configuration.auxiliaryEnabled, false); assert.equal(binding.configuration.fallbackEnabled, false);
     assert(!((await readFile(servicePaths().key, "utf8")).includes(binding.credential.apiKey)), "Windows stores DPAPI ciphertext");
     const before = catalogRequests; noSecrets(await connectOfficialServices()); assert.equal(creates, 1); assert(catalogRequests > before);
     const settings = await readFile(path.join(process.env.CCAGENT_HOME!, "settings.json"), "utf8").catch(() => "{}");

@@ -24,6 +24,7 @@ import type {
 export interface CommandContext {
   /** Working directory for this session (mirrors toolContext.cwd). */
   readonly cwd: string;
+  readonly applicationProtection?: boolean;
   /** Session id, or undefined when running without persistence. */
   readonly sessionId: string | undefined;
   /** The model the engine was constructed with (before any override). */

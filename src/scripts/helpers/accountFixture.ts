@@ -71,10 +71,10 @@ export async function loginForTest(base: string) {
   } };
 }
 
-export async function withTestAccount<T>(run: () => Promise<T>): Promise<T> {
+export async function withTestAccount<T>(run: (fixture: Awaited<ReturnType<typeof loginForTest>>) => Promise<T>): Promise<T> {
   const base = await mkdtemp(path.join(os.tmpdir(), "ccagent-auth-suite-"));
   const fixture = await loginForTest(base);
-  try { return await run(); }
+  try { return await run(fixture); }
   finally {
     await fixture.close();
     if (path.dirname(path.resolve(base)) !== path.resolve(os.tmpdir()) || !path.basename(base).startsWith("ccagent-auth-suite-")) throw new Error("Unsafe account suite cleanup");

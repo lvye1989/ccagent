@@ -8,6 +8,7 @@
  */
 
 import { writeFile, stat as fsStat, mkdir } from "node:fs/promises";
+import { assertApplicationProtection } from "../../../permissions/applicationProtection.js";
 import {
   join as joinPath,
   dirname as dirnamePath,
@@ -127,6 +128,11 @@ export async function* handleMemoryCommand(
       return { handled: true };
     }
     const target = targets[idx - 1]!;
+    try { await assertApplicationProtection("Edit", { file_path: target.path }, ctx); }
+    catch (error) {
+      yield { type: "command", kind: "error", message: error instanceof Error ? error.message : String(error) };
+      return { handled: true };
+    }
     // Create the file (and parents) if it doesn't exist yet, so $EDITOR opens
     // on a real path. Mirrors source's writeFile({ flag: 'wx' }) priming.
     if (!target.exists) {

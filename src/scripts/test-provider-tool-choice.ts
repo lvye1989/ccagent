@@ -56,3 +56,16 @@ for (const protocol of ["openai-chat", "openai-responses"] as const) {
 }
 
 console.log(`[pass] OpenAI tool_choice translation (${checks} checks, no provider calls)`);
+
+for (const profile of [
+  { id: "vision", protocol: "openai-chat", model: "qwen3.8-omni-flash" },
+  { id: "ccagent:vision", protocol: "openai-chat", model: "vision", platformService: "vision", officialUpstreamModel: "qwen3.8-omni-flash" },
+] satisfies ModelProfile[]) {
+  const params: StreamRequestParams = { messages: [{ role: "user", content: "Describe the image." }], thinking: { type: "disabled" }, effortLevel: "high" };
+  const off = prepareRequest(profile, params).body;
+  assert.equal(off.reasoning_effort, "none", "Qwen 3.8 vision explicitly disables reasoning, even with a higher session effort");
+  assert.equal(off.model, profile.model, "Official route identity stays intact");
+  const on = prepareRequest(profile, { ...params, thinking: { type: "enabled", budgetTokens: 1024 }, effortLevel: "low" }).body;
+  assert.equal(on.reasoning_effort, "low");
+}
+console.log("[pass] Qwen 3.8 Omni reasoning compatibility for direct and official routes");

@@ -40,7 +40,7 @@ function fixture(options: {
   const visionRoute = options.visionRoute === undefined ? route("official-vision", "vision", 20) : options.visionRoute;
   const configuration: ServiceConfiguration = {
     version: 1, revision: "11111111-1111-4111-8111-111111111111", userId: "fixture-account", origin: "https://fixture.invalid",
-    auxiliaryEnabled: options.auxiliaryEnabled ?? true, fallbackEnabled: false,
+    auxiliaryEnabled: options.auxiliaryEnabled ?? true, automaticAuxiliary: false, fallbackEnabled: false,
     roles: { main: "deepseek-main", ...(visionRoute ? { image: visionRoute.id } : {}) },
     routes: [route("deepseek-main", "chat", 0), route("deepseek-selected", "chat", 0), route("native-vision", "chat", 20), ...(visionRoute ? [visionRoute] : [])],
     updatedAt: "2026-11-10T00:00:00.000Z",

@@ -18,19 +18,6 @@ function field(parent, label, id, value = "", options = {}) {
   wrap.append(input); parent.append(wrap); return input;
 }
 const scopeChoices = [["project", "当前项目"], ["user", "所有工作区"]];
-export function officialImageChoices(routes, selected) {
-  const isGptImage25 = route => route.service === "image" && route.protocol === "kie-images" && /^gpt-image-2-5-(?:flare|sunburst)-(?:text-to-image|image-to-image)$/.test(route.upstreamModel || "");
-  const family = routes.filter(isGptImage25);
-  // Keep the saved route and its pricing identity. Only the selector is grouped.
-  const representative = family.find(route => route.id === selected) || family.find(route => route.upstreamModel.endsWith("-text-to-image")) || family[0];
-  let added = false;
-  return routes.filter(route => route.service === "image").flatMap(route => {
-    if (!isGptImage25(route)) return [[route.id, route.name]];
-    if (added) return [];
-    added = true;
-    return [[representative.id, "GPT Image 2.5"]];
-  });
-}
 const mailPowerLabels = [
   ["read", "读信", "列出邮件并读取邮件内容"],
   ["write", "写信", "创建并保存邮件草稿"],
@@ -52,7 +39,20 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   }
   const initialSetting = new URLSearchParams(location.search).get("setting");
   let selectedSettings = ["general", "official", "models", "execution", "import"].includes(initialSetting) ? initialSetting : "general", modalRequest = 0, modalBusy = false, teamsData = { teams: [], enabled: true };
-  const request = (resource, body) => api(`/api/customize/${resource}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+  const pendingReads = new Map();
+  const request = (resource, body) => {
+    if (body !== undefined) {
+      pendingReads.clear();
+      return api(`/api/customize/${resource}`, { method: "POST", body: JSON.stringify(body) });
+    }
+    const key = JSON.stringify([getWorkspace(), resource]);
+    if (!pendingReads.has(key)) {
+      const pending = api(`/api/customize/${resource}`, {}).finally(() => { if (pendingReads.get(key) === pending) pendingReads.delete(key); });
+      pendingReads.set(key, pending);
+    }
+    return pendingReads.get(key).then(value => structuredClone(value));
+  };
+  window.addEventListener('ccagent:account-changing', () => pendingReads.clear());
   const powerList = $("power-settings-list"), powerStatus = $("power-settings-status");
   let powerRequest = 0, powerSaving = false, powerLoaded = false;
   const powerControls = [];
@@ -126,13 +126,16 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
   const adminEntry = $("settings-admin-entry");
   let adminAccess = null, adminAccessRevision = 0;
   function clearAdminAccess() { adminAccessRevision++; adminAccess = null; adminEntry.hidden = true; }
+  function applyAdminAccess(access, revision) {
+    if (revision !== adminAccessRevision || !access?.user?.id || typeof access.origin !== 'string' || !Array.isArray(access.permissions) || !access.permissions.includes('admin.read')) return;
+    adminAccess = access; adminEntry.hidden = false;
+  }
   async function refreshAdminAccess() {
     clearAdminAccess();
     const revision = adminAccessRevision;
     try {
       const access = await api('/api/account/access');
-      if (revision !== adminAccessRevision || !access?.user?.id || typeof access.origin !== 'string' || !Array.isArray(access.permissions) || !access.permissions.includes('admin.read')) return;
-      adminAccess = access; adminEntry.hidden = false;
+      applyAdminAccess(access, revision);
     } catch { /* An unavailable or unauthenticated permission lookup never enables this entry. */ }
   }
   window.addEventListener('ccagent:account-changing', clearAdminAccess);
@@ -299,25 +302,31 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
     });
   }
 
-  let settingsRevision = 0, settingsQueue = Promise.resolve();
+  let settingsRevision = 0;
+  window.addEventListener('ccagent:account-changing', () => { settingsRevision++; });
   function renderSettings() {
-    const revision = ++settingsRevision;
-    const render = settingsQueue.then(() => revision === settingsRevision ? renderSettingsContent() : undefined);
-    settingsQueue = render.catch(() => {});
-    return render;
+    return renderSettingsContent(++settingsRevision, selectedSettings);
   }
-  async function renderSettingsContent() {
+  async function renderSettingsContent(revision, selectedSettings) {
     const url = new URL(location.href); url.searchParams.set("setting", selectedSettings); history.replaceState({}, "", url);
     const root = $("settings-content"); root.replaceChildren(el("p", "editor-hint", "正在读取设置…"));
     try {
-      const [data] = await Promise.all([request("settings"), refreshAdminAccess()]);
+      clearAdminAccess();
+      const accessRevision = adminAccessRevision;
+      if (selectedSettings !== "official") void refreshAdminAccess();
+      const [data, service, models] = await Promise.all([
+        ["general", "execution", "models"].includes(selectedSettings) ? request("settings") : undefined,
+        selectedSettings === "official" ? request("official-services") : undefined,
+        selectedSettings === "models" ? request("models") : undefined,
+      ]);
+      if (revision !== settingsRevision) return;
       root.replaceChildren();
       const head = el("header", "settings-head"); head.append(el("div", "page-eyebrow", "PREFERENCES"), el("h1", "", selectedSettings === "import" ? "导入原有数据" : selectedSettings === "official" ? "CCAGENT 官方服务" : selectedSettings === "models" ? "模型接入" : selectedSettings === "execution" ? "权限与执行" : "通用设置"));
       root.append(head);
       $("settings-nav").querySelectorAll("[data-setting]").forEach((b) => b.classList.toggle("selected", b.dataset.setting === selectedSettings));
-      if (selectedSettings === "import") { await renderLegacyImport(root); return; }
+      if (selectedSettings === "import") { await renderLegacyImport(root, () => revision === settingsRevision); return; }
       if (selectedSettings === "official") {
-        const service = await request("official-services");
+        applyAdminAccess(service, accessRevision);
         const form = el("form", "settings-form");
         const money = value => { try { const amount = BigInt(value), absolute = amount < 0n ? -amount : amount; return `${amount < 0n ? '-' : ''}${absolute / 1000000n}.${(absolute % 1000000n).toString().padStart(6, "0").replace(/0+$/, '').padEnd(2, '0')}`; } catch { return "—"; } };
         if (service.wallet) form.append(el("p", "editor-hint", `余额 ¥${money(service.wallet.available ?? service.wallet.balance)} · 冻结 ¥${money(service.wallet.frozen)}`));
@@ -337,14 +346,12 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         keyOptions.append(el("summary", "", "使用已有 API Key"));
         const key = field(keyOptions, "平台 API Key", "official-api-key", "", { type: "password", placeholder: service.configured ? "已连接，留空保留" : "粘贴已有的平台 API Key" });
         form.append(keyOptions);
-        const selections = {};
-        if (service.routes.length) {
-          for (const [role, label, kind] of [["main", "主模型", "chat"], ["image", "读图", "vision"], ["decision", "Jev 决策", "decision"], ["search", "联网搜索", "search"], ["voice", "语音合成", "voice"], ["imageGeneration", "图像生成", "image"]]) {
-            const choices = role === "imageGeneration" ? officialImageChoices(service.routes, service.roles[role]) : service.routes.filter(item => item.service === kind).map(item => [item.id, `${item.name} · ${item.protocol}`]);
-            selections[role] = field(form, label, `official-role-${role}`, service.roles[role] || "", { choices: [["", "未选择"], ...choices] });
-            if (role === "imageGeneration" && choices.some(([, name]) => name === "GPT Image 2.5")) form.append(el("p", "editor-hint", "GPT Image 2.5 支持文字生成图片和参考图编辑，会根据输入自动选择。"));
-          }
-        } else if (service.configured) form.append(el("p", "editor-hint", "暂无已开放且价格配置完整的服务，请联系管理员。"));
+        const mainRoutes = service.routes.filter(route => route.service === "chat");
+        const mainModel = field(form, "主模型", "official-role-main", service.roles.main || "", {
+          choices: [["", "未选择"], ...mainRoutes.map(route => [route.id, `${route.name} · ${route.protocol}`])],
+        });
+        mainModel.disabled = !service.configured || !mainRoutes.length;
+        if (service.configured && !mainRoutes.length) form.append(el("p", "editor-hint", "暂无已开放且价格配置完整的主模型，请联系管理员。"));
         const auxiliary = field(form, "读图、决策、搜索、语音和图像生成使用所选官方服务", "official-auxiliary", service.auxiliaryEnabled, { type: "checkbox" });
         const makeDefault = field(form, "将所选官方主模型设为新对话的默认模型", "official-default", false, { type: "checkbox" });
         auxiliary.disabled = makeDefault.disabled = !service.configured;
@@ -352,15 +359,22 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         form.addEventListener("submit", async event => {
           event.preventDefault(); save.disabled = true;
           try {
-            const roles = Object.fromEntries(Object.entries(selections).filter(([, input]) => input.value).map(([role, input]) => [role, input.value]));
-            await request("official-services", { ...(!service.configured && !key.value.trim() ? { op: "connect" } : { apiKey: key.value }), ...(service.configured ? { roles, auxiliaryEnabled: auxiliary.checked, makeDefault: makeDefault.checked,
+            const roles = mainModel.value ? { main: mainModel.value } : {};
+            await request("official-services", { automaticAuxiliary: true, ...(!service.configured && !key.value.trim() ? { op: "connect" } : { apiKey: key.value }), ...(service.configured ? { roles, auxiliaryEnabled: auxiliary.checked, makeDefault: makeDefault.checked,
               fallbackEnabled: false, catalogRevision: service.catalogRevision } : { fallbackEnabled: false }) });
             key.value = ""; await changed("models"); await renderSettings(); toast("官方服务配置已保存");
           } catch (error) { toast(error.message); } finally { save.disabled = false; }
         });
-        if (service.configured) form.append(button("刷新服务目录", async () => { await request("official-services", { fallbackEnabled: false }); await changed("models"); await renderSettings(); toast("目录已刷新，停止提供的服务已取消选择"); }, "settings-secondary"), button("移除 Key 并停用官方辅助服务", async () => { await request("official-services", { op: "forget" }); key.value = ""; await changed("models"); await renderSettings(); toast("本机 Key 已移除，云端 Key 可在用户中心撤销"); }, "settings-secondary"));
+        if (service.configured) form.append(button("刷新服务目录", async () => { await request("official-services", { automaticAuxiliary: true, fallbackEnabled: false }); await changed("models"); await renderSettings(); toast("服务目录已刷新，辅助服务按后台配置自动更新"); }, "settings-secondary"));
         root.append(form);
-        for (const route of service.routes) {
+        const pricing = el("div"); pricing.id = "official-main-pricing"; root.append(pricing);
+        function renderMainPricing() {
+          pricing.replaceChildren();
+          const route = mainRoutes.find(item => item.id === mainModel.value);
+          if (!route) {
+            if (mainRoutes.length) pricing.append(el("p", "editor-hint", "选择主模型后查看价格。"));
+            return;
+          }
           const row = el("article", "settings-row"), copy = el("div");
           copy.append(el("strong", "", route.name), el("p", "", `${route.id} · 价格 v${route.pricing.version}`));
           const labels = { input_tokens: "输入 Token", cached_input_tokens: "缓存输入 Token", output_tokens: "输出 Token", audio_input_tokens: "音频输入 Token", audio_output_tokens: "音频输出 Token", input_characters: "输入字符", requests: "次请求", output_images: "输出图片（张）", output_images_1k: "1K 输出图片（张）", output_images_2k: "2K 输出图片（张）", output_images_4k: "4K 输出图片（张）", search_credits: "搜索 credit" };
@@ -372,12 +386,13 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
           }
           copy.append(el("p", "editor-hint", `收费倍率 1.3${route.pricing.currency === "USD" ? ` · 结算汇率 ${route.pricing.usdCny} 元/美元` : ""}；最终按实际用量结算并释放未使用的冻结额度。`));
           const source = el("a", "settings-secondary", "供应商公开价格"); source.href = route.pricing.sourceUrl; source.target = "_blank"; source.rel = "noopener noreferrer"; copy.append(source);
-          row.append(copy); root.append(row);
+          row.append(copy); pricing.append(row);
         }
+        mainModel.addEventListener("change", renderMainPricing);
+        renderMainPricing();
         return;
       }
       if (selectedSettings === "models") {
-        const models = await request("models");
         head.append(el("p", "editor-hint", "所有已配置模型与 CLI 共享。"), button("＋ 接入大模型", () => modelEditor(), "settings-primary"), button("接入 Ollama", () => modelEditor(undefined, "ollama"), "settings-secondary"));
         if (!models.models.length) root.append(el("p", "settings-empty", "还没有模型，点击接入大模型开始。"));
         for (const item of models.models) {
@@ -427,11 +442,12 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         } catch (error) { toast(error.message); } finally { save.disabled = false; }
       });
       root.append(form, el("p", "settings-path", `用户配置：${data.settingsPath}`));
-    } catch (error) { root.replaceChildren(el("p", "editor-error", error.message)); }
+    } catch (error) { if (revision === settingsRevision) root.replaceChildren(el("p", "editor-error", error.message)); }
   }
 
-  async function renderLegacyImport(root) {
+  async function renderLegacyImport(root, current = () => true) {
     const defaults = await request("legacy-source"), labels = { configuration: "偏好、模型、MCP 与 RAG 配置", history: "会话、记忆、任务与文件历史", extensions: "Agent、Skill、命令与 Rhino 定义", credentials: "个人供应商凭据与 Google / MCP 授权" };
+    if (!current()) return;
     const form = el("form", "settings-form"), review = el("div", "settings-form"), status = el("p", "editor-hint"); status.setAttribute("role", "status");
     form.append(el("p", "editor-hint", "先扫描来源并核对类别，再复制到当前账户。原文件保留，当前同名文件与配置优先。工作区中的项目文件继续保存在原位置。"));
     const source = field(form, "原 CCAGENT 数据目录", "import-source", defaults.source);

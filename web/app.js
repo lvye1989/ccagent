@@ -15,7 +15,8 @@ import { createWhiteboardUI } from "./whiteboard.js";
 import { folderIcon } from "./app-icons.js";
 
 const $ = (id) => document.getElementById(id);
-const state = { workspace: "", model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), execution: null, executionNode: null, executionTimer: null, serverClockOffset: 0, storageWarningShown: false };
+const initialWorkspace = new URLSearchParams(location.search).get("workspace") || "";
+const state = { workspace: initialWorkspace, model: "", mode: "default", selectedModel: "", availableModels: [], version: "", sessions: [], changes: [], sessionId: null, temporary: false, source: null, busy: false, pending: null, view: "tasks", composeMode: "work", activity: "changes", streamNode: null, toolNodes: new Map(), execution: null, executionNode: null, executionTimer: null, serverClockOffset: 0, storageWarningShown: false };
 let toastTimer;
 let sessionListRequest = 0;
 let openingSession = null;
@@ -30,8 +31,19 @@ let streamFlushTimer = null;
 let composeContext = 0;
 let submitRequest = 0;
 let taskConflict = null;
+let workspaceEpoch = 0;
+const workspaceSessions = new Map();
+const workspaceDrafts = new Map();
+const STALE_WORKSPACE = "工作区已切换，忽略原项目响应";
+
+function projectUrl(values = {}) {
+  const params = new URLSearchParams(values);
+  if (state.workspace) params.set("workspace", state.workspace);
+  return params.size ? `/?${params}` : "/";
+}
 
 function toast(message) {
+  if (String(message).includes(STALE_WORKSPACE)) return;
   const node = $("toast");
   node.textContent = message;
   node.classList.remove("hidden");
@@ -40,11 +52,21 @@ function toast(message) {
 }
 
 async function api(route, options = {}) {
+  const epoch = workspaceEpoch;
+  const queryWorkspace = new URL(route, location.href).searchParams.get("workspace");
+  let bodyWorkspace;
+  if (typeof options.body === "string") {
+    try { bodyWorkspace = JSON.parse(options.body)?.workspace; } catch { /* Non-JSON requests carry the visible project. */ }
+  }
+  const workspace = queryWorkspace || (typeof bodyWorkspace === "string" ? bodyWorkspace : "") || state.workspace;
   const response = await fetch(route, {
     ...options,
-    headers: { ...(options.body ? { "content-type": "application/json" } : {}), "x-ccagent-web": "1", ...(options.headers || {}) },
+    headers: { ...(options.body ? { "content-type": "application/json" } : {}), "x-ccagent-web": "1", ...(workspace ? { "x-ccagent-workspace": encodeURIComponent(workspace) } : {}), ...(options.headers || {}) },
   });
   const body = await response.json();
+  // A completed request still belongs to the project that initiated it.
+  // Closing its view never cancels execution in the background Worker.
+  if (epoch !== workspaceEpoch) throw new Error(STALE_WORKSPACE);
   if (response.status === 401) { state.source?.close(); window.location.replace('/login'); }
   if (!response.ok) {
     const error = new Error(body.error || `HTTP ${response.status}`);
@@ -97,7 +119,7 @@ function showTaskConflict(details) {
     const link = document.createElement("a");
     link.className = "secondary-button";
     link.textContent = details.reason === "whiteboard_running" ? "查看白板（新窗口）" : "查看占用任务（新窗口）";
-    link.href = details.reason === "whiteboard_running" ? "/?view=whiteboard" : `/?session=${encodeURIComponent(details.activeSessionId)}`;
+    link.href = projectUrl(details.reason === "whiteboard_running" ? { view: "whiteboard" } : { session: details.activeSessionId });
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     actions.append(link);
@@ -212,6 +234,7 @@ async function deleteRecentSession(session, remove, button) {
 }
 
 async function onSessionDeleted(id) {
+  for (const [workspace, sessionId] of workspaceSessions) if (sessionId === id) workspaceSessions.delete(workspace);
   sessionListRequest++;
   state.sessions = state.sessions.filter((item) => item.sessionId !== id);
   if (openingSession?.id === id) openingSession = null;
@@ -360,8 +383,8 @@ async function setView(view) {
   $("sidebar").classList.remove("open");
   $("customize-sidebar").classList.remove("open");
   $("feature-sidebar").classList.remove("open");
-  if (view === "tasks") history.replaceState(null, "", "/");
-  else if (view !== "thread") history.replaceState(null, "", `/?view=${view}`);
+  if (view === "tasks") history.replaceState(null, "", projectUrl());
+  else if (view !== "thread") history.replaceState(null, "", projectUrl({ view }));
   if (pluginView) void pluginUI.open(view);
   if (view === "settings" || (customizing && !pluginView)) void customizationUI.open(view);
   if (customizing && !pluginView) document.querySelectorAll(".customize-nav-item").forEach((item) => item.classList.toggle("selected", item.dataset.customizeView === view));
@@ -618,8 +641,10 @@ function appendMarkdown(parent, source, artifacts, depth = 0) {
 }
 
 async function appendArtifactSummary(body, paths) {
+  const epoch = workspaceEpoch;
   const found = [];
   for (const path of [...paths].slice(0, 5)) {
+    if (epoch !== workspaceEpoch || !body.isConnected) return;
     try {
       const name = path.split("/").pop();
       const result = await api(`/api/library?kind=all&query=${encodeURIComponent(name)}`);
@@ -1216,9 +1241,9 @@ async function openSession(id, initialSnapshot, recovery = false) {
     if (data.pending) showInteraction(data.pending);
     if (!recovery && !await setView("thread")) return false;
     if (openingSession !== request || deletingSessions.has(id)) return false;
-    if (!recovery) history.replaceState(null, "", `/?session=${encodeURIComponent(id)}`);
+    if (!recovery) history.replaceState(null, "", projectUrl({ session: id }));
     renderSessions();
-    const source = new EventSource(`/api/sessions/${id}/events?lastEventId=${data.lastEventId || 0}`);
+    const source = new EventSource(`/api/sessions/${id}/events?workspace=${encodeURIComponent(state.workspace)}&lastEventId=${data.lastEventId || 0}`);
     state.source = source;
     source.onmessage = (message) => {
       if (state.sessionId !== id || state.source !== source) return;
@@ -1247,7 +1272,7 @@ async function openSession(id, initialSnapshot, recovery = false) {
       toast("连接恢复中，正在重新读取任务状态…");
       return false;
     }
-    if (new URLSearchParams(location.search).get("session") === id) history.replaceState(null, "", "/");
+    if (new URLSearchParams(location.search).get("session") === id) history.replaceState(null, "", projectUrl());
     toast(error.message);
     return false;
   } finally {
@@ -1256,6 +1281,7 @@ async function openSession(id, initialSnapshot, recovery = false) {
 }
 
 async function submit(text, mode) {
+  if (state.switchingWorkspace) return false;
   const inputId = state.view === "thread" ? "thread-input" : "home-input";
   const input = composerTools.prepare(text.trim(), inputId);
   if (!input) return false;
@@ -1293,7 +1319,7 @@ async function submit(text, mode) {
 }
 
 async function refreshSessions() {
-  const request = ++sessionListRequest;
+  const request = ++sessionListRequest, epoch = workspaceEpoch;
   try {
     const data = await api("/api/bootstrap");
     if (request !== sessionListRequest) return;
@@ -1301,10 +1327,12 @@ async function refreshSessions() {
     if (state.workspace && state.workspace !== data.workspace) composerTools.workspaceChanged();
     state.workspace = data.workspace;
     const whiteboardWorkspaceChanged = await whiteboardUI.workspaceChanged(state.workspace);
+    if (request !== sessionListRequest || epoch !== workspaceEpoch) return;
     if (whiteboardWorkspaceChanged && state.view === "whiteboard") void whiteboardUI.open();
     const visualizationWorkspaceChanged = visualizationUI.workspaceChanged(state.workspace);
     if (visualizationWorkspaceChanged && state.view === "visualization") void visualizationUI.open();
     await workspaceFiles.workspaceChanged(state.workspace);
+    if (request !== sessionListRequest || epoch !== workspaceEpoch) return;
     if (!state.sessionId) state.model = data.model;
     state.version = data.version;
     $("home-mode").value = data.defaultMode || "default";
@@ -1324,7 +1352,39 @@ async function refreshSessions() {
     $("about-model").textContent = modelLabel(state.model);
     $("about-version").textContent = `v${state.version}`;
     renderSessions();
-  } catch (error) { toast(`无法连接 CCAGENT Web：${error.message}`); }
+  } catch (error) {
+    if (error.code === "workspace_not_open" && state.workspace && request === sessionListRequest && epoch === workspaceEpoch) {
+      // A saved project URL can outlive its account or directory. Recover only
+      // bootstrap; ordinary operations must never fall through to another project.
+      workspaceEpoch++;
+      submitRequest++;
+      clearOpenSession();
+      state.workspace = "";
+      state.sessions = [];
+      state.changes = [];
+      state.selectedModel = "";
+      state.availableModels = [];
+      state.model = "";
+      workspaceSessions.clear();
+      workspaceDrafts.clear();
+      composerTools.workspaceChanged();
+      $("home-input").value = "";
+      $("thread-input").value = "";
+      $("timeline").replaceChildren($("thread-progress"));
+      $("diff-view").classList.add("hidden");
+      renderSessions();
+      renderChanges();
+      // Preserve any unavailable whiteboard's local scene for later export.
+      state.view = "tasks";
+      await setView("tasks");
+      await refreshSessions();
+      if (!state.workspace) return;
+      await Promise.all([refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
+      toast("原工作文件夹不可用，已返回默认项目，请重新选择工作文件夹。");
+      return;
+    }
+    toast(`无法连接 CCAGENT Web：${error.message}`);
+  }
 }
 
 async function refreshChanges() {
@@ -1333,6 +1393,10 @@ async function refreshChanges() {
 }
 
 function clearOpenSession() {
+  openingSession = null;
+  clearTimeout(sessionRecoveryTimer);
+  sessionRecoveryTimer = null;
+  sessionRecoveryAttempt = 0;
   composeContext++;
   clearTaskConflict();
   clearStream();
@@ -1356,7 +1420,7 @@ async function newTask() {
   if (state.view === "whiteboard" && !await setView("tasks")) return false;
   openingSession = null;
   clearOpenSession();
-  history.replaceState(null, "", "/");
+  history.replaceState(null, "", projectUrl());
   renderSessions();
   setView("tasks");
   $("home-input").focus();
@@ -1364,26 +1428,49 @@ async function newTask() {
 }
 
 async function selectWorkspace(folder) {
-    state.switchingWorkspace = true;
-    try {
+  if (state.switchingWorkspace) return;
+  state.switchingWorkspace = true;
+  try {
     if (!await whiteboardUI.beforeLeave()) throw new Error("画布尚未保存，请先重试保存或导出备份。");
+    const previousWorkspace = state.workspace;
     const result = await api("/api/workspaces/select", { method: "POST", body: JSON.stringify({ path: folder.trim() }) });
-    if (result.workspace !== state.workspace) {
-      await newTask();
+    if (result.workspace !== previousWorkspace) {
+      if (state.sessionId) workspaceSessions.set(previousWorkspace, state.sessionId);
+      workspaceDrafts.set(previousWorkspace, { home: $("home-input").value, thread: $("thread-input").value });
+      workspaceEpoch++;
+      sessionListRequest++;
+      submitRequest++;
+      clearOpenSession();
       state.workspace = result.workspace;
-      composerTools.workspaceChanged();
+      state.sessions = [];
+      state.changes = [];
       state.selectedModel = "";
+      state.availableModels = [];
+      state.model = "";
+      composerTools.workspaceChanged();
+      const draft = workspaceDrafts.get(state.workspace);
+      $("home-input").value = draft?.home || "";
+      $("thread-input").value = draft?.thread || "";
+      composerTools.sync();
+      $("timeline").replaceChildren($("thread-progress"));
+      $("diff-view").classList.add("hidden");
+      renderSessions();
+      renderChanges();
+      await setView("tasks");
       await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
+      const previousSession = result.activeSessionId || workspaceSessions.get(state.workspace);
+      if (previousSession) await openSession(previousSession);
     }
     await workspaceFiles.workspaceChanged(result.workspace, true);
-    toast(result.warning || `已在 ${shortWorkspace()} 中工作`);
-    } finally { state.switchingWorkspace = false; }
+    toast(result.warning || `已在 ${shortWorkspace()} 中工作；其他项目中的任务会继续执行`);
+  } finally { state.switchingWorkspace = false; }
 }
 
 function installHandlers() {
   document.addEventListener("ccagent:official-services", () => customizationUI.openOfficial());
   document.addEventListener("ccagent:models-changed", () => { state.selectedModel = ""; void refreshModels(); });
   $("temporary-chat").addEventListener("click", async () => {
+    if (state.switchingWorkspace) return;
     try {
       const created = await api("/api/sessions", { method: "POST", body: JSON.stringify({ temporary: true, mode: "default", model: state.selectedModel || undefined }) });
       await openSession(created.sessionId, created.snapshot);
@@ -1470,7 +1557,7 @@ function installHandlers() {
 
 const pluginUI = createPluginUI({ api, toast, navigate: setView, editAgent: (agent) => customizationUI.agentEditor(agent) });
 $("feature-schedule-list").append($("schedule-list"));
-const libraryUI = createLibraryUI({ api, toast });
+const libraryUI = createLibraryUI({ api, toast, getWorkspace: () => state.workspace });
 const memoryUI = createMemoryUI({ api, toast, onDelete: onSessionDeleted });
 const schedulesUI = createSchedulesUI({ api, toast, openSession: (id) => void openSession(id) });
 const browserUI = createBrowserPanel({ api, toast, getSessionId: () => state.sessionId });
@@ -1487,7 +1574,7 @@ const workspaceFiles = createWorkspaceFiles({ api, toast, getWorkspace: () => st
 const composerTools = createComposerTools({ api, toast, getWorkspace: () => state.workspace, getInput: () => $(state.view === "thread" ? "thread-input" : "home-input"), files: workspaceFiles, chooseWorkspace: () => workspacePicker.open(), navigate: setView });
 const cloudTVUI = createCloudTVUI({ onBack: () => {
   setView(state.sessionId ? "thread" : "tasks");
-  if (state.sessionId) history.replaceState(null, "", `/?session=${encodeURIComponent(state.sessionId)}`);
+  if (state.sessionId) history.replaceState(null, "", projectUrl({ session: state.sessionId }));
   $(state.sessionId ? "thread-input" : "home-input").focus();
 } });
 const whiteboardUI = createWhiteboardUI({ api, toast, getWorkspace: () => state.workspace });
@@ -1497,11 +1584,17 @@ const visualizationUI = createVisualizationUI({ api, toast, getWorkspace: () => 
 } });
 installHandlers();
 setComposeMode("work");
-await Promise.all([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
 const params = new URLSearchParams(location.search);
 const savedSession = params.get("session");
-if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
-else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "power-settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv", "whiteboard"].includes(params.get("view"))) await setView(params.get("view"));
-else setView("tasks");
+const earlySettings = !savedSession && ["settings", "power-settings"].includes(params.get("view"));
+if (earlySettings) await setView(params.get("view"));
+const startupViewRequest = viewRequest;
+const startup = await Promise.allSettled([refreshSessions(), refreshChanges(), refreshModels(), customizationUI.refreshTeams(), customizationUI.refreshPreferences()]);
+for (const result of startup) if (result.status === "rejected") toast(result.reason?.message || "部分工作区信息暂时无法读取，请刷新重试。");
+if (!earlySettings && startupViewRequest === viewRequest) {
+  if (savedSession && /^[0-9a-f-]{36}$/.test(savedSession)) await openSession(savedSession);
+  else if (["plugins", "skills", "agents", "mcp", "teams", "settings", "power-settings", "library", "memory", "schedules", "changes", "about", "visualization", "cloudtv", "whiteboard"].includes(params.get("view"))) await setView(params.get("view"));
+  else setView("tasks");
+}
 const homePromotion = createHomePromotion({ api, isIdle: () => state.view === "tasks" && !state.busy && !state.pending && !$("home-input").value.trim() });
 void homePromotion.start();

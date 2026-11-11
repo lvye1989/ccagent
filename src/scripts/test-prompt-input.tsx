@@ -153,5 +153,6 @@ try {
   for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
   Object.assign(process.env, oldEnv);
   assert.ok(path.dirname(root) === os.tmpdir() && path.basename(root).startsWith("ccagent-prompt-render-"));
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
+  // Windows can retain recently closed filesystem handles briefly after Ink cleanup.
+  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
 }

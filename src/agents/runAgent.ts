@@ -26,6 +26,7 @@
 
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { query, type LoopTerminationReason } from "../core/agenticLoop.js";
+import { APPLICATION_PROTECTION_GUIDANCE, DESIGN_WORKFLOW_GUIDANCE } from "../context/designGuidance.js";
 import { toolToApiParam, type Tool, type ToolContext } from "../tools/Tool.js";
 import type {
   PermissionDecision,
@@ -250,6 +251,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
     cwd: params.cwdOverride ?? params.parentToolContext.cwd,
     scopedTools: Object.freeze([...resolved.resolvedTools]),
     officialVisionOnly: params.parentToolContext.officialVisionOnly,
+    applicationProtection: params.parentToolContext.applicationProtection,
     abortSignal,
     defaultModel: params.model,
     sessionId: subSessionId,
@@ -315,7 +317,7 @@ async function runChildAgentLoop(params: RunChildAgentParams): Promise<AgentRunR
 
   const loop = query({
     messages: initialMessages,
-    systemPrompt: def.getSystemPrompt(),
+    systemPrompt: [def.getSystemPrompt(), DESIGN_WORKFLOW_GUIDANCE, ...(subToolContext.applicationProtection ? [APPLICATION_PROTECTION_GUIDANCE] : [])].join("\n\n"),
     tools: toolApiParams,
     model: params.model,
     abortSignal,

@@ -69,8 +69,13 @@ export async function checkWebFiles(base: string, workspace: string, headers: Re
   assert.equal((await fetch(fileUrl("/preview", "中文 文件/broken.docx"))).status, 400);
   const large = await get("/preview", "中文 文件/large.txt"); assert(large.truncated); assert.equal(large.content.length, 1024 * 1024);
   for (const bad of ["../outside.txt", path.join(workspace, "draft file.txt"), "中文 文件/.env.local", ".git/config"]) assert.equal((await fetch(fileUrl("/preview", bad))).status, 400, bad);
-  assert.equal((await fetch(`${base}/api/files?workspace=old-workspace`)).status, 409);
+  const relativeWorkspace = await fetch(`${base}/api/files?workspace=old-workspace`);
+  assert.equal(relativeWorkspace.status, 400);
+  assert.equal((await relativeWorkspace.json() as { code: string }).code, "invalid_workspace");
   const outside = path.join(path.dirname(workspace), "outside-files"); await fs.mkdir(outside); await fs.writeFile(path.join(outside, "file.txt"), "outside");
+  const unopenedWorkspace = await fetch(`${base}/api/files?workspace=${encodeURIComponent(outside)}`);
+  assert.equal(unopenedWorkspace.status, 409);
+  assert.equal((await unopenedWorkspace.json() as { code: string }).code, "workspace_not_open");
   const external = path.join(directory, "external");
   await fs.symlink(outside, external, process.platform === "win32" ? "junction" : "dir");
   try {

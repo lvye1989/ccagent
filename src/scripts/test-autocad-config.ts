@@ -1,6 +1,6 @@
 /** Isolated config/path tests. Does not install or execute Python, MCP packages, or AutoCAD. */
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildAutocadMcpConfig, removeAutocadMcpConfig, normalizeAutocadProgId, AUTOCAD_MCP_SOURCE } from "../services/mcp/autocad.js";
@@ -124,5 +124,7 @@ try {
   for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   assert.equal(path.dirname(root).toLowerCase(), temporary.toLowerCase());
   assert.equal(await realpath(root), root);
+  // Unlink the fixture junction while its target still exists on Windows.
+  await unlink(path.join(root, "redirected-account", "mcp-local")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
   await rm(root, { recursive: true, force: true });
 }

@@ -7,6 +7,8 @@ import { accountNetworkFailure, nativeNetworkAgent, NativeNetworkConfigurationEr
 export interface AccountUser { id: string; email: string; name: string }
 export interface AccountSession { user: AccountUser; expiresAt: string }
 export interface StoredAccountSession extends AccountSession { origin: string; cookie: string }
+/** Native parent-to-worker assertion; never contains the cloud cookie or model credentials. */
+export interface VerifiedAccountCheck { origin: string; sessionFile: string; revision: string; checkedAt: number; session: AccountSession }
 export interface AccountBridgeTicket { ticket: string; expiresAt: string }
 export interface AccountAccess { origin: string; user: AccountUser; permissions: string[] }
 /** Native-only capability. Its captured session and newly issued secret never enter browser responses. */
@@ -162,6 +164,20 @@ export class PlatformAccountClient {
   readonly origin: string;
   constructor(origin: string, private readonly store: SecureCredentialStore<StoredAccountSession>) {
     this.origin = normalizePlatformOrigin(origin);
+  }
+
+  async verifiedSession(): Promise<VerifiedAccountCheck> {
+    const revision = await this.store.revision();
+    const session = await this.requireSession();
+    if (!revision || await this.store.revision() !== revision) throw new AccountError("当前账户已改变，请重新登录。", "account_changed", 401);
+    return { origin: this.origin, sessionFile: this.store.file, revision, checkedAt: Date.now(), session };
+  }
+
+  /** Reuse only the short asset-loading burst; business requests still verify online. */
+  async currentAssetCheck(check?: VerifiedAccountCheck): Promise<VerifiedAccountCheck | undefined> {
+    if (check && check.origin === this.origin && check.sessionFile === this.store.file && Date.now() >= check.checkedAt
+      && Date.now() - check.checkedAt < 1500 && Date.parse(check.session.expiresAt) > Date.now()
+      && await this.store.revision() === check.revision) return structuredClone(check);
   }
 
   /** Live account permissions need only this browser's native session, never a model Key or worker. */

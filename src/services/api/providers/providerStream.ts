@@ -260,6 +260,13 @@ export function prepareRequest(profile: ModelProfile, params: StreamRequestParam
       body.thinking = { type: enabled ? "enabled" : "disabled" };
       const effort = params.effortLevel ?? getSessionEffortLevel();
       if (enabled && effort) body.reasoning_effort = effort === "medium" ? "high" : effort;
+    } else if (/^qwen3\.8-omni-flash(?:-|$)/i.test(profile.officialUpstreamModel ?? profile.model)) {
+      // Qwen 3.8 Omni maps "minimal" to low reasoning; only "none" switches
+      // reasoning off. Honor explicit vision requests even when a session has
+      // a higher effort selected. Keep the gateway route id in body.model.
+      const disabled = (params.thinking ?? buildDefaultThinkingConfig()).type === "disabled" || process.env.CLAUDE_CODE_DISABLE_THINKING;
+      if (disabled) body.reasoning_effort = "none";
+      else if (reasoningEffort) body.reasoning_effort = reasoningEffort;
     } else if (profile.provider === "ollama") {
       // Ollama's `minimal` alias enables thinking, which rejects ordinary
       // models such as Qwen2.5. Use its documented off value; otherwise let

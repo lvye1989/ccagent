@@ -176,13 +176,13 @@ command[info]:
   |
   | Context window: 200,000 tokens
   |
-  |   System prompt          ░░░░░░░░░░░░░░░░░░░░   1.2%  2,380 tok
+  |   System prompt          ░░░░░░░░░░░░░░░░░░░░   1.7%  3,484 tok
   |   AGENT.md + memory      ░░░░░░░░░░░░░░░░░░░░   0.0%  4 tok
   |   Tool definitions       ███░░░░░░░░░░░░░░░░░  13.1%  26,137 tok
   |   Conversation history   ░░░░░░░░░░░░░░░░░░░░   0.0%  42 tok
-  |   Free space             █████████████████░░░  85.7%  171,437 tok
+  |   Free space             █████████████████░░░  85.2%  170,333 tok
   |
-  | Estimated used: 28,563 / 200,000 (14.3%)
+  | Estimated used: 29,667 / 200,000 (14.8%)
 <<< handled=true
 
 ### doctor

@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import type { Tool } from "../tools/Tool.js";
 import { isReadOnlyCommand } from "../tools/bashTool.js";
+import { applicationProtectionReason } from "./applicationProtection.js";
 import { getPlanFilePath } from "../context/plans.js";
 import { loadSettingSources, isTrustedScopeForSensitiveKeys } from "../config/sources.js";
 import {
@@ -54,6 +55,7 @@ export interface PermissionCheckParams {
   tool: Tool;
   input: Record<string, unknown>;
   cwd: string;
+  applicationProtection?: boolean;
   mode?: PermissionMode;
   sessionRules?: PermissionRuleSet;
   settings?: PermissionSettings;
@@ -756,6 +758,9 @@ export async function checkPermission(params: PermissionCheckParams): Promise<Pe
     risk: getRiskLabel(params.tool, params.input),
     ruleHint: buildPermissionRuleHint(params.tool.name, params.input),
   };
+
+  const protectionReason = await applicationProtectionReason(params.tool.name, params.input, params);
+  if (protectionReason) return { behavior: "deny", reason: protectionReason, request };
 
   // Mail has an explicit, per-send authorization boundary in every mode,
   // including Full Mode. Only the current foreground human turn can grant

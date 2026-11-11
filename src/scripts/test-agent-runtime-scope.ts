@@ -85,7 +85,7 @@ async function run(name: string, agent: AgentDefinition, calls: RequestedCall[],
     availableTools: options.available ?? getAllTools(),
     parentToolContext: {
       cwd: workspace, sessionId: `parent-${name}`, notificationOwnerSessionId: "root-conversation", strictNotificationScope: true,
-      temporaryChat: true, agentTeamsAllowed: false, officialVisionOnly: true, abortSignal: options.signal,
+      temporaryChat: true, agentTeamsAllowed: false, officialVisionOnly: true, applicationProtection: true, abortSignal: options.signal,
       ...(options.parentScope === undefined ? {} : { scopedTools: options.parentScope }),
     },
   });
@@ -124,6 +124,7 @@ try {
   assert.equal(imageContext.officialVisionOnly, true); assert.equal(imageContext.defaultModel, "agent-scope-fixture");
   assert.equal(imageContext.notificationOwnerSessionId, "root-conversation"); assert.equal(imageContext.strictNotificationScope, true);
   assert.equal(imageContext.temporaryChat, true); assert.equal(imageContext.agentTeamsAllowed, false);
+  assert.equal(imageContext.applicationProtection, true, "Children inherit the server-owned application policy");
   assert.ok(imageContext.sessionId?.startsWith("parent-image-reader-forged/agent-image_reader-"));
   assert.deepEqual(imageContext.scopedTools?.map(tool => tool.name), ["ReadImage", "Glob"]); assert.ok(Object.isFrozen(imageContext.scopedTools));
   pass("image_reader executes only ReadImage/Glob and preserves official vision, account/session, temporary, and Teams boundaries");
@@ -133,6 +134,14 @@ try {
   assert.equal(executions.get("Read"), 1); assert.equal(executions.get("Write"), 1);
   for (const name of ["Agent", mcpWrite.name]) { assert.equal(executions.get(name) ?? 0, 0); assert.equal(narrow.byName.get(name)?.is_error, true); }
   pass("general-purpose retains authorized parent Read/Write capabilities without restoring MCP tools or recursive Agent");
+
+  const protectedChild = await run("general-protected-app", general, [{ name: "Write", input: {
+    file_path: path.resolve(import.meta.dirname, "../../web/app.js"), content: "must never dispatch",
+    applicationProtection: false, isAdmin: true,
+  } }], { parentScope: [write] });
+  assert.equal(executions.get("Write") ?? 0, 0);
+  assert.equal(protectedChild.byName.get("Write")?.is_error, true);
+  pass("a writable child cannot forge administrator privileges or disable inherited application protection");
 
   const authorizedMcp = await run("general-authorized-mcp", general, [{ name: mcpWrite.name }], { parentScope: [mcpWrite] });
   assert.equal(authorizedMcp.result.reason, "completed"); assert.deepEqual(authorizedMcp.requests[0]!.tools, [mcpWrite.name]);

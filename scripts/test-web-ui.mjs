@@ -54,15 +54,17 @@ const files = [
   { path: "book.xlsx", name: "book.xlsx", size: 20, format: "office", sheets: [{ name: "工作表1", rows: [["<img src=x>", "42"]] }] },
   { path: "other.bin", name: "other.bin", size: 20, format: "binary" },
 ];
-let officialConfigured = false, selectedOfficialRoles = {}, officialFallback = false;
+let officialConfigured = false, selectedOfficialRoles = {}, officialFallback = false, officialAuxiliaryEnabled = false, officialDefaultModel = '';
 let adminPermissions = [], failAccess = false, pendingAccess = null;
 const catalogRevision = '11111111-1111-4111-8111-111111111111';
 const defaultOfficialRoute = { id: 'fixture-default', name: '默认服务测试', service: 'chat', protocol: 'openai-responses', pricing: { version: 1, currency: 'CNY', markup: '1.3', sourceUrl: 'https://example.invalid/pricing', definition: { rates: [{ metric: 'requests', price: '1', unitQuantity: '1' }], tariff: { kind: 'constant' } } }, limits: { fallbackEnabled: true, fallbackRouteId: 'fixture-backup' } };
 const backupOfficialRoute = { ...defaultOfficialRoute, id: 'fixture-backup', name: '备用服务测试', limits: { fallbackEnabled: false, fallbackRouteId: null } };
 let imageOfficialRoutes = [];
+const auxiliaryOfficialRoutes = ['vision', 'decision', 'search', 'voice'].map(service => ({ ...defaultOfficialRoute, id: `fixture-${service}`, service, name: `后台自动${service}模型` }));
+let officialAuxiliaryDefaults = { image: 'fixture-vision', decision: 'fixture-decision', search: 'fixture-search', voice: 'fixture-voice' };
 globalThis.fetch = async (route, options = {}) => {
   const payload = options.body ? JSON.parse(options.body) : null;
-  calls.push({ route, payload });
+  calls.push({ route, payload, headers: options.headers });
   let data;
   if (route === "/api/bootstrap") data = { sessions: recentSessions, workspace: "C:\\offline-project", version: "test", model: "fixture", defaultMode: "plan" };
   else if (route === `/api/memory/sessions/${removableSessionId}` && payload?.action === "delete") {
@@ -93,12 +95,17 @@ globalThis.fetch = async (route, options = {}) => {
   else if (route === "/api/changes") data = { files: [] };
   else if (route === "/api/models") data = { defaultModel: "ccagent:qwen-vision", models };
   else if (route === '/api/customize/official-services') {
+    if (failAccess) throw new Error('Fixture permission lookup unavailable');
+    if (pendingAccess) return pendingAccess;
     if (payload) {
       if (!officialConfigured) { officialConfigured = true; selectedOfficialRoles = { main: defaultOfficialRoute.id }; }
       else if (payload.roles !== undefined) selectedOfficialRoles = payload.roles;
+      if (payload.automaticAuxiliary) selectedOfficialRoles = { ...(selectedOfficialRoles.main ? { main: selectedOfficialRoles.main } : {}), ...officialAuxiliaryDefaults };
+      if (payload.auxiliaryEnabled !== undefined) officialAuxiliaryEnabled = payload.auxiliaryEnabled;
+      if (payload.makeDefault && selectedOfficialRoles.main) officialDefaultModel = selectedOfficialRoles.main;
       if (payload.fallbackEnabled !== undefined) officialFallback = payload.fallbackEnabled;
     }
-    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: false, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute, ...imageOfficialRoutes] : [], wallet: { available: '1', balance: '100001', frozen: '100000' } };
+    data = { configured: officialConfigured, origin: 'https://ccagent.example.invalid', user: { id: 'offline-ui-user' }, permissions: [...adminPermissions], keyPrefix: 'ccagent_fixture', roles: selectedOfficialRoles, auxiliaryEnabled: officialAuxiliaryEnabled, fallbackEnabled: officialFallback, catalogRevision, routes: officialConfigured ? [defaultOfficialRoute, backupOfficialRoute, ...auxiliaryOfficialRoutes, ...imageOfficialRoutes] : [], wallet: { available: '1', balance: '100001', frozen: '100000' } };
   }
   else if (route === "/api/customize/settings") { if (payload?.effortLevel) effortLevel = payload.effortLevel; if (payload?.additionalDirectories) additionalDirectories = payload.additionalDirectories; data = { settings: { language: "中文", mode: "plan", cleanupPeriodDays: 60, effortLevel, additionalDirectories }, settingsPath: "offline-settings.json", defaultModel: "fixture" }; }
   else if (route === "/api/customize/power-settings") {
@@ -429,7 +436,8 @@ try {
   assert(powerNav.querySelector("svg"));
   await click(powerNav);
   assert(powerNav.classList.contains("selected"));
-  assert.equal(location.search, "?view=power-settings");
+  assert.equal(new URLSearchParams(location.search).get("view"), "power-settings");
+  assert.equal(new URLSearchParams(location.search).get("workspace"), "C:\\offline-project");
   const switches = $("power-settings-list").querySelectorAll('[role="switch"]');
   assert.equal(switches.length, 10);
   const qqRead = switches[0], qqDelete = switches[2], mail163Read = switches[5];
@@ -500,44 +508,69 @@ try {
   document.querySelector('[data-setting="official"]').click(); document.querySelector('[data-setting="official"]').click(); await settle();
   assert.equal(document.querySelectorAll('#official-api-key').length, 1, 'Concurrent settings renders never append duplicate forms or duplicate ids');
   assert.equal($('official-fallback'), null, 'Removed fallback authorization is not rendered');
+  assert($('official-role-main').disabled, 'The main-model selector remains visible and disabled before connection');
   assert($('official-auxiliary').disabled && $('official-default').disabled, 'A first Key verification cannot silently enable services or replace the chat default');
   assert.equal($('official-api-key').closest('details').open, false, 'Manual Key entry is optional and collapsed');
   assert(!calls.some(call => call.route === '/api/customize/official-services' && call.payload), 'Rendering never creates or connects a Key');
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
-  assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload, { op: 'connect', fallbackEnabled: false });
+  assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload, { automaticAuxiliary: true, op: 'connect', fallbackEnabled: false });
   officialConfigured = false; await click('[data-setting="official"]');
   $('official-api-key').value = 'ccagent_' + 'x'.repeat(43);
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   const firstVerification = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
-  assert.deepEqual(Object.keys(firstVerification), ['apiKey', 'fallbackEnabled'], 'First verification leaves role initialization to the authenticated catalog');
+  assert.deepEqual(Object.keys(firstVerification), ['automaticAuxiliary', 'apiKey', 'fallbackEnabled'], 'First verification leaves role initialization to the authenticated catalog');
+  assert.equal(firstVerification.automaticAuxiliary, true);
   assert.equal(firstVerification.fallbackEnabled, false);
   assert.equal($('official-role-main').value, defaultOfficialRoute.id); assert.equal($('official-auxiliary').checked, false); assert.equal($('official-default').checked, false);
+  assert.equal($('settings-content').querySelector('button[type="submit"]').textContent, '保存选择并刷新目录');
+  assert.deepEqual([...$('settings-content').querySelectorAll('[id^="official-role-"]')].map(control => control.id), ['official-role-main'], 'Only the main model needs a user selection');
+  assert.equal($('official-auxiliary').closest('label').textContent, '读图、决策、搜索、语音和图像生成使用所选官方服务');
+  assert.equal($('official-default').closest('label').textContent, '将所选官方主模型设为新对话的默认模型');
+  assert.equal($('official-main-pricing').querySelectorAll('article').length, 1, 'The selected main model has one readable price card');
+  assert.equal($('official-main-pricing').querySelector('strong').textContent, defaultOfficialRoute.name);
+  assert(!$('official-main-pricing').textContent.includes(backupOfficialRoute.name));
+  assert(![...$('settings-content').querySelectorAll('button')].some(button => /移除.*KEY|停用官方辅助服务/i.test(button.textContent)), 'The Key-removal control is absent');
   $('official-role-main').value = '';
+  $('official-role-main').dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.equal($('official-main-pricing').querySelectorAll('article').length, 0);
+  assert.equal($('official-main-pricing').textContent, '选择主模型后查看价格。');
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   assert.deepEqual(calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload.roles, {});
+  assert.deepEqual(selectedOfficialRoles, officialAuxiliaryDefaults, 'Clearing the main model still lets the backend configure available auxiliary services');
   assert.equal($('official-role-main').value, '', 'A saved empty selection is kept on reload');
   officialFallback = true; await click('[data-setting="official"]');
   $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
   const consent = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
+  assert.equal(consent.automaticAuxiliary, true); assert.equal(consent.auxiliaryEnabled, false); assert.equal(consent.makeDefault, false);
   assert.equal(consent.fallbackEnabled, false); assert.equal(consent.catalogRevision, catalogRevision); assert.equal($('official-fallback'), null);
   assert(!$('settings-content').textContent.includes('需单独开启备用授权')); assert($('settings-content').textContent.includes('备用服务测试'));
-  console.log('Official service DOM: streamlined links/copy, explicit account connection, optional manual Key, fallback disabled on save, catalog recommendations and cleared selections passed.');
+  $('official-role-main').value = defaultOfficialRoute.id;
+  $('official-auxiliary').checked = true; $('official-default').checked = true;
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  const enabledSelection = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
+  assert.deepEqual(enabledSelection.roles, { main: defaultOfficialRoute.id }, 'Saving sends only the main role; backend supplies all auxiliary defaults');
+  assert.equal(enabledSelection.automaticAuxiliary, true); assert.equal(enabledSelection.auxiliaryEnabled, true); assert.equal(enabledSelection.makeDefault, true);
+  assert.equal(officialDefaultModel, defaultOfficialRoute.id, 'The default-model checkbox still updates the next conversation default');
+  assert.equal($('official-auxiliary').checked, true, 'Auxiliary consent survives save and reload');
+  assert.equal($('official-default').checked, false, 'Making the model default remains an explicit per-save action');
+  assert.deepEqual(selectedOfficialRoles, { main: defaultOfficialRoute.id, ...officialAuxiliaryDefaults });
 
-  imageOfficialRoutes = ['sunburst', 'flare'].flatMap(variant => ['image-to-image', 'text-to-image'].map(mode => ({ ...defaultOfficialRoute, id: `${variant}-${mode}`, service: 'image', protocol: 'kie-images', upstreamModel: `gpt-image-2-5-${variant}-${mode}`, name: `${variant} ${mode}` })));
-  imageOfficialRoutes.push({ ...defaultOfficialRoute, id: 'another-image', service: 'image', protocol: 'kie-images', upstreamModel: 'another-image-model', name: '其他图像模型' });
-  for (const saved of ['', ...imageOfficialRoutes.slice(0, 4).map(route => route.id)]) {
-    selectedOfficialRoles = saved ? { imageGeneration: saved } : {};
-    await click('[data-setting="official"]');
-    const select = $('official-role-imageGeneration');
-    assert.deepEqual([...select.options].map(option => option.textContent), ['未选择', 'GPT Image 2.5', '其他图像模型']);
-    assert.equal(select.value, saved, 'Existing variant selection survives grouping');
-    if (!saved) select.value = select.options[1].value;
-    $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
-    assert.equal(selectedOfficialRoles.imageGeneration, saved || 'sunburst-text-to-image');
-    assert.equal($('official-role-imageGeneration').value, selectedOfficialRoles.imageGeneration);
-  }
-  imageOfficialRoutes = []; selectedOfficialRoles = {}; await click('[data-setting="official"]');
-  console.log('Unified GPT Image 2.5 selection, saved variants, save/reload and unrelated image models passed.');
+  imageOfficialRoutes = ['sunburst', 'flare'].map(variant => ({ ...defaultOfficialRoute, id: `${variant}-text-to-image`, service: 'image', protocol: 'kie-images', upstreamModel: `gpt-image-2-5-${variant}-text-to-image`, name: `${variant} 自动图像模型` }));
+  selectedOfficialRoles.imageGeneration = imageOfficialRoutes[0].id;
+  officialAuxiliaryDefaults = { ...officialAuxiliaryDefaults, imageGeneration: imageOfficialRoutes[1].id };
+  const beforeCatalogRefresh = calls.length;
+  await click([...$('settings-content').querySelectorAll('button')].find(button => button.textContent === '刷新服务目录'));
+  const catalogRefresh = calls.slice(beforeCatalogRefresh).filter(call => call.route === '/api/customize/official-services' && call.payload);
+  assert.equal(catalogRefresh.length, 1, 'Refreshing the catalog makes one actual update request');
+  assert.deepEqual(catalogRefresh[0].payload, { automaticAuxiliary: true, fallbackEnabled: false });
+  assert.equal(selectedOfficialRoles.imageGeneration, imageOfficialRoutes[1].id, 'Refresh picks up changed backend image-generation availability without a user selector');
+  assert.equal(selectedOfficialRoles.main, defaultOfficialRoute.id); assert.equal(officialDefaultModel, defaultOfficialRoute.id);
+  assert.equal($('official-auxiliary').checked, true, 'Catalog refresh preserves the auxiliary consent checkbox');
+  assert.equal($('official-role-main').value, defaultOfficialRoute.id);
+  assert.deepEqual([...$('settings-content').querySelectorAll('[id^="official-role-"]')].map(control => control.id), ['official-role-main']);
+  for (const route of [...auxiliaryOfficialRoutes, ...imageOfficialRoutes]) assert(!$('official-main-pricing').textContent.includes(route.name), 'Auxiliary prices never appear in the main-model price card');
+  assert(!calls.some(call => call.route === '/api/customize/official-services' && call.payload?.op === 'forget'), 'Saving and refreshing never remove the Key or disable auxiliary services through a forget request');
+  console.log('Official service DOM: one main selector and price card, explicit connection/manual Key, automatic backend auxiliaries, preserved consent/default checkboxes, cleared main and real save/refresh requests passed.');
 
   const originalBackupPricing = backupOfficialRoute.pricing;
   backupOfficialRoute.pricing = { ...originalBackupPricing, definition: { tariff: { kind: 'qwen-input-tiers', defaultThinking: true, maxThinkingTokens: 32768 },
@@ -546,13 +579,36 @@ try {
       { upToInputTokens: 1000000, price: '48', ...(metric === 'output_tokens' ? { thinkingPrice: '64' } : {}) },
     ] })),
   } };
+  const originalMainPricing = defaultOfficialRoute.pricing;
+  defaultOfficialRoute.pricing = { ...originalMainPricing, currency: 'USD', usdCny: '7.1', definition: { tariff: { kind: 'constant' }, rates: [{ metric: 'input_tokens', unitQuantity: '1000000', price: '2', offPeakPrice: '1' }] } };
   await click('[data-setting="official"]');
-  assert($('settings-content').textContent.includes('128000 < Token ≤ 1000000'));
-  assert($('settings-content').textContent.includes('思考 64'));
-  assert($('settings-content').textContent.includes('32768 Token'));
-  assert(!$('settings-content').textContent.includes('CNY undefined'));
+  assert($('official-main-pricing').textContent.includes('USD 2（低峰 1）'));
+  assert($('official-main-pricing').textContent.includes('结算汇率 7.1 元/美元'));
+  assert.equal($('official-main-pricing').querySelector('a').href, originalMainPricing.sourceUrl);
+  assert(!$('official-main-pricing').textContent.includes('128000 < Token ≤ 1000000'), 'Unselected model tiers are hidden');
+  const beforeModelChange = calls.length;
+  $('official-role-main').value = backupOfficialRoute.id;
+  $('official-role-main').dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.equal(calls.length, beforeModelChange, 'Changing the selected main model updates pricing immediately without a network request');
+  assert.equal($('official-main-pricing').querySelector('strong').textContent, backupOfficialRoute.name);
+  assert($('official-main-pricing').textContent.includes('128000 < Token ≤ 1000000'));
+  assert($('official-main-pricing').textContent.includes('思考 64'));
+  assert($('official-main-pricing').textContent.includes('32768 Token'));
+  for (const label of ['输入 Token', '缓存输入 Token', '输出 Token']) {
+    assert($('official-main-pricing').textContent.includes(`输入 0 < Token ≤ 128000，每 1000000 ${label}：CNY 0${label === '输出 Token' ? '（思考 8）' : ''}`));
+    assert($('official-main-pricing').textContent.includes(`输入 128000 < Token ≤ 1000000，每 1000000 ${label}：CNY 48${label === '输出 Token' ? '（思考 64）' : ''}`));
+  }
+  assert(!$('official-main-pricing').textContent.includes('USD 2'));
+  assert(!$('official-main-pricing').textContent.includes('CNY undefined'));
+  $('official-auxiliary').checked = false;
+  $('settings-content').querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle();
+  const disabledSelection = calls.filter(call => call.route === '/api/customize/official-services' && call.payload).at(-1).payload;
+  assert.deepEqual(disabledSelection.roles, { main: backupOfficialRoute.id }); assert.equal(disabledSelection.auxiliaryEnabled, false); assert.equal(disabledSelection.makeDefault, false);
+  assert.equal($('official-role-main').value, backupOfficialRoute.id); assert.equal($('official-auxiliary').checked, false);
+  assert.equal(officialDefaultModel, defaultOfficialRoute.id, 'Saving a different main model with the default checkbox clear preserves the existing new-chat default');
   backupOfficialRoute.pricing = originalBackupPricing;
-  console.log('Official service DOM: all Qwen tiers thinking prices and reasoning allowance are visible.');
+  defaultOfficialRoute.pricing = originalMainPricing; imageOfficialRoutes = []; selectedOfficialRoles = {};
+  console.log('Official service DOM: main-model change immediately swaps prices; Qwen tiers/thinking allowance, off-peak rates, exchange rate/source and disabled consent/default preservation passed.');
 
   const adminEntry = $('settings-admin-entry');
   assert.equal(adminEntry.previousElementSibling.dataset.setting, 'import');
@@ -584,6 +640,20 @@ try {
   adminPermissions = [];
   console.log('Admin entry DOM: ordering, ordinary-user denial, authenticated bridge, refreshed revocation, lookup failure and account-switch race passed.');
 
+  const beforeOfficialReads = calls.length;
+  await click('[data-setting="official"]');
+  const officialReads = calls.slice(beforeOfficialReads).filter(call => !call.payload).map(call => call.route);
+  assert.deepEqual(officialReads, ['/api/customize/official-services'], 'Official settings uses one resource without duplicate permission or unrelated settings reads');
+  let releaseSlowSettings;
+  pendingAccess = new Promise(resolve => { releaseSlowSettings = resolve; });
+  document.querySelector('[data-setting="official"]').click(); await settle();
+  await click('[data-setting="general"]');
+  assert($('settings-language'), 'General settings renders while earlier official and administrator requests are still pending');
+  releaseSlowSettings({ ok: true, json: async () => ({ origin: 'https://ccagent.example.invalid', user: { id: 'offline-ui-user' }, permissions: [] }) });
+  await settle(); pendingAccess = null;
+  assert($('settings-language'), 'Late settings result cannot replace the newly selected page');
+  console.log('Settings performance DOM: one official request, nonblocking permissions, immediate category changes and stale response isolation passed.');
+
   await click('[data-customize-view="teams"]'); assert(!$("teams-view").classList.contains("hidden"));
   await click("#teams-create"); assert($("edit-team-name"));
   $("editor-requirements").value = "Organize a team"; await click(".editor-generate");
@@ -594,10 +664,99 @@ try {
   await click('[data-view="library"]'); await click("#library-rag");
   await click(action("＋ 添加知识库")); $("edit-rag-id").value = "offline"; $("edit-rag-name").value = "Offline KB"; $("edit-rag-url").value = "https://example.test/retrieve";
   await click(action("保存知识库")); assert(calls.some((c) => c.route === "/api/customize/rag" && c.payload?.id === "offline"));
-  await click('[data-view="visualization"]'); assert(!$("visualization-view").classList.contains("hidden")); assert($("viz-dropzone")); assert($("sidebar").classList.contains("hidden")); assert.equal(location.search, "?view=visualization");
+  await click('[data-view="visualization"]'); assert(!$("visualization-view").classList.contains("hidden")); assert($("viz-dropzone")); assert($("sidebar").classList.contains("hidden")); assert.equal(new URLSearchParams(location.search).get("view"), "visualization");
   assert(calls.some((c) => c.route.startsWith("/api/visualization?workspace=")), "Sidebar entry loads the actual workspace-scoped visualization API");
   const chartStyles = document.createElement("style"); chartStyles.textContent = await fs.readFile(path.join(root, "web/styles.css"), "utf8") + await fs.readFile(path.join(root, "web/visualization.css"), "utf8"); document.head.append(chartStyles);
   assert(["#f6f8fe", "rgb(246, 248, 254)"].includes(window.getComputedStyle(document.querySelector(".content")).backgroundColor), "Visualization background overrides the normal content surface");
   console.log("Offline Web DOM: all six feature entries, generation/edit/save dialogs, literal rendering, skill toggles, model selector linkage, team controls, settings and RAG forms passed.");
   console.log("Workspace/composer DOM: search removed with history retained, right-side directory browse, all preview renderers, safe text, reference chips, 7 executable menu actions, keyboard/outside dismissal, uploads, commands/search submission, plan mode and retry preservation passed.");
+
+  // Use the real application and picker to keep two project tasks alive.
+  const projectA = "C:\\offline-project", projectB = "D:\\并行项目 B";
+  const projectBSession = "55555555-5555-4555-8555-555555555555";
+  let currentProject = projectA, projectBBusy = false, slowChanges, releaseOldChanges, unavailableProject;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (route, options = {}) => {
+    const workspace = options.headers?.["x-ccagent-workspace"] ? decodeURIComponent(options.headers["x-ccagent-workspace"]) : currentProject;
+    const payload = options.body ? JSON.parse(options.body) : null;
+    if (route === "/api/bootstrap" && workspace === unavailableProject) {
+      calls.push({ route, payload, headers: options.headers });
+      return { status: 409, ok: false, json: async () => ({ error: "Project is no longer available", code: "workspace_not_open" }) };
+    }
+    let data;
+    if (route === "/api/workspaces") data = { current: workspace, recent: [projectA, projectB], locations: [], nativePickerAvailable: false, activeWorkers: [{ workspace: projectA, busy: true, activeSessionId: sessionId }, { workspace: projectB, busy: projectBBusy, activeSessionId: projectBBusy ? projectBSession : null }] };
+    else if (route.startsWith("/api/workspaces/browse")) data = { path: new URL(route, location.href).searchParams.get("path"), parent: null, breadcrumbs: [], folders: [], total: 0 };
+    else if (route === "/api/workspaces/select") { currentProject = payload.path; data = { workspace: currentProject, activeSessionId: currentProject === projectA ? sessionId : projectBBusy ? projectBSession : null, preservedBackgroundTasks: true }; }
+    else if (route === "/api/bootstrap") data = { workspace, sessions: workspace === projectA ? recentSessions : projectBBusy ? [{ sessionId: projectBSession, firstPrompt: "B project task" }] : [], version: "test", model: "fixture", defaultMode: "plan" };
+    else if (route === "/api/changes" && workspace === projectA && slowChanges) { slowChanges = false; return new Promise(resolve => { releaseOldChanges = resolve; }); }
+    else if (route === "/api/sessions" && workspace === projectB) data = { sessionId: projectBSession, snapshot: { sessionId: projectBSession, mode: "plan", model: "fixture", messages: [], team: "off", busy: false } };
+    else if (route === `/api/sessions/${projectBSession}/messages`) { assert.equal(workspace, projectB); projectBBusy = true; data = { accepted: true }; }
+    else if (route === `/api/sessions/${projectBSession}`) { assert.equal(workspace, projectB); data = { sessionId: projectBSession, mode: "plan", model: "fixture", messages: [], team: "off", busy: projectBBusy }; }
+    else return originalFetch(route, options);
+    calls.push({ route, payload, headers: options.headers });
+    return { ok: true, json: async () => data };
+  };
+  await click("#new-task");
+  await click("#recent-list .recent-item");
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  const projectASource = lastEventSource;
+  recoveredSessionSnapshot = { sessionId, mode: "plan", model: "fixture", messages: [], team: "off", busy: true };
+  $("thread-input").value = "A project draft";
+  assert.equal(new URL(lastEventSource.url, location.href).searchParams.get("workspace"), projectA);
+  slowChanges = true;
+  $("activity-refresh").click(); await settle();
+  const beforeProjectSwitch = calls.length;
+  async function switchProject(folder) {
+    await click("#context-workspace");
+    assert.match($("workspace-recent").textContent, /执行中/);
+    $("workspace-input").value = folder;
+    await click("#workspace-use");
+    assert($("workspace-overlay").classList.contains("hidden"));
+  }
+  await switchProject(projectB);
+  assert(projectASource.closed, "Switching closes only the view's event connection");
+  assert.equal($("workspace-path").textContent, projectB);
+  assert(!$("home-view").classList.contains("hidden"));
+  assert.equal($("thread-input").value, "", "Project A's draft is not shown in project B");
+  assert.equal($("home-effort").disabled, false, "A task in project A does not lock project B's composer");
+  releaseOldChanges({ ok: true, json: async () => ({ files: [{ path: "stale-project-a.txt", status: "M" }] }) }); await settle();
+  assert(!$("changes-list").textContent.includes("stale-project-a.txt"), "A late response cannot replace project B's changes");
+  projectASource.onmessage({ data: JSON.stringify({ type: "assistant", message: { role: "assistant", content: "stale A event" } }) });
+  assert(!$("timeline").textContent.includes("stale A event"));
+  $("home-input").value = "Run the second project in parallel";
+  $("home-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle();
+  assert(projectBBusy, `B submit failed: ${$("toast").textContent}; ${calls.slice(beforeProjectSwitch).map(call => call.route).join(",")}`);
+  assert.equal(new URL(lastEventSource.url, location.href).searchParams.get("workspace"), projectB);
+  lastEventSource.onmessage({ data: JSON.stringify({ type: "turn_started" }) });
+  await switchProject(projectA);
+  assert.equal(new URLSearchParams(location.search).get("session"), sessionId);
+  assert.equal(new URLSearchParams(location.search).get("workspace"), projectA);
+  assert.equal($("thread-input").disabled, true, "Returning to A restores its still-running task");
+  assert.equal($("thread-input").value, "A project draft", "Returning to A restores its own text draft");
+  await switchProject(projectB);
+  assert.equal(new URLSearchParams(location.search).get("session"), projectBSession);
+  assert.equal($("thread-input").disabled, true, "Returning to B restores its independent running task");
+  assert.equal(calls.slice(beforeProjectSwitch).filter(call => call.route.endsWith("/interrupt")).length, 0, "Project switching never interrupts either root task");
+  assert(calls.slice(beforeProjectSwitch).some(call => call.headers?.["x-ccagent-workspace"] === encodeURIComponent(projectB)), "Unicode project paths are encoded in request headers");
+  console.log("Parallel projects DOM: independent submissions, running-task restoration, encoded request/SSE/URL binding, picker task status and stale response/event isolation passed.");
+
+  unavailableProject = projectB;
+  currentProject = projectA;
+  const beforeUnavailableRecovery = calls.length;
+  await click("#refresh-all");
+  const recoveryCalls = calls.slice(beforeUnavailableRecovery);
+  const bootstrapRecovery = recoveryCalls.filter(call => call.route === "/api/bootstrap");
+  assert.equal(bootstrapRecovery.length, 2, "An unavailable project triggers one unbound bootstrap retry");
+  assert.equal(bootstrapRecovery[0].headers["x-ccagent-workspace"], encodeURIComponent(projectB));
+  assert.equal(bootstrapRecovery[1].headers["x-ccagent-workspace"], undefined, "Recovery removes the unavailable project header");
+  assert.equal($("workspace-path").textContent, projectA);
+  assert(!$("home-view").classList.contains("hidden"));
+  assert.equal(new URLSearchParams(location.search).get("session"), null, "A stale saved session is not opened in the default project");
+  assert.equal(new URLSearchParams(location.search).get("workspace"), null, "Recovery removes the unavailable project URL binding");
+  assert.equal(recoveryCalls.filter(call => call.route.endsWith("/messages") || call.route.endsWith("/interrupt")).length, 0, "Recovery neither submits nor interrupts tasks");
+  assert.match($("toast").textContent, /原工作文件夹不可用/);
+  await click("#context-workspace");
+  assert(!$("workspace-overlay").classList.contains("hidden"), "The project picker remains usable after account or directory changes");
+  await click("#workspace-cancel");
+  console.log("Unavailable project DOM: one unbound bootstrap recovery, removed stale URL/session, default project restored and usable project picker passed.");
 } finally { await window.happyDOM.close(); }

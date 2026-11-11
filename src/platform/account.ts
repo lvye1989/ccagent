@@ -2,7 +2,8 @@ import { getCCAgentHome } from "../utils/paths.js";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
-import { AccountError, normalizePlatformOrigin, PlatformAccountClient, type AccountSession, type StoredAccountSession } from "./accountClient.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { AccountError, normalizePlatformOrigin, PlatformAccountClient, type AccountSession, type StoredAccountSession, type VerifiedAccountCheck } from "./accountClient.js";
 import { SecureCredentialStore } from "./secureStore.js";
 
 type PlatformConfiguration = { origin: string };
@@ -80,6 +81,22 @@ export async function getPlatformAccountClient(sessionFile?: string): Promise<Pl
 
 const leases = new Map<string, { checkedAt: number; session: AccountSession }>();
 const checks = new Map<string, Promise<AccountSession>>();
+const requestChecks = new AsyncLocalStorage<{ active: boolean; check?: VerifiedAccountCheck }>();
+
+/** Only the private Web worker may accept its parent's fresh verification. */
+export async function withVerifiedPlatformRequest<T>(header: unknown, run: () => Promise<T>): Promise<T> {
+  let check: VerifiedAccountCheck | undefined;
+  if (typeof header === "string" && header.length < 16384 && process.env.CCAGENT_WEB_WORKER_TOKEN) {
+    try {
+      const value = JSON.parse(Buffer.from(header, "base64url").toString("utf8")) as VerifiedAccountCheck;
+      if (typeof value.origin === "string" && typeof value.sessionFile === "string" && typeof value.revision === "string"
+        && typeof value.checkedAt === "number" && Number.isFinite(value.checkedAt) && typeof value.session?.user?.id === "string"
+        && typeof value.session.user.email === "string" && typeof value.session.expiresAt === "string") check = value;
+    } catch { /* A malformed assertion never replaces live verification. */ }
+  }
+  const scope = { active: true, check };
+  return requestChecks.run(scope, async () => { try { return await run(); } finally { scope.active = false; } });
+}
 
 export async function hasStoredPlatformSession(): Promise<boolean> {
   return (await accountStores().session.revision()) !== null;
@@ -92,6 +109,10 @@ export async function requirePlatformAccount(maxAgeMs = 0): Promise<AccountSessi
   const expectedId = process.env.CCAGENT_ACCOUNT_ID;
   const key = JSON.stringify([getPlatformHome(), getPlatformSessionFile(), client.origin, revision, expectedId]);
   const now = Date.now();
+  const scoped = requestChecks.getStore(), verified = scoped?.active ? scoped.check : undefined;
+  if (verified && verified.origin === client.origin && verified.sessionFile === getPlatformSessionFile()
+    && verified.revision === revision && verified.session.user.id === expectedId && now >= verified.checkedAt
+    && now - verified.checkedAt < 1500 && Date.parse(verified.session.expiresAt) > now) return structuredClone(verified.session);
   const maximumAge = Math.max(0, Math.min(maxAgeMs, 1500));
   const lease = leases.get(key);
   if (maximumAge > 0 && lease && now >= lease.checkedAt && now - lease.checkedAt < maximumAge && Date.parse(lease.session.expiresAt) > now) {
@@ -132,4 +153,15 @@ export async function requirePlatformScope(maxAgeMs = 1500): Promise<AccountSess
   const comparable = (value: string) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
   if (comparable(actual) !== comparable(expected)) throw new AccountError("账户数据目录不匹配，请重新打开应用。", "account_scope_mismatch", 403);
   return session;
+}
+
+/** No cached/admin hint from a browser or model can authorize application maintenance. */
+export async function canMaintainApplication(): Promise<boolean> {
+  try {
+    const session = await requirePlatformScope(0);
+    const access = await (await getPlatformAccountClient()).accountAccess();
+    // Require the existing administrative write capabilities, not dashboard read access alone.
+    return access.user.id === session.user.id
+      && ["admin.read", "roles.write", "settings.write"].every(permission => access.permissions.includes(permission));
+  } catch { return false; } // Offline, expired, revoked and switched accounts fail closed.
 }

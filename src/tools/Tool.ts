@@ -56,6 +56,8 @@ export interface ToolContext {
   scopedTools?: readonly Tool[];
   /** Runtime-only constraint: a text-only official route must not use a personal vision key. */
   officialVisionOnly?: boolean;
+  /** Entrypoint-owned application policy; never supplied or disabled by model input. */
+  applicationProtection?: boolean;
   /** Abort signal for cancellation */
   abortSignal?: AbortSignal;
   /** Callback to switch permission mode at runtime (set by QueryEngine). */

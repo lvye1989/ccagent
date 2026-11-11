@@ -351,7 +351,7 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
 
   if (dumpSystemPrompt) {
     const cwd = process.cwd();
-    const systemParts = await buildSystemPrompt({ cwd });
+    const systemParts = await buildSystemPrompt({ cwd, applicationProtection: true });
     const system = renderSystemPrompt(systemParts);
     console.log(system);
     process.exit(0);

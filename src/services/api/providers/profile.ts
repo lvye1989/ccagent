@@ -52,6 +52,8 @@ export interface ModelProfile {
   provider?: "ollama";
   /** Only synthesized from the authenticated account's official catalog. Never read from project settings. */
   platformService?: string;
+  /** Authenticated catalog metadata; never used to replace the gateway route id. */
+  officialUpstreamModel?: string;
   /** The map key / user-facing handle. */
   id: string;
   protocol: ModelProtocol;
@@ -210,7 +212,7 @@ export async function loadProfiles(cwd: string = process.cwd()): Promise<LoadedP
       for (const route of binding?.configuration.routes ?? []) {
         if (!["chat", "vision"].includes(route.service) || !["openai-chat", "openai-responses"].includes(route.protocol)) continue;
         const id = officialModelPrefix + route.id;
-        profiles[id] = { id, platformService: route.id, upstreamProvider: route.provider, protocol: route.protocol as ModelProtocol, model: route.id,
+        profiles[id] = { id, platformService: route.id, upstreamProvider: route.provider, officialUpstreamModel: route.upstreamModel, protocol: route.protocol as ModelProtocol, model: route.id,
           baseURL: binding!.configuration.origin + "/v1", maxTokens: route.limits.maxOutputTokens, contextWindow: route.limits.contextWindow };
       }
     } catch { warnings.push("官方服务配置需要重新验证；不会切换到其他供应商密钥。"); }

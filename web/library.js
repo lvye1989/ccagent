@@ -1,4 +1,4 @@
-export function createLibraryUI({ api, toast }) {
+export function createLibraryUI({ api, toast, getWorkspace = () => "" }) {
   const $ = (id) => document.getElementById(id);
   const state = { kind: "all", files: [], selected: null, request: 0 };
   let searchTimer;
@@ -40,7 +40,7 @@ export function createLibraryUI({ api, toast }) {
     const meta = document.createElement("p"); meta.textContent = `${file.kind} · ${(file.size / 1024).toFixed(1)} KB · ${new Date(file.updatedAt).toLocaleString("zh-CN")}`;
     const download = document.createElement("a");
     download.className = "library-download";
-    download.href = `/api/library/download?path=${encodeURIComponent(file.path)}`;
+    download.href = `/api/library/download?path=${encodeURIComponent(file.path)}&workspace=${encodeURIComponent(getWorkspace())}`;
     download.download = file.name;
     download.textContent = "下载文件";
     pane.append(heading, path, meta, download);

@@ -5,8 +5,11 @@ import { mkdir, readFile, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { accountHome, configurePlatform, getDefaultPlatformOrigin, getPlatformAccountClient, getPlatformHome, getPlatformSessionFile, OFFICIAL_ACCOUNT_ORIGIN } from "../platform/account.js";
-import { AccountError, normalizePlatformOrigin, type AccountSession, type PlatformAccountClient } from "../platform/accountClient.js";
+import { AccountError, normalizePlatformOrigin, type AccountSession, type PlatformAccountClient, type VerifiedAccountCheck } from "../platform/accountClient.js";
+import { WEB_ASSET_MIME } from "./webAssets.js";
 import { VERSION } from "../version.js";
+import { resolveWorkingFolder } from "./webWorkspaces.js";
+import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
 
 const COOKIE = "ccagent.local_session";
 const publicAssets: Record<string, [string, string]> = {
@@ -15,8 +18,102 @@ const publicAssets: Record<string, [string, string]> = {
   "/login.css": ["login.css", "text/css; charset=utf-8"],
   "/favicon.svg": ["favicon.svg", "image/svg+xml"],
 };
-type Worker = { child: ChildProcess; port: number; token: string; userId: string; sessionFile: string };
-type LocalClient = { id: string; client: PlatformAccountClient; sessionFile: string; revision: number; closing: boolean; loggingOut?: boolean; worker?: Worker; starting?: Promise<Worker> };
+type Worker = { child: ChildProcess; port: number; token: string; userId: string; sessionFile: string; workspace: string };
+type LocalClient = {
+  id: string; client: PlatformAccountClient; sessionFile: string; revision: number; closing: boolean; loggingOut?: boolean;
+  workers: Map<string, Worker>; starting: Map<string, Promise<Worker>>; sessionOwners: Map<string, string>;
+  workspace?: string; selecting: number; assetCheck?: VerifiedAccountCheck;
+};
+type ProjectStatus = { workspace: string; busy: boolean; activeSessionId: string | null; pending: "permission" | "question" | null };
+
+function projectKey(workspace: string): string {
+  const resolved = path.resolve(workspace);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+function workerAlive(worker: Worker): boolean {
+  return worker.child.exitCode === null && worker.child.signalCode === null;
+}
+function requestWorkspace(req: IncomingMessage, url: URL): string | undefined {
+  const header = req.headers["x-ccagent-workspace"];
+  let selected: string | undefined;
+  if (header !== undefined) {
+    if (typeof header !== "string") throw new AccountError("项目请求无效。", "invalid_workspace", 400);
+    try { selected = decodeURIComponent(header); }
+    catch { throw new AccountError("项目请求无效。", "invalid_workspace", 400); }
+  }
+  const query = url.searchParams.get("workspace") ?? undefined;
+  for (const value of [selected, query]) {
+    if (value !== undefined && (!value || value.length > 4096 || value.includes("\0") || !path.isAbsolute(value))) {
+      throw new AccountError("项目请求无效。", "invalid_workspace", 400);
+    }
+  }
+  if (selected && query && projectKey(selected) !== projectKey(query)) throw new AccountError("项目请求不一致，请刷新后重试。", "invalid_workspace", 400);
+  return selected ?? query;
+}
+
+async function workerJson<T>(worker: Worker, check: VerifiedAccountCheck, route: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const request = httpRequest({ host: "127.0.0.1", port: worker.port, path: route, method: "GET", headers: {
+      "x-ccagent-desktop-token": worker.token,
+      "x-ccagent-verified-account": Buffer.from(JSON.stringify(check)).toString("base64url"),
+    } }, response => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", chunk => { body += chunk; if (body.length > 1024 * 1024) request.destroy(new Error("Worker response too large")); });
+      response.on("end", () => {
+        try {
+          if (response.statusCode !== 200) throw new Error("Worker status unavailable");
+          resolve(JSON.parse(body) as T);
+        } catch (error) { reject(error); }
+      });
+      response.on("error", reject);
+    });
+    request.setTimeout(5000, () => request.destroy(new Error("Worker status timed out")));
+    request.on("error", reject); request.end();
+  });
+}
+
+async function projectStatuses(local: LocalClient, check: VerifiedAccountCheck): Promise<ProjectStatus[]> {
+  return Promise.all([...local.workers.values()].filter(workerAlive).map(async worker => {
+    try {
+      const status = await workerJson<Omit<ProjectStatus, "workspace">>(worker, check, "/api/desktop/status");
+      return { workspace: worker.workspace, busy: status.busy, activeSessionId: status.activeSessionId ?? null, pending: status.pending ?? null };
+    } catch {
+      // An unresponsive project must not make desktop exit look safe.
+      return { workspace: worker.workspace, busy: true, activeSessionId: null, pending: null };
+    }
+  }));
+}
+
+async function rememberProject(local: LocalClient, session: AccountSession, selected: string): Promise<void> {
+  const file = path.join(accountHome(getPlatformHome(), session.user.id), "web-workspaces.json");
+  await withFileTransaction(file, async () => {
+    const saved: unknown = await readFile(file, "utf8").then(value => { try { return JSON.parse(value) as unknown; } catch { return []; } }, () => []);
+    const folders = [selected, ...(local.workspace ? [local.workspace] : []), ...[...local.workers.values()].map(worker => worker.workspace),
+      ...(Array.isArray(saved) ? saved.filter((value): value is string => typeof value === "string" && path.isAbsolute(value)) : [])];
+    const unique = new Map<string, string>();
+    for (const folder of folders) if (!unique.has(projectKey(folder))) unique.set(projectKey(folder), folder);
+    await writeJsonAtomically(file, [...unique.values()].slice(0, 20));
+  });
+}
+
+async function initialProject(local: LocalClient, session: AccountSession, fallback: string): Promise<string> {
+  if (local.workspace) return local.workspace;
+  let selected = fallback;
+  if (process.env.CCAGENT_DESKTOP_APP === "1") {
+    // The account, rather than the last desktop user, owns its initial folder.
+    const home = accountHome(getPlatformHome(), session.user.id);
+    selected = path.join(home, "workspace");
+    await mkdir(selected, { recursive: true, mode: 0o700 });
+    const recent: unknown = await readFile(path.join(home, "web-workspaces.json"), "utf8").then(value => { try { return JSON.parse(value) as unknown; } catch { return []; } }, () => []);
+    if (Array.isArray(recent)) {
+      for (const folder of recent) {
+        if (typeof folder === "string" && path.isAbsolute(folder) && (await stat(folder).catch(() => null))?.isDirectory()) { selected = folder; break; }
+      }
+    }
+  }
+  return resolveWorkingFolder(selected);
+}
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -59,7 +156,7 @@ function isLocalWebOrigin(origin: string, port: number): boolean {
     && url.protocol === "http:" && Number(url.port || 80) === port;
 }
 async function stopWorker(worker?: Worker): Promise<void> {
-  if (!worker || worker.child.exitCode !== null || worker.child.signalCode !== null) return;
+  if (!worker || !worker.child.pid || worker.child.exitCode !== null || worker.child.signalCode !== null) return;
   const child = worker.child;
   const ended = new Promise<void>(resolve => child.once("exit", () => resolve()));
   if (child.connected) child.send("ccagent:shutdown", () => {});
@@ -69,41 +166,45 @@ async function stopWorker(worker?: Worker): Promise<void> {
   clearTimeout(deadline);
 }
 async function startWorker(local: LocalClient, session: AccountSession, workspace: string): Promise<Worker> {
-  if (local.closing) throw new AccountError("当前登录正在退出，请重新登录。", "account_changed", 401);
-  if (local.worker && local.worker.userId === session.user.id && local.worker.child.exitCode === null && local.worker.child.signalCode === null) return local.worker;
-  if (local.starting) return local.starting;
-  local.starting = (async () => {
+  if (local.closing || local.loggingOut) throw new AccountError("当前登录正在退出，请重新登录。", "account_changed", 401);
+  const key = projectKey(workspace);
+  const starting = local.starting.get(key);
+  if (starting) return starting;
+  const existing = local.workers.get(key);
+  if (existing && existing.userId === session.user.id && workerAlive(existing)) return existing;
+  const pending = (async () => {
     const revision = local.revision;
-    await stopWorker(local.worker);
+    await stopWorker(existing);
     const port = await new Promise<number>((resolve, reject) => {
       const probe = net.createServer(); probe.once("error", reject);
       probe.listen(0, "127.0.0.1", () => { const address = probe.address(); probe.close(() => address && typeof address !== "string" ? resolve(address.port) : reject(new Error("No loopback port"))); });
     });
     const token = randomBytes(32).toString("hex"), base = getPlatformHome();
     await mkdir(accountHome(base, session.user.id), { recursive: true, mode: 0o700 });
-    let selectedWorkspace = workspace;
-    if (process.env.CCAGENT_DESKTOP_APP === "1") {
-      // A fresh desktop account must not open the previous account's folder.
-      selectedWorkspace = path.join(accountHome(base, session.user.id), "workspace");
-      await mkdir(selectedWorkspace, { recursive: true, mode: 0o700 });
-      const recent: unknown = await readFile(path.join(accountHome(base, session.user.id), "web-workspaces.json"), "utf8").then(value => { try { return JSON.parse(value) as unknown; } catch { return []; } }, () => []);
-      if (Array.isArray(recent)) {
-        for (const folder of recent) {
-          if (typeof folder === "string" && path.isAbsolute(folder) && (await stat(folder).catch(() => null))?.isDirectory()) { selectedWorkspace = folder; break; }
-        }
-      }
-    }
     const env: NodeJS.ProcessEnv = { ...process.env, CCAGENT_PLATFORM_HOME: base, CCAGENT_HOME: accountHome(base, session.user.id),
       CCAGENT_ACCOUNT_ID: session.user.id, CCAGENT_AUTH_SESSION_FILE: local.sessionFile,
       CCAGENT_WEB_WORKER_TOKEN: token, CCAGENT_DESKTOP_TOKEN: token };
     // TLS verification is mandatory for account and model traffic.
     delete env.NODE_TLS_REJECT_UNAUTHORIZED;
-    const child = spawn(process.execPath, [...process.execArgv, path.resolve(process.argv[1]!), "web-worker", "--workspace", selectedWorkspace, "--port", String(port)], {
-      cwd: selectedWorkspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    if (local.closing || revision !== local.revision) throw new AccountError("账户状态已改变，请重新登录。", "account_changed", 401);
+    const child = spawn(process.execPath, [...process.execArgv, path.resolve(process.argv[1]!), "web-worker", "--workspace", workspace, "--port", String(port)], {
+      cwd: workspace, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     // Forward no raw worker output: extensions may log private user content.
     child.stdout?.resume(); child.stderr?.resume();
-    const worker = { child, port, token, userId: session.user.id, sessionFile: local.sessionFile };
+    const worker = { child, port, token, userId: session.user.id, sessionFile: local.sessionFile, workspace };
+    // Track starting children too, so logout can stop every project immediately.
+    local.workers.set(key, worker);
+    child.on("message", message => {
+      if (local.workers.get(key) !== worker || local.closing || !message || typeof message !== "object") return;
+      if ("type" in message && message.type === "ccagent:session-owned" && "sessionId" in message
+        && typeof message.sessionId === "string" && /^[0-9a-f-]{36}$/.test(message.sessionId)) local.sessionOwners.set(message.sessionId, key);
+    });
+    child.once("exit", () => {
+      if (local.workers.get(key) === worker) {
+        for (const [id, owner] of local.sessionOwners) if (owner === key) local.sessionOwners.delete(id);
+      }
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new AccountError("账户工作区启动超时，请重试。", "worker_unavailable", 503)), 90_000);
@@ -117,19 +218,26 @@ async function startWorker(local: LocalClient, session: AccountSession, workspac
       });
       const current = await local.client.requireSession();
       if (local.closing || revision !== local.revision || current.user.id !== session.user.id) throw new AccountError("账户状态已改变，请重新登录。", "account_changed", 401);
-      local.worker = worker; return worker;
+      return worker;
     } catch (error) { await stopWorker(worker); throw error; }
-  })().finally(() => { local.starting = undefined; });
-  return local.starting;
+  })().finally(() => { local.starting.delete(key); });
+  local.starting.set(key, pending);
+  return pending;
 }
 async function stopLocal(local: LocalClient): Promise<void> {
   local.closing = true;
+  local.assetCheck = undefined;
   local.revision++;
-  if (local.starting) await local.starting.catch(() => {});
-  await stopWorker(local.worker); local.worker = undefined;
+  await Promise.allSettled([...local.workers.values()].map(stopWorker));
+  await Promise.allSettled([...local.starting.values()]);
+  await Promise.allSettled([...local.workers.values()].map(stopWorker));
+  local.workers.clear(); local.sessionOwners.clear(); local.workspace = undefined;
 }
-function proxy(req: IncomingMessage, res: ServerResponse, worker: Worker): void {
-  const headers = { ...req.headers, host: `127.0.0.1:${worker.port}`, "x-ccagent-desktop-token": worker.token };
+function proxy(req: IncomingMessage, res: ServerResponse, worker: Worker, check: VerifiedAccountCheck): void {
+  // Always overwrite browser-supplied assertions. Only this private socket token
+  // and the worker's bound account/revision can authorize reuse of the check.
+  const headers = { ...req.headers, host: `127.0.0.1:${worker.port}`, "x-ccagent-desktop-token": worker.token,
+    "x-ccagent-verified-account": Buffer.from(JSON.stringify(check)).toString("base64url") };
   if (headers.origin) headers.origin = `http://127.0.0.1:${worker.port}`;
   delete headers.cookie; delete headers.authorization;
   const upstream = httpRequest({ host: "127.0.0.1", port: worker.port, path: req.url, method: req.method, headers }, response => {
@@ -166,7 +274,7 @@ export async function runWebServer(args: string[]): Promise<void> {
     if (await stat(path.join(candidate, "login.html")).catch(() => null)) { webRoot = candidate; break; }
   }
   if (!webRoot) throw new Error("Login assets are missing. Rebuild or reinstall CCAGENT.");
-  const locals = new Map<string, LocalClient>(), loginBusy = new Set<string>();
+  const locals = new Map<string, LocalClient>(), creatingLocals = new Map<string, Promise<LocalClient>>(), loginBusy = new Set<string>();
   let stopping = false;
   const desktopToken = process.env.CCAGENT_DESKTOP_TOKEN;
   async function accountClient(sessionFile?: string): Promise<PlatformAccountClient> {
@@ -175,6 +283,7 @@ export async function runWebServer(args: string[]): Promise<void> {
     return client;
   }
   async function localClient(req: IncomingMessage, fresh = false): Promise<LocalClient> {
+    if (stopping) throw new AccountError("应用正在退出。", "account_changed", 503);
     const native = tokenEquals(req.headers["x-ccagent-desktop-token"], desktopToken);
     const id = native ? "native" : (!fresh && browserId(req)) || randomBytes(32).toString("hex");
     let local = locals.get(id);
@@ -183,9 +292,20 @@ export async function runWebServer(args: string[]): Promise<void> {
     }
     if (!local) {
       if (locals.size > 64) throw new AccountError("本地会话过多，请重新启动应用。", "rate_limited", 429);
-      const sessionFile = native ? getPlatformSessionFile() : path.join(getPlatformHome(), "platform", "web-sessions", id, "session.json");
-      local = { id, sessionFile, revision: 0, closing: false, client: await accountClient(native ? undefined : sessionFile) };
-      if (native) locals.set(id, local);
+      let pending = creatingLocals.get(id);
+      if (!pending) {
+        pending = (async (): Promise<LocalClient> => {
+          const sessionFile = native ? getPlatformSessionFile() : path.join(getPlatformHome(), "platform", "web-sessions", id, "session.json");
+          const created: LocalClient = { id, sessionFile, revision: 0, closing: false, selecting: 0, workers: new Map(), starting: new Map(), sessionOwners: new Map(), client: await accountClient(native ? undefined : sessionFile) };
+          if (stopping) throw new AccountError("应用正在退出。", "account_changed", 503);
+          // Retain one owner before verification yields: concurrent first-page
+          // requests with the same saved cookie must share its project pool.
+          if (native || browserId(req) === id) locals.set(id, created);
+          return created;
+        })().finally(() => { creatingLocals.delete(id); });
+        creatingLocals.set(id, pending);
+      }
+      local = await pending;
     }
     return local;
   }
@@ -199,7 +319,7 @@ export async function runWebServer(args: string[]): Promise<void> {
       if (!hosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Invalid host" });
       if (req.headers.origin && ![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(req.headers.origin)) return json(res, 403, { error: "Invalid origin" });
       if (!["GET", "HEAD"].includes(req.method ?? "") && (req.headers["x-ccagent-web"] !== "1" || (!native && !req.headers.origin))) return json(res, 403, { error: "Local origin and request header required" });
-      const route = new URL(req.url ?? "/", `http://127.0.0.1:${port}`).pathname;
+      const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`), route = url.pathname;
       if (req.method === "GET" && route === "/api/health") return json(res, 200, { ok: true, version: VERSION });
       if (req.method === "GET" && publicAssets[route]) {
         const [file, mime] = publicAssets[route]!;
@@ -281,31 +401,109 @@ export async function runWebServer(args: string[]): Promise<void> {
         }
         if (req.method === "GET" && route === "/api/account/status") {
           if (local.loggingOut) throw new AccountError("当前登录正在退出。", "account_changed", 401);
-          try { const session = await local.client.requireSession(); local.closing = false; return json(res, 200, { ...session, origin: local.client.origin }); }
-          catch (error) { await stopLocal(local); throw error; }
+          const revision = local.revision;
+          try {
+            const session = await local.client.requireSession();
+            if (stopping || local.loggingOut || loginBusy.has(local.id) || local.revision !== revision) throw new AccountError("当前账户状态已改变，请重新登录。", "account_changed", 401);
+            local.closing = false;
+            return json(res, 200, { ...session, origin: local.client.origin });
+          }
+          catch (error) {
+            if (local.revision === revision && !local.loggingOut && !loginBusy.has(local.id)) await stopLocal(local);
+            throw error;
+          }
         }
         return json(res, 404, { error: "Not found" });
       }
       const local = await localClient(req);
       if (local.closing) throw new AccountError("当前登录已退出，请重新登录。", "account_changed", 401);
-      let session: AccountSession;
-      try { session = await local.client.requireSession(); }
+      const verificationRevision = local.revision;
+      let check: VerifiedAccountCheck;
+      try {
+        const cached = req.method === "GET" && Object.hasOwn(WEB_ASSET_MIME, route) && !["/", "/index.html"].includes(route)
+          ? await local.client.currentAssetCheck(local.assetCheck) : undefined;
+        check = cached ?? await local.client.verifiedSession();
+        local.assetCheck = check;
+      }
       catch (error) {
-        await stopLocal(local);
+        if (local.revision === verificationRevision && !local.loggingOut && !loginBusy.has(local.id)) await stopLocal(local);
         if (error instanceof AccountError && error.status === 401 && ["/", "/index.html"].includes(route)) { res.writeHead(303, { location: "/login", "cache-control": "no-store" }); return res.end(); }
         throw error;
       }
-      if (local.worker && local.worker.userId !== session.user.id) {
+      if (local.revision !== verificationRevision || local.closing || local.loggingOut || loginBusy.has(local.id)) throw new AccountError("当前账户状态已改变，请重新登录。", "account_changed", 401);
+      const session = check.session;
+      if ([...local.workers.values()].some(worker => worker.userId !== session.user.id)) {
         await stopLocal(local); local.closing = false;
         throw new AccountError("当前账户已改变，请重新打开工作区。", "account_changed", 401);
       }
       locals.set(local.id, local);
-      const worker = await startWorker(local, session, workspace);
-      if (local.closing || loginBusy.has(local.id) || stopping) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
-      proxy(req, res, worker);
+      const revision = local.revision;
+      const unchanged = () => !local.closing && !local.loggingOut && !loginBusy.has(local.id) && !stopping && revision === local.revision;
+      const hint = requestWorkspace(req, url);
+      if (req.method === "GET" && route === "/api/desktop/status") {
+        const statuses = await projectStatuses(local, check);
+        if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+        return json(res, 200, { busy: local.starting.size > 0 || statuses.some(status => status.busy), activeWorkers: statuses });
+      }
+      if (req.method === "POST" && route === "/api/workspaces/select") {
+        const selection = ++local.selecting;
+        const body = await readBody(req);
+        let target: string;
+        try { target = await resolveWorkingFolder(typeof body.path === "string" ? body.path : ""); }
+        catch (error) { throw new AccountError(error instanceof Error ? error.message : "无法打开项目。", "invalid_workspace", 400); }
+        const worker = await startWorker(local, session, target);
+        if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+        if (selection !== local.selecting) throw new AccountError("已选择其他项目，请刷新项目列表。", "workspace_changed", 409);
+        let warning: string | undefined;
+        try { await rememberProject(local, session, target); }
+        catch { warning = "项目已打开，但最近项目列表暂时无法保存。"; }
+        if (!unchanged() || selection !== local.selecting) throw new AccountError("项目或账户已改变，请重试。", "workspace_changed", 409);
+        local.workspace = target;
+        const status = await workerJson<Omit<ProjectStatus, "workspace">>(worker, check, "/api/desktop/status").catch(() => null);
+        if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+        return json(res, 200, { workspace: target, activeSessionId: status?.activeSessionId ?? null, preservedBackgroundTasks: true, ...(warning ? { warning } : {}) });
+      }
+      let selected = await initialProject(local, session, workspace);
+      if (hint) {
+        const opened = local.workers.get(projectKey(hint));
+        if (opened) selected = opened.workspace;
+        else if (projectKey(hint) !== projectKey(selected)) {
+          // A bookmarked page may reopen only this account's remembered project.
+          // Ordinary stale writes never create a Worker or fall back elsewhere.
+          let remembered = false;
+          if (req.method === "GET" && ["/", "/index.html", "/api/bootstrap"].includes(route)) {
+            const saved: unknown = await readFile(path.join(accountHome(getPlatformHome(), session.user.id), "web-workspaces.json"), "utf8")
+              .then(value => { try { return JSON.parse(value) as unknown; } catch { return []; } }, () => []);
+            remembered = Array.isArray(saved) && saved.some(folder => typeof folder === "string" && path.isAbsolute(folder) && projectKey(folder) === projectKey(hint));
+          }
+          if (!remembered) throw new AccountError("该项目尚未打开，请先选择工作文件夹。", "workspace_not_open", 409);
+          try { selected = await resolveWorkingFolder(hint); }
+          catch { throw new AccountError("该项目已不可访问，请重新选择工作文件夹。", "workspace_not_open", 409); }
+        }
+      } else {
+        const sessionId = /^\/api\/sessions\/([0-9a-f-]{36})(?:\/|$)/.exec(route)?.[1];
+        const owner = sessionId && local.sessionOwners.get(sessionId);
+        if (owner && local.workers.has(owner)) selected = local.workers.get(owner)!.workspace;
+      }
+      const worker = await startWorker(local, session, selected);
+      if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+      if (!local.workspace) {
+        local.workspace = selected;
+        await rememberProject(local, session, selected).catch(() => {});
+      }
+      if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+      if (req.method === "GET" && route === "/api/workspaces") {
+        const [folders, statuses] = await Promise.all([workerJson<Record<string, unknown>>(worker, check, route), projectStatuses(local, check)]);
+        if (!unchanged()) throw new AccountError("账户状态正在改变，请重试。", "account_changed", 401);
+        return json(res, 200, { ...folders, current: worker.workspace, activeWorkers: statuses });
+      }
+      proxy(req, res, worker, check);
     } catch (error) {
       if (res.headersSent) { res.destroy(); return; }
       const known = error instanceof AccountError;
+      if (known && error.code === "workspace_not_open" && req.method === "GET" && /^\/(?:index\.html)?(?:\?|$)/.test(req.url ?? "/")) {
+        res.writeHead(303, { location: "/", "cache-control": "no-store" }); return res.end();
+      }
       if (known && req.method === "GET" && /^\/(?:index\.html)?(?:\?|$)/.test(req.url ?? "/")) {
         res.writeHead(303, { location: "/login", "cache-control": "no-store" }); return res.end();
       }
@@ -315,6 +513,7 @@ export async function runWebServer(args: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
   async function shutdown() {
     if (stopping) return; stopping = true; server.close();
+    await Promise.allSettled([...creatingLocals.values()]);
     await Promise.allSettled([...locals.values()].map(stopLocal));
     server.closeAllConnections(); process.exit(0);
   }

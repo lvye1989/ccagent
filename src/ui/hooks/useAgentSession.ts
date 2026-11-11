@@ -227,6 +227,7 @@ export function useAgentSession({
   const toolContext = useMemo<ToolContext>(
     () => ({
       cwd: process.cwd(),
+      applicationProtection: true,
       get sessionId() {
         return sessionIdRef.current;
       },

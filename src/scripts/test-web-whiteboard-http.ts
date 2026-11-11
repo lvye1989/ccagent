@@ -164,9 +164,15 @@ try {
 
   const switchResponse = await request("/api/workspaces/select", cookieA, { path: workspaceB });
   assert.equal(switchResponse.status, 200); assert.equal((await switchResponse.json() as { workspace: string }).workspace, canonicalB);
-  for (const [route, body] of [[listRoute(workspaceA), undefined], ["/api/whiteboards/open", { workspace: workspaceA, id: created.board.id }], ["/api/whiteboards/save", { workspace: workspaceA, id: created.board.id, revision: 2, scene }]] as const) {
+  const backgroundList = await request(listRoute(workspaceA), cookieA);
+  assert.equal(backgroundList.status, 200, "an explicit workspace query routes to the retained background project");
+  assert.deepEqual((await backgroundList.json() as ListResponse).boards.map((item) => item.id), [created.board.id]);
+  const backgroundBoard = await request("/api/whiteboards/open", cookieA, { workspace: workspaceA, id: created.board.id }, { "x-ccagent-workspace": encodeURIComponent(workspaceA) });
+  assert.equal(backgroundBoard.status, 200, "an explicit workspace header routes to the retained background project");
+  assert.equal((await backgroundBoard.json() as BoardResponse).board.revision, 2);
+  for (const [route, body] of [["/api/whiteboards/open", { workspace: workspaceA, id: created.board.id }], ["/api/whiteboards/save", { workspace: workspaceA, id: created.board.id, revision: 2, scene }]] as const) {
     const response = await request(route, cookieA, body);
-    assert.equal(response.status, 409); assert.equal((await response.json() as { code: string }).code, "workspace_changed", "stale windows must not touch the previous workspace");
+    assert.equal(response.status, 409); assert.equal((await response.json() as { code: string }).code, "workspace_changed", "a stale request body cannot retarget the selected project's worker");
   }
   assert.deepEqual((await (await request(listRoute(workspaceB), cookieA)).json() as ListResponse).boards, []);
   assert.equal((await request("/api/whiteboards/open", cookieA, { workspace: workspaceB, id: created.board.id })).status, 404);
