@@ -45,6 +45,7 @@ async function applyPromptToContent(
   prompt: string,
   content: string,
   model: string | undefined,
+  signal?: AbortSignal,
 ): Promise<string> {
   const truncated = truncate(content);
   const userPrompt =
@@ -58,6 +59,7 @@ async function applyPromptToContent(
       maxTokens: EXTRACT_MAX_TOKENS,
       messages: [{ role: "user", content: userPrompt }],
       querySource: "background",
+      signal,
     });
     const text = response.content
       .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
@@ -66,6 +68,7 @@ async function applyPromptToContent(
       .trim();
     if (text) return text;
   } catch (error) {
+    signal?.throwIfAborted();
     debugLog("webFetch", "secondary-model-failed", {
       message: error instanceof Error ? error.message : String(error),
     });
@@ -131,7 +134,7 @@ export const webFetchTool: Tool = {
     if (isPreapproved && page.contentType.includes("markdown") && page.content.length < MAX_MARKDOWN_LENGTH) {
       result = page.content;
     } else {
-      result = await applyPromptToContent(input.prompt, page.content, context.defaultModel);
+      result = await applyPromptToContent(input.prompt, page.content, context.defaultModel, context.abortSignal);
     }
 
     const header = `Fetched ${input.url} (${page.status} ${page.statusText}, ${page.bytes} bytes${

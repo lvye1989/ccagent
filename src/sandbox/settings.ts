@@ -14,7 +14,7 @@
  * so callers don't need to repeat default-checking.
  */
 
-import { loadSettingSources } from "../config/sources.js";
+import { isTrustedScopeForSensitiveKeys, loadSettingSources } from "../config/sources.js";
 import type {
   SandboxFilesystemSettings,
   SandboxNetworkSettings,
@@ -26,7 +26,8 @@ interface RawRootSettings {
 }
 
 function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some(item => typeof item !== "string")) throw new Error("Sandbox path/domain/command lists must contain only strings.");
   return value
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
@@ -34,7 +35,8 @@ function asStringArray(value: unknown): string[] {
 }
 
 function pickFilesystem(value: unknown): SandboxFilesystemSettings {
-  if (!value || typeof value !== "object") return {};
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("sandbox.filesystem must be an object.");
   const fs = value as Record<string, unknown>;
   return {
     allowWrite: asStringArray(fs.allowWrite),
@@ -45,7 +47,8 @@ function pickFilesystem(value: unknown): SandboxFilesystemSettings {
 }
 
 function pickNetwork(value: unknown): SandboxNetworkSettings {
-  if (!value || typeof value !== "object") return {};
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("sandbox.network must be an object.");
   const net = value as Record<string, unknown>;
   return {
     allowedDomains: asStringArray(net.allowedDomains),
@@ -54,8 +57,15 @@ function pickNetwork(value: unknown): SandboxNetworkSettings {
 }
 
 function pickSandbox(value: unknown): SandboxSettings {
-  if (!value || typeof value !== "object") return {};
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("sandbox must be an object.");
   const raw = value as Record<string, unknown>;
+  for (const key of ["enabled", "autoAllowBashIfSandboxed", "allowUnsandboxedCommands"]) {
+    if (raw[key] !== undefined && typeof raw[key] !== "boolean") throw new Error(`sandbox.${key} must be a boolean.`);
+  }
+  if (raw.docker !== undefined && (!raw.docker || typeof raw.docker !== "object" || Array.isArray(raw.docker))) throw new Error("sandbox.docker must be an object.");
+  if (raw.docker && Object.keys(raw.docker).some(key => key !== "image")) throw new Error("sandbox.docker supports only image; container security and resource limits cannot be overridden.");
+  if (raw.docker && (raw.docker as Record<string, unknown>).image !== undefined && typeof (raw.docker as Record<string, unknown>).image !== "string") throw new Error("sandbox.docker.image must be a string.");
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
     autoAllowBashIfSandboxed:
@@ -69,6 +79,9 @@ function pickSandbox(value: unknown): SandboxSettings {
     excludedCommands: asStringArray(raw.excludedCommands),
     filesystem: pickFilesystem(raw.filesystem),
     network: pickNetwork(raw.network),
+    docker: raw.docker && typeof raw.docker === "object"
+      ? { image: typeof (raw.docker as Record<string, unknown>).image === "string" ? (raw.docker as Record<string, string>).image : undefined }
+      : undefined,
   };
 }
 
@@ -93,6 +106,7 @@ export interface ResolvedSandboxSettings {
   excludedCommands: string[];
   filesystem: Required<SandboxFilesystemSettings>;
   network: Required<SandboxNetworkSettings>;
+  docker?: { image?: string };
 }
 
 export const DEFAULT_RESOLVED_SANDBOX_SETTINGS: ResolvedSandboxSettings = {
@@ -133,6 +147,7 @@ export function resolveSandboxList(list: SandboxSettings[]): ResolvedSandboxSett
       allowedDomains: mergeStringArrays(...list.map((s) => s.network?.allowedDomains)),
       deniedDomains: mergeStringArrays(...list.map((s) => s.network?.deniedDomains)),
     },
+    docker: lastDefined((s) => s.docker, {}),
   };
 }
 
@@ -147,8 +162,18 @@ export async function loadSandboxSettings(
   cwd: string,
 ): Promise<ResolvedSandboxSettings> {
   const sources = await loadSettingSources(cwd);
-  const list = sources.map((src) =>
-    src.raw ? pickSandbox((src.raw as RawRootSettings).sandbox) : {},
-  );
+  // An unreadable policy must never turn an opted-in sandbox into host execution.
+  if (sources.some(src => src.parseError)) throw new Error("Sandbox settings could not be read; shell execution is blocked until settings are repaired.");
+  const list = sources.map(src => {
+    const picked = src.raw ? pickSandbox((src.raw as RawRootSettings).sandbox) : {};
+    if (isTrustedScopeForSensitiveKeys(src.source)) return picked;
+    // A repository may tighten isolation but cannot disable a user's isolation,
+    // select executable images, or add model-controlled escape hatches.
+    return { enabled: picked.enabled === true ? true : undefined,
+      autoAllowBashIfSandboxed: picked.autoAllowBashIfSandboxed === false ? false : undefined,
+      allowUnsandboxedCommands: picked.allowUnsandboxedCommands === false ? false : undefined,
+      filesystem: { denyRead: picked.filesystem?.denyRead, denyWrite: picked.filesystem?.denyWrite },
+      network: { deniedDomains: picked.network?.deniedDomains } };
+  });
   return resolveSandboxList(list);
 }

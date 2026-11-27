@@ -15,6 +15,7 @@ import { callIdentifierPattern } from './call-identifiers';
 import { resolveRouteCredential } from './provider-credentials';
 import { requestUpstream } from './upstream-hosts';
 import { activeRouteCondition } from './route-lifecycle';
+import { callReceiptHeaders } from './call-receipt';
 
 const id = z.string().regex(callIdentifierPattern);
 const maximumResult = 64 * 1024 * 1024;
@@ -110,7 +111,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
     if (!reservation.resultBlobId) throw new HttpError(409, 'RESULT_UNAVAILABLE', '该调用已处理，结果暂不可重放；不会重复请求供应商。');
     const file = await readOwnedFile(userId, reservation.resultBlobId, ['result']);
     const usage = object(reservation.usage), actual = typeof usage.executedRouteId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,79}$/.test(usage.executedRouteId) ? usage.executedRouteId : reservation.routeId;
-    return new Response(file.stream, { headers: { 'content-type': file.record.contentType, 'cache-control': 'no-store', 'x-ccagent-call-id': reservation.id, 'x-ccagent-replay': 'true',
+    return new Response(file.stream, { headers: { 'content-type': file.record.contentType, 'cache-control': 'no-store', ...callReceiptHeaders(reservation), 'x-ccagent-replay': 'true',
       'x-ccagent-route-id': actual, 'x-ccagent-fallback': String(usage.fallbackUsed === true) } });
   }
   async function execute(request: Request, endpoint: GatewayEndpoint): Promise<Response> {
@@ -170,6 +171,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
       authorized: maximum, priceSnapshot: { ...snapshot(selection, at, primary.prepared.body), ...(consent ? { fallback: snapshot(selections[1]!, at, plans[1]!.prepared.body), fallbackConsent: consent } : {}) } });
     if (authorized.replay) return replay(current.user.id, authorized.reservation);
     const reservation = authorized.reservation;
+    let committedReceipt = reservation;
     const secrets = [...new Set(plans.map(plan => plan.secret))], secretLength = Math.max(...secrets.map(secret => secret.length));
     const redact = (text: string) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), text);
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), selection.route.timeoutMs);
@@ -180,8 +182,9 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
     let attempts = 0;
     let transportFailure: UpstreamTransportFailure | undefined;
     const pending = async (reason: string) => {
-      await database().db.update(reservations).set({ status: 'pending', usage: { reason, attempts, ...(transportFailure ? { transportFailure } : {}), platformRetryCosts: Math.max(0, attempts - 1), ...execution() }, updatedAt: new Date() })
-        .where(and(eq(reservations.id, reservation.id), eq(reservations.status, 'held')));
+      const [committed] = await database().db.update(reservations).set({ status: 'pending', usage: { reason, attempts, ...(transportFailure ? { transportFailure } : {}), platformRetryCosts: Math.max(0, attempts - 1), ...execution() }, updatedAt: new Date() })
+        .where(and(eq(reservations.id, reservation.id), eq(reservations.status, 'held'))).returning();
+      if (committed) committedReceipt = committed;
     };
     const complete = async (payload: unknown, raw: Uint8Array | string, contentType: string, interrupted = false) => {
       const selected = active.selection;
@@ -195,7 +198,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
       if (!quantities) { await pending('supplier_usage_unmeasured'); return; }
       const quote = quoteDefinition(selected.definition, selected.currency, quantities, attemptedAt, selected.usdCny || undefined, false, active.prepared.body);
       const charged = quote.chargeMicro > reservation.authorized ? reservation.authorized : quote.chargeMicro;
-      await finishUsage({ userId: current.user.id, reservationId: reservation.id, charged,
+      committedReceipt = await finishUsage({ userId: current.user.id, reservationId: reservation.id, charged,
         usage: { ...usage, publicCostMicro: quote.publicCostMicro.toString(), calculatedChargeMicro: quote.chargeMicro.toString(),
           platformAbsorbedMicro: (quote.chargeMicro - charged).toString(), tariff: quote.tariff, ...(quote.priceTier ? { priceTier: quote.priceTier } : {}) } });
     };
@@ -256,7 +259,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
           returned = JSON.stringify({ model: routeId, audio: { file_id: saved.id, content_type: 'audio/wav', bytes: audio.length, expires_at: saved.expiresAt.toISOString() }, usage: object(payload).usage });
         }
         await complete(payload, returned, 'application/json');
-        return new Response(returned, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-ccagent-call-id': reservation.id,
+        return new Response(returned, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...callReceiptHeaders(committedReceipt),
           'x-ccagent-route-id': active.selection.route.id, 'x-ccagent-fallback': String(active !== primary) } });
       }
       if (!response.headers.get('content-type')?.includes('text/event-stream') || !response.body) throw new Error('UPSTREAM_STREAM_INVALID');
@@ -296,7 +299,7 @@ export function createGateway(options: { fetch?: typeof fetch; keepAlive?: (work
         },
         cancel() { detached = true; /* Continue bounded upstream reading to obtain real final usage. */ },
       });
-      return new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store, no-transform', 'x-accel-buffering': 'no', 'x-ccagent-call-id': reservation.id,
+      return new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store, no-transform', 'x-accel-buffering': 'no', ...callReceiptHeaders(reservation),
         'x-ccagent-route-id': active.selection.route.id, 'x-ccagent-fallback': String(active !== primary) } });
     } catch (error) {
       clearTimers(); controller.abort();

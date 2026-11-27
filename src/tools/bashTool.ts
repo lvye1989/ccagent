@@ -7,6 +7,8 @@ import {
   loadSandboxSettings,
   shouldUseSandbox,
   wrapWithSandbox,
+  getSandboxUnavailableReason,
+  runDockerSandboxCommand,
   type ResolvedSandboxSettings,
 } from "../sandbox/index.js";
 import {
@@ -102,7 +104,7 @@ export function isReadOnlyCommand(command: string): boolean {
 
 export const bashTool: Tool = {
   name: "Bash",
-  description: "Execute a shell command in the current working directory and return stdout/stderr.",
+  description: "Execute a shell command and return stdout/stderr. On Windows with sandbox.enabled, runs Linux Bash in Docker: /workspace is the read-only project, /output is writable project output/sandbox, network is disabled, and Windows paths/desktop apps are unavailable. Without sandbox.enabled, runs the native host shell.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -134,15 +136,11 @@ export const bashTool: Tool = {
       return { content: "Command aborted before start", isError: true };
     }
 
-    // Decide sandbox wrapping. We swallow load errors and proceed with
-    // sandboxing OFF — settings.json being unparseable shouldn't block
-    // command execution; the permission system already surfaces those
-    // errors loudly elsewhere.
-    let sandboxSettings: ResolvedSandboxSettings | null = null;
+    let sandboxSettings: ResolvedSandboxSettings;
     try {
       sandboxSettings = await loadSandboxSettings(context.cwd);
     } catch {
-      sandboxSettings = null;
+      return { content: "Sandbox settings could not be read. Command was not run; repair settings before continuing.", isError: true };
     }
 
     const willSandbox = sandboxSettings
@@ -157,9 +155,23 @@ export const bashTool: Tool = {
 
     let executedCommand = input.command;
     if (willSandbox && sandboxSettings) {
-      const profile = await buildProfileForCwd(context.cwd, sandboxSettings);
-      const wrap = wrapWithSandbox(input.command, profile);
-      executedCommand = wrap.wrappedCommand;
+      try {
+        const profile = await buildProfileForCwd(context.cwd, sandboxSettings);
+        if (process.platform === "win32") {
+          if (context.toolUseId) startBashProgress(context.toolUseId, timeoutMs);
+          try {
+            return await runDockerSandboxCommand({ command: input.command, shell: "bash", cwd: context.cwd, settings: sandboxSettings, profile,
+              timeoutMs, signal: context.abortSignal,
+              onOutput: context.toolUseId ? chunk => appendBashProgress(context.toolUseId!, chunk) : undefined });
+          } finally { if (context.toolUseId) completeBashProgress(context.toolUseId); }
+        }
+        const reason = getSandboxUnavailableReason(true, sandboxSettings);
+        if (reason) return { content: `Sandbox: blocked. ${reason} Command was not run.`, isError: true };
+        const wrap = wrapWithSandbox(input.command, profile);
+        executedCommand = wrap.wrappedCommand;
+      } catch {
+        return { content: "Sandbox setup failed. Command was not run; there is no host fallback.", isError: true };
+      }
     }
 
     // Live progress: publish stdout/stderr chunks keyed by this call's
@@ -222,11 +234,11 @@ export const bashTool: Tool = {
       };
 
       timeoutId = setTimeout(() => {
-        terminate({ content: `Command timed out after ${timeoutMs}ms`, isError: true });
+        terminate({ content: `Command timed out after ${timeoutMs}ms`, isError: true, executionOutcome: "unknown" });
       }, timeoutMs);
 
       const onAbort = () => {
-        terminate({ content: "Command aborted", isError: true });
+        terminate({ content: "Command aborted", isError: true, executionOutcome: "unknown" });
       };
 
       context.abortSignal?.addEventListener("abort", onAbort, { once: true });

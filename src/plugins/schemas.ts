@@ -84,6 +84,14 @@ export const PluginManifestSchema = z.looseObject({
   hooks: RelInsidePathList.optional(),
   mcpServers: RelInsidePathList.optional(),
 
+  // Installed plugins can require an extra confirmation or deny a named operation.
+  approvalRules: z.array(z.strictObject({
+    tool: z.string().regex(/^[A-Za-z0-9_.:-]{1,160}$/),
+    operation: z.string().trim().min(1).max(100).optional(),
+    behavior: z.enum(["ask", "deny"]),
+    reason: z.string().trim().min(1).max(240),
+  })).max(128).optional(),
+
   // Parsed + carried through, but LSP launch is deferred (see plan §35.0).
   lspServers: z.unknown().optional(),
 });

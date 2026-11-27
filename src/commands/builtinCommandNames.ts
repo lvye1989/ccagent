@@ -14,6 +14,8 @@ export const BUILTIN_COMMAND_NAMES = new Set<string>([
   "clear",
   "config",
   "cost",
+  "timings",
+  "billing",
   "model",
   "mode",
   "tasks",
@@ -72,4 +74,12 @@ export const BUILTIN_PROMPT_COMMAND_NAMES = new Set<string>(["init", "workfriend
 /** Case-insensitive membership check for built-in `prompt` commands. */
 export function isBuiltinPromptCommand(name: string): boolean {
   return BUILTIN_PROMPT_COMMAND_NAMES.has(name.toLowerCase());
+}
+
+/** Local diagnostic commands leave the last measured model/compaction turn visible. */
+export function isTimedTurn(input: string): boolean {
+  const first = input.trim().split(/\s+/, 1)[0] ?? "";
+  if (!first.startsWith("/")) return true;
+  const name = first.slice(1).toLowerCase();
+  return name === "compact" || isBuiltinPromptCommand(name) || !isBuiltinCommandName(name);
 }

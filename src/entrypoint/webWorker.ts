@@ -7,6 +7,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { QueryEngine } from "../core/queryEngine.js";
+import { createMemoryExecutionJournal } from "../session/execution.js";
 import type { QueryEngineEvent } from "../core/queryEngine.js";
 import { classifyUserInput } from "../ui/hooks/useAgentSession/inputClassification.js";
 import {
@@ -14,6 +15,8 @@ import {
   appendCompactionSnapshot,
   applySessionRetentionPolicy,
   createSessionId,
+  createExecutionRecorder,
+  createExecutionReplayFence,
   initSessionStorage,
   listProjectSessions,
   listPinnedSessionIds,
@@ -81,7 +84,7 @@ import { browseWorkingFolders, listFolderLocations, pickNativeWorkingFolder, res
 import { browseWorkspaceFiles, previewWorkspaceFile, serveWorkspaceFile, saveWorkspaceAttachment, MAX_UPLOAD } from "./webFiles.js";
 import { handleVisualization } from "./webVisualization.js";
 import { getAllUserCommands } from "../commands/userCommands/registry.js";
-import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
+import { isBuiltinCommandName, isTimedTurn } from "../commands/builtinCommandNames.js";
 import { requirePlatformScope, withVerifiedPlatformRequest } from "../platform/account.js";
 import { AccountError } from "../platform/accountClient.js";
 import { readServiceConfiguration } from "../platform/serviceState.js";
@@ -133,6 +136,7 @@ type PendingInteraction = {
 };
 
 type WebExecution = {
+  timings?: import("../core/turnTimings.js").TurnTimings;
   id: string;
   startedAt: string;
   completedAt: string | null;
@@ -233,6 +237,7 @@ function publish(session: WebSession, data: Record<string, unknown>): void {
     session.lastTurnReason = String(data.reason || "completed");
     if (execution) {
       execution.completedAt = timestamp; execution.reason = session.lastTurnReason;
+      execution.timings = data.timings as WebExecution["timings"];
     }
     data = { ...data, completedAt: timestamp };
   }
@@ -455,6 +460,9 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: restored.summary.model,
       toolContext: {
         cwd: sessionWorkspace, sessionId: id,
+        recordExecutionEvent: createExecutionRecorder(sessionWorkspace, id),
+        findUnresolvedExecutions: createExecutionReplayFence(sessionWorkspace, id),
+        get executionScope() { return session?.execution ? { turnId: session.execution.id, step: 0, agentSessionId: id } : undefined; },
         applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         onToolProgress: progress => publish(session, { type: "tool_progress", ...progress }),
@@ -477,6 +485,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
     const opened = sessions.get(id);
     if (opened) return opened;
     sessions.set(id, session);
+    if (restored.unknownToolIds.length) publish(session, { type: "notice", tone: "error",
+      message: `上次执行中断，有 ${restored.unknownToolIds.length} 个工具结果未知。应用未重放这些操作；继续前请核对文件、目标应用或交易回执。` });
     if (process.connected) process.send?.({ type: "ccagent:session-owned", sessionId: id }, () => {});
     return session;
   }
@@ -499,6 +509,10 @@ export async function runWebWorker(args: string[]): Promise<void> {
       model: selectedModel,
       toolContext: {
         cwd: workspace, sessionId: id, temporaryChat: temporary,
+        ...(temporary ? createMemoryExecutionJournal() : {}),
+        ...(!temporary ? { recordExecutionEvent: createExecutionRecorder(workspace, id) } : {}),
+        ...(!temporary ? { findUnresolvedExecutions: createExecutionReplayFence(workspace, id) } : {}),
+        get executionScope() { return session?.execution ? { turnId: session.execution.id, step: 0, agentSessionId: id } : undefined; },
         applicationProtection: true,
         onModelExport: (filePath, projectDirectory) => deliverModelFile(session, filePath, projectDirectory),
         onToolProgress: progress => publish(session, { type: "tool_progress", ...progress }),
@@ -634,11 +648,13 @@ export async function runWebWorker(args: string[]): Promise<void> {
     return { error: "工作区或配置操作正在进行，请稍后再发送。", code: "TASK_BUSY", reason: "configuration_busy", activeSessionId: null, canInterrupt: false };
   }
 
-  async function runTurn(session: WebSession, input: string): Promise<boolean> {
+  async function runTurn(session: WebSession, input: string, queueMs = 0): Promise<boolean> {
     session.busy = true;
     activeTurn = session.id;
     publish(session, { type: "turn_started" });
     let succeeded = true;
+    let measured = false;
+    const turnTimings = () => measured ? session.engine.getTurnTimings() : undefined;
     try {
       await syncWebSecrets();
       session.engine.selectSessionTeam(session.team !== "off", await sessionTeamInstructions(session.team));
@@ -653,12 +669,13 @@ export async function runWebWorker(args: string[]): Promise<void> {
         });
       }
       if (input) publish(session, { type: "user", text: input });
-      const run = session.engine.submitMessage(input);
+      const run = session.engine.submitMessage(input, queueMs);
+      measured = isTimedTurn(input);
       while (true) {
         const { value, done } = await run.next();
         if (done) {
           succeeded = value.reason === undefined || value.reason === "completed";
-          publish(session, { type: "turn_complete", reason: value.reason ?? "completed" });
+          publish(session, { type: "turn_complete", reason: value.reason ?? "completed", timings: turnTimings() });
           break;
         }
         const outgoing = summarizeEvent(value);
@@ -677,6 +694,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
             type: "message", timestamp: new Date().toISOString(),
             role: value.type === "assistant_message" ? "assistant" : "user",
             message: value.message,
+            ...(value.executionScope ? { executionScope: value.executionScope } : {}),
             ...(session.engine.getCurrentMessageId() ? { messageId: session.engine.getCurrentMessageId()! } : {}),
           });
         } else if (value.type === "tool_use_start" || value.type === "tool_use_done") {
@@ -694,7 +712,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
     } catch (error) {
       succeeded = false;
       publish(session, { type: "notice", tone: "error", message: error instanceof Error ? error.message : String(error) });
-      publish(session, { type: "turn_complete", reason: "error" });
+      publish(session, { type: "turn_complete", reason: "error", timings: turnTimings() });
     } finally {
       session.busy = false;
       activeTurn = null;
@@ -718,7 +736,7 @@ export async function runWebWorker(args: string[]): Promise<void> {
         const session = await createSession(due.mode, due.model, false, true);
         await scheduleStore.recordResult(due.id, due.runId, { sessionId: session.id });
         activeTurn = session.id;
-        void runTurn(session, due.prompt).then((succeeded) => scheduleStore.recordResult(due.id, due.runId, {
+        void runTurn(session, due.prompt, Math.max(0, Date.now() - Date.parse(due.nextRunAt))).then((succeeded) => scheduleStore.recordResult(due.id, due.runId, {
           finished: true, ...(succeeded ? {} : { error: "任务执行失败，请检查结果对话。" }),
         })).catch((error) => console.warn(`[ccagent web] Scheduled task completion: ${String(error)}`));
       } catch (error) {
@@ -865,6 +883,8 @@ export async function runWebWorker(args: string[]): Promise<void> {
         const commands = [
           { name: "init", description: "分析项目并生成项目说明", kind: "命令" },
           { name: "help", description: "查看可用命令", kind: "命令" },
+          { name: "billing", description: "查询本会话官方调用的账单回执", kind: "命令" },
+          { name: "timings", description: "查看最近一轮各阶段耗时", kind: "命令" },
           { name: "cost", description: "查看本次对话用量", kind: "命令" },
           ...getAllUserCommands().filter((item) => !isBuiltinCommandName(item.name)).map((item) => ({ name: item.name, description: item.description, kind: "自定义命令" })),
           ...(isAgentSkillsEnabled() ? getAllSkills().filter((item) => isSkillEnabled(item.name) && !isBuiltinCommandName(item.name)).map((item) => ({ name: item.name, description: item.description, kind: "技能" })) : []),

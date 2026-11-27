@@ -16,6 +16,9 @@ import {
 } from "../permissions/permissions.js";
 import { buildSystemPrompt, renderSystemPrompt } from "../context/systemPrompt.js";
 import { formatMainModelIdentity } from "../context/modelIdentity.js";
+import { type TurnTimings, withTurnTimings, currentTurnTimings, snapshotTurnTimings } from "./turnTimings.js";
+import { reconcileSessionBilling } from "./queryEngine/commands/billing.js";
+import { recordExecution } from "../session/execution.js";
 import { compactMessages } from "../context/compaction.js";
 import { autoCompactIfNeeded, calculateTokenWarningState, createAutoCompactState, resetAutoCompactFailures } from "../context/autoCompact.js";
 import { getContextWindowForModel, tokenCountWithEstimation } from "../utils/tokens.js";
@@ -45,7 +48,7 @@ import {
 import type { Skill } from "../types/types.js";
 import { findUserCommand } from "../commands/userCommands/registry.js";
 import { substituteArguments } from "../commands/userCommands/argumentSubstitution.js";
-import { isBuiltinCommandName } from "../commands/builtinCommandNames.js";
+import { isBuiltinCommandName, isTimedTurn } from "../commands/builtinCommandNames.js";
 import { tryExpandBuiltinPromptCommand } from "../commands/builtinPromptCommands.js";
 import { type SettingSource } from "../config/sources.js";
 import type { UserCommand } from "../commands/userCommands/types.js";
@@ -150,6 +153,12 @@ import type { PluginInstallPreview } from "../plugins/install.js";
 import { buildPluginView } from "./queryEngine/commands/pluginView.js";
 
 export class QueryEngine {
+  private timings?: TurnTimings;
+
+  getTurnTimings(): TurnTimings | undefined {
+    return snapshotTurnTimings(this.timings);
+  }
+
   private messages: MessageParam[];
   private totalUsage: Usage;
   private readonly defaultModel: string;
@@ -330,8 +339,11 @@ export class QueryEngine {
     this.toolContext.sessionInstructions = instructions;
   }
 
-  submitMessage(input: string): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
-    return inPlatformTask(this.toolContext.sessionId, this.submitMessageInTask(input));
+  submitMessage(input: string, queueMs = 0): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
+    const run = inPlatformTask(this.toolContext.sessionId, this.submitMessageInTask(input));
+    if (!isTimedTurn(input)) return run;
+    this.timings = { queueMs, modelMs: 0, toolsMs: 0, summaryMs: 0 };
+    return withTurnTimings(this.timings, run);
   }
 
   private async *submitMessageInTask(
@@ -569,6 +581,19 @@ export class QueryEngine {
     rawDirectUserText?: string,
   ): AsyncGenerator<QueryEngineEvent, { handled: boolean; reason?: LoopTerminationReason }> {
     if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
+    // Stop must cover the whole turn, including pre-model hooks and backups.
+    const abortController = new AbortController();
+    this.abortController = abortController;
+    const abortSignal = this.toolContext.abortSignal
+      ? AbortSignal.any([abortController.signal, this.toolContext.abortSignal])
+      : abortController.signal;
+    const turnExecutionContext: ToolContext = { ...this.toolContext, executionScope: this.toolContext.executionScope ?? {
+      turnId: randomUUID(), step: 0, agentSessionId: this.toolContext.sessionId,
+    } };
+    const turnPreparingAt = Date.now();
+    let loopStarted = false;
+    try {
+    await recordExecution(turnExecutionContext, { phase: "turn_preparing", model: this.getActiveModel() });
 
     // ─── Stage 26: open the file-history snapshot for this turn ─────
     // Fire at turn start (before any edit) so the snapshot bound to this
@@ -590,7 +615,9 @@ export class QueryEngine {
       const startOutcome = await runSessionStartHooks({
         source: this.messages.length === 0 ? "startup" : "resume",
         cwd: this.toolContext.cwd,
+        signal: abortSignal,
       });
+      abortSignal.throwIfAborted();
       const startCtx = startOutcome.additionalContext;
       if (startCtx) {
         const startMessage: MessageParam = {
@@ -622,7 +649,9 @@ export class QueryEngine {
       const userOutcome = await runUserPromptSubmitHooks({
         prompt: trimmed,
         cwd: this.toolContext.cwd,
+        signal: abortSignal,
       });
+      abortSignal.throwIfAborted();
       if (userOutcome.blockingError) {
         yield {
           type: "command",
@@ -644,12 +673,7 @@ export class QueryEngine {
     }
 
     if (this.toolContext.abortSignal?.aborted) return { handled: true, reason: "aborted" };
-    const abortController = new AbortController();
-    this.abortController = abortController;
-    const abortSignal = this.toolContext.abortSignal
-      ? AbortSignal.any([abortController.signal, this.toolContext.abortSignal])
-      : abortController.signal;
-    try {
+    abortSignal.throwIfAborted();
       const prepareImages = async (messages: MessageParam[], historical = false) => {
         const prepared = await prepareOfficialImageReferences(messages, this.getActiveModel(), this.toolContext.cwd, abortSignal, undefined, !historical);
         if (prepared.imageCount && !historical) {
@@ -853,7 +877,7 @@ export class QueryEngine {
       const systemParts = [...previewSystemParts, formatMainModelIdentity(conversationMainModel)];
       const systemPrompt = renderSystemPrompt(systemParts);
       const enrichedToolContext: ToolContext = {
-        ...this.toolContext,
+        ...turnExecutionContext,
         abortSignal,
         officialVisionOnly: officialRoute?.limits.maxImages === 0,
         conversationMainModel,
@@ -878,6 +902,7 @@ export class QueryEngine {
         yield pendingAutoCompaction;
       }
 
+      loopStarted = true;
       const loop = query({
         messages: [...this.messages],
         initialCallUsage: this.usageEstimate().usage,
@@ -960,10 +985,14 @@ export class QueryEngine {
       yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
       return { handled: true, reason: "model_error" };
     } finally {
-      this.abortController = null;
-      // Stage 23: drop any per-turn model override so the next prompt
-      // reverts to the session/default model.
-      this.turnModelOverride = null;
+      try {
+        if (!loopStarted) await recordExecution(turnExecutionContext, { phase: "turn_end",
+          status: abortSignal.aborted ? "aborted" : "stopped_before_request", durationMs: Date.now() - turnPreparingAt, timings: currentTurnTimings() });
+      } finally {
+        if (this.abortController === abortController) this.abortController = null;
+        // Stage 23: each new prompt returns to the session/default model.
+        this.turnModelOverride = null;
+      }
     }
   }
 
@@ -1051,7 +1080,7 @@ export class QueryEngine {
         yield {
           type: "command",
           kind: "info",
-          message: "Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /powersetting [list|qq|163 <read|write|delete|search|send> on|off] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
+          message: "Commands: /help /clear /config [list|get|set] /cost /billing [request-id] /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /powersetting [list|qq|163 <read|write|delete|search|send> on|off] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /timings /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye",
         };
         return { handled: true };
       case "config":
@@ -1173,6 +1202,13 @@ export class QueryEngine {
         yield { type: "messages_updated", messages: [] };
         yield { type: "command", kind: "info", message: "Conversation cleared." };
         return { handled: true };
+      case "billing":
+        try {
+          yield { type: "command", kind: "info", message: await reconcileSessionBilling(this.toolContext, args) };
+        } catch (error) {
+          yield { type: "command", kind: "error", message: "账单查询失败。" + (error instanceof Error ? error.message : String(error)) };
+        }
+        return { handled: true };
       case "cost":
         yield {
           type: "command",
@@ -1271,6 +1307,13 @@ export class QueryEngine {
           message: await formatProjectSessionHistory(this.toolContext.cwd),
         };
         return { handled: true };
+      case "timings": {
+        const t = this.getTurnTimings();
+        yield { type: "command", kind: "info", message: t
+          ? `Queue ${t.queueMs} ms · Model ${t.modelMs} ms · Tools ${t.toolsMs} ms · Summary ${t.summaryMs} ms`
+          : "No turn timing data yet." };
+        return { handled: true };
+      }
       case "compact": {
         const controller = new AbortController();
         this.abortController = controller;

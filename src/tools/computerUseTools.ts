@@ -898,6 +898,7 @@ export const computerActionTool: Tool = {
     const input = rawInput as unknown as ActionInput;
     const key = snapshotKey(context, input.window_id || "");
     const snapshot = snapshots.get(key);
+    let dispatched = false;
     try {
       if (!input.intent?.trim()) throw new Error("intent is required for every ComputerAction.");
       if (!COMPUTER_RISK_CATEGORY_SET.has(input.risk_category)) {
@@ -921,6 +922,7 @@ export const computerActionTool: Tool = {
       }
       const action = buildAction(input, snapshot);
       snapshots.delete(key);
+      dispatched = true;
       await performComputerAction(
         window,
         action,
@@ -944,6 +946,7 @@ export const computerActionTool: Tool = {
           (error instanceof Error ? error.message : String(error)) +
           " Action outcome may be unknown; call ComputerObserve again before retrying.",
         isError: true,
+        ...(dispatched ? { executionOutcome: "unknown" as const } : {}),
       };
     }
   },
@@ -1120,6 +1123,7 @@ export const computerActionGroupTool: Tool = {
     const input = rawInput as unknown as ActionGroupInput;
     const key = snapshotKey(context, input.window_id || "");
     const snapshot = snapshots.get(key);
+    let dispatched = false;
     if (!snapshot || snapshot.id !== input.snapshot_id) {
       return {
         content: "ComputerActionGroup stopped: snapshot_id is missing, stale, or belongs to another window. Re-observe before acting. No input was sent.",
@@ -1150,6 +1154,7 @@ export const computerActionGroupTool: Tool = {
       }
       const actions = buildComputerActionGroupActions(input, snapshot);
       snapshots.delete(key);
+      dispatched = true;
       await performComputerActions(
         window,
         actions,
@@ -1182,6 +1187,7 @@ export const computerActionGroupTool: Tool = {
           (error instanceof Error ? error.message : String(error)) +
           " Group outcome may be partial or unknown; no further input was sent. Call ComputerObserve before retrying.",
         isError: true,
+        ...(dispatched ? { executionOutcome: "unknown" as const } : {}),
       };
     }
   },
@@ -1221,6 +1227,7 @@ export const computerNavigateTool: Tool = {
     const input = rawInput as unknown as NavigateInput;
     const key = snapshotKey(context, input.window_id || "");
     let snapshot = snapshots.get(key);
+    let dispatched = false;
     try {
       if (!input.goal?.trim() || input.goal.length > 1_000) throw new Error("goal must be 1-1000 characters.");
       if (!input.stop_condition?.trim() || input.stop_condition.length > 1_000) {
@@ -1284,6 +1291,7 @@ export const computerNavigateTool: Tool = {
         }
         const action = buildAction(navigationActionInput(decision.nextStep, snapshot), snapshot);
         snapshots.delete(key);
+        dispatched = true;
         await performComputerAction(
           window,
           action,
@@ -1323,6 +1331,7 @@ export const computerNavigateTool: Tool = {
       return {
         content: `ComputerNavigate stopped: ${error instanceof Error ? error.message : String(error)} No further input was sent after the failure; call ComputerObserve again before retrying.`,
         isError: true,
+        ...(dispatched ? { executionOutcome: "unknown" as const } : {}),
       };
     }
   },

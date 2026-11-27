@@ -166,6 +166,7 @@ async function main(): Promise<void> {
         { cwd: tmp },
       );
       assert(timedOut.isError === true, "Bash timeout returns an error");
+      assert(timedOut.executionOutcome === "unknown", "Bash timeout retains an uncertain external-effect outcome");
       const childPid = Number(await fs.readFile(path.join(tmp, "child.pid"), "utf8"));
       await new Promise((resolve) => setTimeout(resolve, 100));
       let childAlive = false;

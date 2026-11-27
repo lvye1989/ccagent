@@ -1,3 +1,4 @@
+import { getShellSandboxStatus } from "../sandbox/status.js";
 /** Web editors write the same definitions and settings consumed by the CLI. */
 import { cp, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -236,6 +237,7 @@ export async function handleCustomization(resource: string, method: string, body
     if (resource === "legacy-source") return { source: getPlatformHome() };
     if (resource === "official-services") return officialServicesView();
     if (resource === "models") return modelsView(context);
+    if (resource === "shell-isolation") return getShellSandboxStatus(context.workspace);
     if (resource === "power-settings") return { mailPowers: await loadMailPowerSettings() };
     if (resource === "teams") return { teams: await listTeamPresets(), enabled: isAgentTeamsEnabled(), activeTeam: getActiveTeam()?.teamName ?? null };
     if (resource === "rag") return { connections: (await loadRagConnections()).map(({ apiKey, ...c }) => ({ ...c, hasKey: Boolean(resolveWebSecret(apiKey)) })) };

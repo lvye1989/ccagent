@@ -167,6 +167,7 @@ export function App({ model, permissionMode, shouldResume, resumeSessionId }: Ap
   } = usePromptInput({
     isLoading: state.isLoading,
     hasPermissionPrompt: Boolean(state.permissionPrompt) && !isPlanExitActive,
+    requiresHumanReview: state.permissionPrompt?.requiresHumanReview,
     hasQuestionPrompt: Boolean(state.questionPrompt),
     isPlanExitPrompt: false,
     permissionMode: state.permissionMode,

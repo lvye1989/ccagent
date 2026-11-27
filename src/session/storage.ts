@@ -6,6 +6,8 @@ import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import type { Usage } from "../types/message.js";
 import { getProjectPathInfo } from "../context/memory/memdir.js";
 import { getCCAgentHome } from "../utils/paths.js";
+import { withFileTransaction, writeJsonAtomically } from "../utils/fileTransaction.js";
+import { createMemoryExecutionJournal, executionHash, foldUnresolvedExecutions, recoverToolResults, type ExecutionEvent, type ExecutionRecorder, type ExecutionScope, type UnresolvedToolExecution } from "./execution.js";
 
 const MAX_SESSIONS = 20;
 
@@ -20,6 +22,13 @@ export const DEFAULT_CLEANUP_PERIOD_DAYS = 30;
 // compaction) honors it without threading a parameter through each one.
 
 let persistenceEnabled = true;
+const ephemeralExecutions = new Map<string, ReturnType<typeof createMemoryExecutionJournal>>();
+function ephemeralJournal(cwd: string, sessionId: string) {
+  const key = `${getCCAgentHome()}\0${path.resolve(cwd)}\0${sessionId}`;
+  let journal = ephemeralExecutions.get(key);
+  if (!journal) { journal = createMemoryExecutionJournal(); ephemeralExecutions.set(key, journal); }
+  return journal;
+}
 
 /** Enable/disable transcript writes for this session (driven by cleanupPeriodDays). */
 export function configureSessionPersistence(enabled: boolean): void {
@@ -76,12 +85,14 @@ export interface FileHistorySnapshotRecord {
 
 export type TranscriptEntry =
   | { type: "session_meta"; sessionId: string; cwd: string; startedAt: string; model: string }
-  | { type: "message"; timestamp: string; role: "user" | "assistant"; message: MessageParam; messageId?: string }
+  | { type: "message"; timestamp: string; role: "user" | "assistant"; message: MessageParam; messageId?: string; executionScope?: ExecutionScope }
   | { type: "tool_event"; timestamp: string; name: string; phase: "start" | "done"; resultLength?: number; isError?: boolean }
   | { type: "usage"; timestamp: string; turn: Usage; total: Usage }
   | { type: "model_change"; timestamp: string; model: string }
   | { type: "system"; timestamp: string; level: "info" | "error"; message: string }
   | { type: "compaction"; timestamp: string; trigger: "auto" | "manual" }
+  | { type: "compaction_snapshot"; timestamp: string; trigger: "auto" | "manual"; messages: MessageParam[]; checksum: string }
+  | { type: "execution"; event: ExecutionEvent }
   | { type: "file_history_snapshot"; timestamp: string; snapshot: FileHistorySnapshotRecord };
 
 export interface RestoredSession {
@@ -89,6 +100,8 @@ export interface RestoredSession {
   messages: MessageParam[];
   /** Reconstructed file-history snapshots (chronological), if any. */
   fileHistorySnapshots: FileHistorySnapshotRecord[];
+  /** Tools with no durable result are shown as unknown; they are never replayed. */
+  unknownToolIds: string[];
 }
 
 function createEmptyUsage(): Usage {
@@ -113,6 +126,24 @@ function isMessageParam(value: unknown): value is MessageParam {
 function parseJsonLine(line: string): TranscriptEntry | null {
   try {
     const parsed = JSON.parse(line) as Record<string, unknown>;
+
+    if (parsed.type === "execution") {
+      const event = parsed.event as ExecutionEvent | undefined;
+      if (event && typeof event.id === "string" && typeof event.timestamp === "string"
+        && typeof event.turnId === "string" && typeof event.phase === "string" && typeof event.step === "number") {
+        return { type: "execution", event };
+      }
+      return null;
+    }
+    if (parsed.type === "compaction_snapshot") {
+      if (typeof parsed.timestamp === "string" && (parsed.trigger === "auto" || parsed.trigger === "manual")
+        && Array.isArray(parsed.messages) && parsed.messages.every(isMessageParam)
+        && parsed.checksum === executionHash(parsed.messages)) {
+        return { type: "compaction_snapshot", timestamp: parsed.timestamp, trigger: parsed.trigger,
+          messages: parsed.messages, checksum: parsed.checksum as string };
+      }
+      return null;
+    }
 
     if (parsed.type === "session_meta") {
       if (
@@ -147,6 +178,7 @@ function parseJsonLine(line: string): TranscriptEntry | null {
           // (file history) have no per-message id. Snapshots bind to this
           // id, so resume relies on it being preserved when present.
           ...(typeof parsed.messageId === "string" ? { messageId: parsed.messageId } : {}),
+          ...(parsed.executionScope && typeof (parsed.executionScope as ExecutionScope).turnId === "string" ? { executionScope: parsed.executionScope as ExecutionScope } : {}),
         };
       }
       return null;
@@ -327,6 +359,7 @@ export async function deleteStoredSession(cwd: string, sessionId: string, allowM
   await fs.unlink(transcriptPath).catch((error: NodeJS.ErrnoException) => {
     if (!allowMissing || error.code !== "ENOENT") throw error;
   });
+  await fs.rm(summaryPath(transcriptPath), { force: true });
   const pinned = new Set(await listPinnedSessionIds(cwd));
   if (pinned.delete(sessionId)) {
     await fs.writeFile(path.join(path.dirname(transcriptPath), PINNED_FILE), JSON.stringify([...pinned], null, 2) + "\n", "utf8");
@@ -358,7 +391,7 @@ export async function initSessionStorage(metadata: SessionMetadata): Promise<Ses
     model: metadata.model,
   };
 
-  await fs.writeFile(paths.transcriptPath, `${JSON.stringify(metaEntry)}\n`, { flag: "a" });
+  await appendJournalEntries(paths, [metaEntry]);
   await fs.writeFile(paths.latestPath, `${metadata.sessionId}\n`, "utf-8");
   return paths;
 }
@@ -386,18 +419,220 @@ export async function appendTranscriptEntry(cwd: string, sessionId: string, entr
   if (!persistenceEnabled) return;
   const paths = await getSessionPaths(cwd, sessionId);
   await ensureSessionDir(paths);
-  await fs.appendFile(paths.transcriptPath, `${JSON.stringify(entry)}\n`, "utf-8");
+  await appendJournalEntries(paths, [entry]);
   await fs.writeFile(paths.latestPath, `${sessionId}\n`, "utf-8");
 }
 
 async function readTranscriptEntries(filePath: string): Promise<TranscriptEntry[]> {
   const raw = await fs.readFile(filePath, "utf-8");
-  return raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map(parseJsonLine)
-    .filter((entry): entry is TranscriptEntry => entry !== null);
+  const lines = raw.split(/\r?\n/);
+  const entries: TranscriptEntry[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!.trim();
+    if (!line) continue;
+    try { JSON.parse(line); }
+    catch {
+      // Only a torn final write is recoverable. Interior corruption must be
+      // reported instead of silently hiding arbitrary parts of a conversation.
+      if (index === lines.length - 1) break;
+      throw new Error(`Session transcript contains invalid JSON at line ${index + 1}. The original file was retained.`);
+    }
+    const entry = parseJsonLine(line);
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+interface SessionIndex {
+  version: 2;
+  size: number;
+  mtimeMs: number;
+  summary: SessionSummary;
+  pendingExecutions: UnresolvedToolExecution[];
+}
+const summaryPath = (file: string) => `${file}.summary.json`;
+
+function legacyUnresolvedExecutions(entries: TranscriptEntry[]): UnresolvedToolExecution[] {
+  const messages = entries.filter((entry): entry is Extract<TranscriptEntry, { type: "message" }> => entry.type === "message");
+  const pending: UnresolvedToolExecution[] = [];
+  for (let index = 0; index < messages.length; index++) {
+    const entry = messages[index]!;
+    if (entry.executionScope || entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+    const next = messages[index + 1]?.message;
+    const paired = new Set(next?.role === "user" && Array.isArray(next.content)
+      ? next.content.filter(block => block.type === "tool_result").map(block => block.tool_use_id) : []);
+    for (const call of entry.message.content) if (call.type === "tool_use" && !paired.has(call.id)) pending.push({
+      key: `legacy/${index}/${call.id}`, toolName: call.name, toolUseId: call.id, inputHash: executionHash(call.input),
+    });
+  }
+  return pending;
+}
+
+function foldSummary(summary: SessionSummary | null, entry: TranscriptEntry): SessionSummary | null {
+  if (entry.type === "session_meta") return summary ?? {
+    sessionId: entry.sessionId, cwd: entry.cwd, startedAt: entry.startedAt, updatedAt: entry.startedAt,
+    model: entry.model, messageCount: 0, totalUsage: createEmptyUsage(), firstPrompt: "",
+  };
+  if (!summary) return null;
+  const next = { ...summary };
+  if ("timestamp" in entry) next.updatedAt = entry.timestamp;
+  if (entry.type === "execution") next.updatedAt = entry.event.timestamp;
+  if (entry.type === "model_change") next.model = entry.model;
+  if (entry.type === "usage") next.totalUsage = entry.total;
+  const messages = entry.type === "message" ? [entry.message] : entry.type === "compaction_snapshot" ? entry.messages : [];
+  next.messageCount += messages.length;
+  if (!next.firstPrompt) next.firstPrompt = extractFirstPrompt(messages).slice(0, 500);
+  return next;
+}
+
+async function cachedIndex(file: string, stat: { size: number; mtimeMs: number }): Promise<SessionIndex | null> {
+  try {
+    const index = JSON.parse(await fs.readFile(summaryPath(file), "utf8")) as SessionIndex;
+    if (index.version === 2 && index.size === stat.size && index.mtimeMs === stat.mtimeMs && Array.isArray(index.pendingExecutions)
+      && index.summary && typeof index.summary.sessionId === "string" && typeof index.summary.updatedAt === "string"
+      && typeof index.summary.messageCount === "number" && isUsage(index.summary.totalUsage)) return index;
+  } catch { /* Old/missing/stale indexes are rebuilt once from the journal. */ }
+  return null;
+}
+
+async function cachedSummary(file: string, stat: { size: number; mtimeMs: number }): Promise<SessionSummary | null> {
+  return (await cachedIndex(file, stat))?.summary ?? null;
+}
+
+async function publishSummary(file: string, summary: SessionSummary | null, pendingExecutions: UnresolvedToolExecution[] = []): Promise<void> {
+  if (!summary) return;
+  const stat = await fs.stat(file);
+  await writeJsonAtomically(summaryPath(file), { version: 2, size: stat.size, mtimeMs: stat.mtimeMs, summary, pendingExecutions } satisfies SessionIndex);
+}
+
+/** Preserve the torn bytes for diagnostics, then append only at a complete boundary. */
+async function repairTranscriptTail(file: string): Promise<void> {
+  const handle = await fs.open(file, "r+").catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return fs.open(file, "wx+", 0o600);
+  });
+  try {
+    const { size } = await handle.stat();
+    if (!size) return;
+    const last = Buffer.alloc(1);
+    await handle.read(last, 0, 1, size - 1);
+    if (last[0] === 10) return;
+    let offset = size;
+    const chunks: Buffer[] = [];
+    while (offset > 0) {
+      const length = Math.min(offset, 64 * 1024);
+      offset -= length;
+      const chunk = Buffer.alloc(length);
+      await handle.read(chunk, 0, length, offset);
+      const newline = chunk.lastIndexOf(10);
+      if (newline >= 0) { chunks.unshift(chunk.subarray(newline + 1)); offset += newline + 1; break; }
+      chunks.unshift(chunk);
+    }
+    const tail = Buffer.concat(chunks);
+    let complete = false;
+    try { JSON.parse(tail.toString("utf8")); complete = true; } catch { /* Torn JSON suffix. */ }
+    if (complete) await handle.write(Buffer.from("\n"), 0, 1, size);
+    else {
+      await fs.writeFile(`${file}.interrupted-${crypto.randomUUID()}.tail`, tail, { mode: 0o600, flag: "wx" });
+      await handle.truncate(offset);
+    }
+    await handle.sync();
+  } finally { await handle.close(); }
+}
+
+/** One cross-process journal transaction; metadata is an invalidatable cache. */
+async function appendJournalEntries(paths: SessionPaths, entries: TranscriptEntry[]): Promise<void> {
+  await withFileTransaction(paths.transcriptPath, async () => {
+    await repairTranscriptTail(paths.transcriptPath);
+    let before = await fs.stat(paths.transcriptPath);
+    let cached = await cachedIndex(paths.transcriptPath, before);
+    // Old writers could stop after their standalone compaction marker. Drop
+    // that uncommitted boundary before a new user message can follow it.
+    if (!cached) {
+    const tailHandle = await fs.open(paths.transcriptPath, "r+");
+    try {
+      const { size } = await tailHandle.stat();
+      const length = Math.min(size, 64 * 1024), tail = Buffer.alloc(length);
+      await tailHandle.read(tail, 0, length, size - length);
+      let end = tail.length;
+      while (end && (tail[end - 1] === 10 || tail[end - 1] === 13)) end--;
+      const start = tail.lastIndexOf(10, end - 1) + 1;
+      if (end && (start > 0 || size === length)) {
+        let danglingMarker = false;
+        try { danglingMarker = (JSON.parse(tail.subarray(start, end).toString("utf8")) as { type?: string }).type === "compaction"; }
+        catch { /* The damaged suffix was repaired above. */ }
+        if (danglingMarker) { await tailHandle.truncate(size - length + start); await tailHandle.sync(); }
+      }
+    } finally { await tailHandle.close(); }
+    before = await fs.stat(paths.transcriptPath);
+    cached = await cachedIndex(paths.transcriptPath, before);
+    }
+    let summary = cached?.summary ?? null;
+    let pending = cached?.pendingExecutions ?? [];
+    const handle = await fs.open(paths.transcriptPath, "a", 0o600);
+    try {
+      await handle.appendFile(entries.map(entry => JSON.stringify(entry)).join("\n") + "\n", "utf8");
+      await handle.sync();
+    } finally { await handle.close(); }
+    const updates = summary ? entries : await readTranscriptEntries(paths.transcriptPath);
+    if (!cached) pending = legacyUnresolvedExecutions(updates);
+    for (const entry of updates) {
+      summary = foldSummary(summary, entry);
+      if (entry.type === "execution") pending = foldUnresolvedExecutions(pending, entry.event);
+    }
+    // The journal is authoritative. Index failure must not duplicate a
+    // successfully appended side effect record when an entrypoint retries.
+    await publishSummary(paths.transcriptPath, summary, pending).catch(() => {});
+  });
+}
+
+export function createExecutionRecorder(cwd: string, sessionId: string): ExecutionRecorder {
+  return event => persistenceEnabled ? appendTranscriptEntry(cwd, sessionId, { type: "execution", event })
+    : ephemeralJournal(cwd, sessionId).recordExecutionEvent(event);
+}
+
+export function createExecutionReplayFence(cwd: string, sessionId: string): NonNullable<import("../tools/Tool.js").ToolContext["findUnresolvedExecutions"]> {
+  return async (toolName, inputHash) => {
+    if (!persistenceEnabled) return ephemeralJournal(cwd, sessionId).findUnresolvedExecutions(toolName, inputHash);
+    const { transcriptPath } = await getSessionPaths(cwd, sessionId);
+    const cached = await cachedIndex(transcriptPath, await fs.stat(transcriptPath));
+    let pending = cached?.pendingExecutions;
+    if (!pending) {
+      pending = [];
+      const entries = await readTranscriptEntries(transcriptPath);
+      pending = legacyUnresolvedExecutions(entries);
+      for (const entry of entries) if (entry.type === "execution") pending = foldUnresolvedExecutions(pending, entry.event);
+    }
+    return pending.filter(item => item.toolName === toolName && item.inputHash === inputHash);
+  };
+}
+
+export async function readSessionExecutionEvents(cwd: string, sessionId: string): Promise<ExecutionEvent[]> {
+  const paths = await getSessionPaths(cwd, sessionId);
+  return (await readTranscriptEntries(paths.transcriptPath))
+    .filter((entry): entry is Extract<TranscriptEntry, { type: "execution" }> => entry.type === "execution").map(entry => entry.event);
+}
+
+/** Skip message bodies when looking up billing metadata in a long transcript. */
+export async function findSessionBillingEvent(cwd: string, sessionId: string, requestId?: string): Promise<ExecutionEvent | undefined> {
+  if (!persistenceEnabled) return undefined;
+  const { transcriptPath } = await getSessionPaths(cwd, sessionId);
+  let handle;
+  try { handle = await fs.open(transcriptPath, "r"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  let selected: ExecutionEvent | undefined;
+  try {
+    for await (const line of handle.readLines()) {
+      if (!line.includes('"platformReceipt":')) continue;
+      const entry = parseJsonLine(line);
+      if (entry?.type !== "execution" || !entry.event.platformReceipt) continue;
+      const { logicalRequestId, actualRequestId } = entry.event.platformReceipt;
+      if (requestId ? requestId === logicalRequestId || requestId === actualRequestId : entry.event.status !== "reconciled") {
+        selected = entry.event;
+      }
+    }
+    return selected;
+  } finally { await handle.close(); }
 }
 
 export async function getLatestSessionId(cwd: string): Promise<string | null> {
@@ -429,18 +664,19 @@ export async function restoreSession(cwd: string, sessionId?: string): Promise<R
     throw new Error(`Session ${resolvedSessionId} is missing session metadata.`);
   }
 
-  // Find the last compaction marker; only use messages after it
-  let startIndex = 0;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i]!.type === "compaction") {
-      startIndex = i + 1;
-      break;
-    }
+  let messages: MessageParam[] = [];
+  let messageScopes: Array<ExecutionScope | undefined> = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!;
+    if (entry.type === "compaction_snapshot") { messages = [...entry.messages]; messageScopes = entry.messages.map(() => undefined); }
+    // Legacy journals used multi-line checkpoints. A marker without any
+    // complete following message is not a committed replacement history.
+    else if (entry.type === "compaction" && entries[index + 1]?.type === "message") { messages = []; messageScopes = []; }
+    else if (entry.type === "message") { messages.push(entry.message); messageScopes.push(entry.executionScope); }
   }
-  const messages = entries
-    .slice(startIndex)
-    .filter((entry): entry is Extract<TranscriptEntry, { type: "message" }> => entry.type === "message")
-    .map((entry) => entry.message);
+  const executionEvents = entries.filter((entry): entry is Extract<TranscriptEntry, { type: "execution" }> => entry.type === "execution").map(entry => entry.event);
+  const recovered = recoverToolResults(messages, executionEvents, meta.sessionId, messageScopes);
+  messages = recovered.messages;
 
   const latestUsage = [...entries]
     .reverse()
@@ -474,6 +710,7 @@ export async function restoreSession(cwd: string, sessionId?: string): Promise<R
     },
     messages,
     fileHistorySnapshots: [...fhMap.values()],
+    unknownToolIds: [...new Set([...recovered.unknownToolIds, ...executionEvents.reduce(foldUnresolvedExecutions, [] as UnresolvedToolExecution[]).map(item => item.toolUseId)])],
   };
 }
 
@@ -486,17 +723,10 @@ export async function appendCompactionSnapshot(
   if (!persistenceEnabled) return;
   const paths = await getSessionPaths(cwd, sessionId);
   await ensureSessionDir(paths);
-  const lines: string[] = [];
-  lines.push(JSON.stringify({ type: "compaction", timestamp: new Date().toISOString(), trigger }));
-  for (const msg of messages) {
-    lines.push(JSON.stringify({
-      type: "message",
-      timestamp: new Date().toISOString(),
-      role: msg.role,
-      message: msg,
-    }));
-  }
-  await fs.appendFile(paths.transcriptPath, lines.join("\n") + "\n", "utf-8");
+  // A checkpoint is one checksummed record. A torn write cannot publish its
+  // boundary separately from its messages and hide the previous history.
+  await appendJournalEntries(paths, [{ type: "compaction_snapshot", timestamp: new Date().toISOString(),
+    trigger, messages, checksum: executionHash(messages) }]);
 }
 
 /**
@@ -545,12 +775,14 @@ export async function applySessionRetentionPolicy(cwd: string): Promise<{ period
       const filePath = path.join(projectDir, entry.name);
       if (periodDays === 0) {
         await fs.rm(filePath, { force: true }).catch(() => {});
+        await fs.rm(summaryPath(filePath), { force: true }).catch(() => {});
         continue;
       }
       try {
         const stat = await fs.stat(filePath);
         if (stat.mtimeMs < cutoffMs) {
           await fs.rm(filePath, { force: true }).catch(() => {});
+          await fs.rm(summaryPath(filePath), { force: true }).catch(() => {});
         }
       } catch {
         // skip files we can't stat
@@ -585,38 +817,31 @@ export async function listProjectSessions(cwd: string, limit = MAX_SESSIONS): Pr
     .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
     .map((entry) => path.join(projectDir, entry.name));
 
-  const sessions = await Promise.all(
-    sessionFiles.map(async (filePath) => {
-      let transcriptEntries: TranscriptEntry[];
+  const sessions: Array<SessionSummary | null> = [];
+  // Bound IO even for legacy projects with many sessions. Normal listing
+  // reads only small summary files; a changed/legacy journal rebuilds once.
+  for (let offset = 0; offset < sessionFiles.length; offset += 8) {
+    sessions.push(...await Promise.all(sessionFiles.slice(offset, offset + 8).map(async filePath => {
       try {
-        transcriptEntries = await readTranscriptEntries(filePath);
-      } catch {
-        // One locked or unreadable transcript must not hide every other task.
-        return null;
-      }
-      const meta = transcriptEntries.find((entry): entry is Extract<TranscriptEntry, { type: "session_meta" }> => entry.type === "session_meta");
-      if (!meta) return null;
-
-      const messages = transcriptEntries.filter((entry) => entry.type === "message");
-      const latestUsage = [...transcriptEntries]
-        .reverse()
-        .find((entry): entry is Extract<TranscriptEntry, { type: "usage" }> => entry.type === "usage");
-      const latestModel = [...transcriptEntries]
-        .reverse()
-        .find((entry): entry is Extract<TranscriptEntry, { type: "model_change" }> => entry.type === "model_change");
-
-      return {
-        sessionId: meta.sessionId,
-        cwd: meta.cwd,
-        startedAt: meta.startedAt,
-        updatedAt: getLastUpdatedAt(transcriptEntries, meta.startedAt),
-        model: latestModel?.model ?? meta.model,
-        messageCount: messages.length,
-        totalUsage: latestUsage?.total ?? createEmptyUsage(),
-        firstPrompt: extractFirstPrompt(messages.map((m) => m.message)),
-      } satisfies SessionSummary;
-    }),
-  );
+        const cached = await cachedSummary(filePath, await fs.stat(filePath));
+        if (cached) return cached;
+        return await withFileTransaction(filePath, async () => {
+          const current = await cachedSummary(filePath, await fs.stat(filePath));
+          if (current) return current;
+          let summary: SessionSummary | null = null;
+          let pending: UnresolvedToolExecution[] = [];
+          const entries = await readTranscriptEntries(filePath);
+          pending = legacyUnresolvedExecutions(entries);
+          for (const entry of entries) {
+            summary = foldSummary(summary, entry);
+            if (entry.type === "execution") pending = foldUnresolvedExecutions(pending, entry.event);
+          }
+          await publishSummary(filePath, summary, pending).catch(() => {});
+          return summary;
+        });
+      } catch { return null; } // One locked/corrupt transcript cannot hide all tasks.
+    })));
+  }
 
   return sessions
     .filter((session): session is SessionSummary => session !== null)

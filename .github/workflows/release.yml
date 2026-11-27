@@ -10,6 +10,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  application-gates:
+    uses: ./.github/workflows/verify.yml
   old-node-gate:
     name: Verify the Node 20 failure path
     runs-on: ubuntu-latest
@@ -42,8 +44,9 @@ jobs:
 
   publish:
     name: Verify and publish
-    needs: old-node-gate
-    runs-on: ubuntu-latest
+    needs: [old-node-gate, application-gates]
+    # prepublishOnly also invokes the Windows characterization release gate.
+    runs-on: windows-latest
     permissions:
       contents: read
       id-token: write

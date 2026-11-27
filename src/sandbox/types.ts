@@ -55,6 +55,8 @@ export interface SandboxSettings {
   excludedCommands?: string[];
   filesystem?: SandboxFilesystemSettings;
   network?: SandboxNetworkSettings;
+  /** Windows uses Docker Desktop's local Linux engine. Images must already exist locally. */
+  docker?: { image?: string };
 }
 
 /**

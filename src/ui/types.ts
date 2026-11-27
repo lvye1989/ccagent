@@ -60,6 +60,7 @@ export interface UsageSummary {
 }
 
 export interface PermissionPromptState {
+  requiresHumanReview?: boolean;
   toolName: string;
   summary: string;
   risk: string;

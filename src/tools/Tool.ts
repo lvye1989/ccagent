@@ -13,6 +13,7 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ContentBlock } from "../types/message.js";
+import type { ExecutionRecorder, ExecutionScope, UnresolvedToolExecution } from "../session/execution.js";
 
 // ─── Interactive questions (AskUserQuestion) ───────────────────────
 
@@ -52,6 +53,12 @@ export interface UserQuestionResponse {
 export interface ToolContext {
   /** Current working directory */
   cwd: string;
+  /** Entrypoint-owned durable audit writer, inherited by child agents. */
+  recordExecutionEvent?: ExecutionRecorder;
+  /** Current turn/request identity, refreshed by the shared agent loop. */
+  executionScope?: ExecutionScope;
+  /** Durable replay fence; unresolved external effects require human review. */
+  findUnresolvedExecutions?: (toolName: string, inputHash: string) => Promise<UnresolvedToolExecution[]>;
   /** Runtime-only closed tool scope. An empty scope enables no tools; never fall back to the global registry. */
   scopedTools?: readonly Tool[];
   /** Runtime-only constraint: a text-only official route must not use a personal vision key. */
@@ -171,6 +178,8 @@ export interface ToolContext {
 
 /** The return value of a tool's `call()` method. */
 export interface ToolResult {
+  /** The process/transport stopped after dispatch; external effects need verification. */
+  executionOutcome?: "unknown";
   /**
    * Output sent back to the model. Usually a plain string, but tools that
    * produce multimodal output (e.g. `Read` on an image, MCP image results)

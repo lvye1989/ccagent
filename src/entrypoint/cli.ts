@@ -340,13 +340,12 @@ Settings keys (in ~/.ccagent/settings.json or <cwd>/.ccagent/settings.json):
       "../sandbox/index.js"
     );
     const sandboxSettings = await loadSandboxSettings(process.cwd());
-    const reason = getSandboxUnavailableReason(sandboxSettings.enabled);
+    const reason = getSandboxUnavailableReason(sandboxSettings.enabled, sandboxSettings);
     if (reason) {
-      console.warn(`[ccagent] ⚠ ${reason} Bash commands will run unsandboxed.`);
+      console.warn(`[ccagent] ⚠ ${reason} Isolated shell commands are blocked; host execution is not a fallback.`);
     }
   } catch {
-    // Settings parse errors are surfaced by the permission loader; we
-    // don't double-report here.
+    console.warn("[ccagent] Sandbox settings could not be verified. Shell execution is blocked until settings are repaired.");
   }
 
   if (dumpSystemPrompt) {

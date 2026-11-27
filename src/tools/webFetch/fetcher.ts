@@ -84,6 +84,12 @@ export async function fetchUrlContent(
   signal?: AbortSignal,
   depth = 0,
 ): Promise<FetchResult> {
+  const deadline = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  return fetchHop(url, signal ? AbortSignal.any([signal, deadline]) : deadline, depth);
+}
+
+async function fetchHop(url: string, signal: AbortSignal, depth: number): Promise<FetchResult> {
+  signal.throwIfAborted();
   if (depth > MAX_REDIRECTS) {
     throw new Error(`Too many redirects (exceeded ${MAX_REDIRECTS})`);
   }
@@ -102,36 +108,22 @@ export async function fetchUrlContent(
     target = parsed.toString();
   }
 
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), FETCH_TIMEOUT_MS);
-  const linkedAbort = () => timeout.abort();
-  signal?.addEventListener("abort", linkedAbort, { once: true });
-
-  let response: Response;
-  try {
-    response = await fetch(target, {
-      method: "GET",
-      redirect: "manual",
-      signal: timeout.signal,
-      headers: {
-        Accept: "text/markdown, text/html, */*",
-        "User-Agent": `${USER_AGENT} (+${HOMEPAGE}) WebFetch`,
-      },
-    });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", linkedAbort);
-  }
+  const response = await fetch(target, {
+    method: "GET", redirect: "manual", signal,
+    headers: { Accept: "text/markdown, text/html, */*", "User-Agent": `${USER_AGENT} (+${HOMEPAGE}) WebFetch` },
+  });
 
   // Manual redirect handling.
   if ([301, 302, 303, 307, 308].includes(response.status)) {
+    void response.body?.cancel().catch(() => {});
+    signal.throwIfAborted();
     const location = response.headers.get("location");
     if (!location) {
       throw new Error("Redirect response missing Location header");
     }
     const redirectUrl = new URL(location, target).toString();
     if (isPermittedRedirect(target, redirectUrl)) {
-      return fetchUrlContent(redirectUrl, signal, depth + 1);
+      return fetchHop(redirectUrl, signal, depth + 1);
     }
     return {
       type: "redirect",
@@ -143,13 +135,36 @@ export async function fetchUrlContent(
 
   const contentType = response.headers.get("content-type") ?? "";
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const bytes = buffer.length;
-  if (bytes > MAX_CONTENT_BYTES) {
-    throw new Error(`Response too large (${bytes} bytes, limit ${MAX_CONTENT_BYTES})`);
+  const binary = isBinaryContentType(contentType);
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+  let raw = "";
+  let bytes = 0;
+  const reader = response.body?.getReader();
+  if (reader) {
+    const cancel = () => { void reader.cancel(signal.reason).catch(() => {}); };
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    try {
+      for (;;) {
+        signal.throwIfAborted();
+        const chunk = await reader.read();
+        signal.throwIfAborted();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > MAX_CONTENT_BYTES) {
+          const error = new Error(`Response too large (limit ${MAX_CONTENT_BYTES} bytes)`);
+          void reader.cancel(error).catch(() => {});
+          throw error;
+        }
+        if (!binary) raw += decoder.decode(chunk.value, { stream: true });
+      }
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      reader.releaseLock();
+    }
   }
 
-  if (isBinaryContentType(contentType)) {
+  if (binary) {
     // Multimodal/binary persistence lands in a later stage; for now report it.
     return {
       type: "content",
@@ -162,7 +177,7 @@ export async function fetchUrlContent(
     };
   }
 
-  const raw = buffer.toString("utf-8");
+  raw += decoder.decode();
   let content = raw;
   let converted = false;
   if (contentType.includes("text/html")) {

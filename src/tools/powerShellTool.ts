@@ -7,6 +7,7 @@ import {
   validateCommandTimeout,
 } from "../utils/subprocess.js";
 import { prepareToolTempEnvironment } from "../utils/toolTemp.js";
+import { buildSandboxProfile, loadSandboxSettings, runDockerSandboxCommand } from "../sandbox/index.js";
 
 /**
  * PowerShell — execute a PowerShell command on Windows.
@@ -14,9 +15,8 @@ import { prepareToolTempEnvironment } from "../utils/toolTemp.js";
  * Reference: claude-code-source-code/src/tools/PowerShellTool/. It mirrors
  * Bash but for the Windows shell. This tool registers ONLY on Windows
  * (isEnabled gates on process.platform), so non-Windows tool lists never see
- * it. The macOS sandbox does not apply here (Windows sandboxing is out of
- * scope, consistent with the project's macOS-only sandbox), which the
- * description and prompt make explicit.
+ * it. With sandbox.enabled, the command runs as Linux pwsh in a restricted
+ * local Docker container; otherwise native Windows behavior is retained.
  */
 interface PowerShellInput {
   command: string;
@@ -35,7 +35,7 @@ export const powerShellTool: Tool = {
   name: "PowerShell",
   description:
     "Execute a PowerShell command on Windows and return stdout/stderr. Use this instead of Bash on Windows. " +
-    "$env:TEMP, $env:TMP, and $env:CCAGENT_TMPDIR point to a private CCAGENT directory that Read can access. Note: not sandboxed.",
+    "With sandbox.enabled, runs Linux pwsh in Docker: /workspace is the read-only project, /output is writable project output/sandbox, and network is disabled. Windows paths, COM and desktop apps are unavailable in isolation. Otherwise runs native Windows PowerShell with a private temporary directory.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -59,6 +59,18 @@ export const powerShellTool: Tool = {
     const timeoutMs = timeout.value;
     if (context.abortSignal?.aborted) {
       return { content: "Command aborted before start", isError: true };
+    }
+    try {
+      const settings = await loadSandboxSettings(context.cwd);
+      if (settings.enabled) {
+        const { loadPermissionSettings } = await import("../permissions/permissions.js");
+        const permissions = await loadPermissionSettings(context.cwd);
+        const profile = buildSandboxProfile({ cwd: context.cwd, settings, permissions });
+        return await runDockerSandboxCommand({ command: input.command, shell: "powershell", cwd: context.cwd,
+          settings, profile, timeoutMs, signal: context.abortSignal });
+      }
+    } catch {
+      return { content: "Sandbox settings or setup failed. PowerShell was not run; there is no host fallback.", isError: true };
     }
 
     let settingsEnv: Record<string, string> = {};
@@ -112,11 +124,11 @@ export const powerShellTool: Tool = {
       };
 
       timeoutId = setTimeout(() => {
-        terminate({ content: `Command timed out after ${timeoutMs}ms`, isError: true });
+        terminate({ content: `Command timed out after ${timeoutMs}ms`, isError: true, executionOutcome: "unknown" });
       }, timeoutMs);
 
       const onAbort = () => {
-        terminate({ content: "Command aborted", isError: true });
+        terminate({ content: "Command aborted", isError: true, executionOutcome: "unknown" });
       };
       context.abortSignal?.addEventListener("abort", onAbort, { once: true });
       if (context.abortSignal?.aborted) onAbort();
@@ -137,6 +149,7 @@ export const powerShellTool: Tool = {
         const stderrText = stderr.toString();
         const output = [
           `Command: ${input.command}`,
+          "Sandbox: disabled (native Windows PowerShell)",
           `Exit code: ${code ?? -1}`,
           stdoutText ? `\nSTDOUT:\n${stdoutText}` : "",
           stderrText ? `\nSTDERR:\n${stderrText}` : "",

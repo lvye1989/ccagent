@@ -4,21 +4,21 @@
  *
  * Inputs that flip the decision:
  *
- *   1. Master switch: `sandbox.enabled` in settings + platform supports
- *      sandbox-exec (only macOS in ccagent).
+ *   1. Master switch: sandbox.enabled. Availability is checked at execution,
+ *      and an unavailable requested backend blocks the command.
  *
- *   2. Per-call escape: the model passed `dangerouslyDisableSandbox: true`
+ *   2. macOS per-call escape: the model passed `dangerouslyDisableSandbox: true`
  *      AND the user allows that via `sandbox.allowUnsandboxedCommands`
  *      (default true). If the user policy denies model escapes, the flag
  *      is silently ignored and the command is sandboxed anyway.
  *
- *   3. UX escape hatch: `sandbox.excludedCommands` patterns. If the
+ *   3. macOS UX escape hatch: `sandbox.excludedCommands` patterns. If the
  *      command (or any subcommand) starts with one of these prefixes,
  *      we skip the sandbox. NOT a security boundary — it's for commands
- *      like `docker:*` and `make:*` that need raw FS access.
+ *      like `docker:*` and `make:*` that need raw FS access. Windows ignores
+ *      both escape mechanisms while sandbox.enabled is true.
  */
 
-import { isSandboxRuntimeReady } from "./availability.js";
 import type { ResolvedSandboxSettings } from "./settings.js";
 import { splitCommand } from "./splitCommand.js";
 
@@ -80,7 +80,9 @@ export function shouldUseSandbox(
   settings: ResolvedSandboxSettings,
 ): boolean {
   if (!settings.enabled) return false;
-  if (!isSandboxRuntimeReady()) return false;
+  // This answers policy intent, not runtime availability. The execution layer
+  // fails closed when the requested backend is unavailable.
+  if (process.platform === "win32") return true;
   if (
     input.dangerouslyDisableSandbox === true &&
     settings.allowUnsandboxedCommands

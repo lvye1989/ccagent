@@ -561,6 +561,42 @@ Skills 也默认 Open。输入 `/agent-skill` 可在本地卡片选择 **Open** 
 
 运行 `/config list`、`/model list` 或 `/doctor` 可以检查最终生效的配置。
 
+### Windows Shell 进程隔离
+
+默认 `sandbox.enabled: false`，Shell 继续在宿主 Windows 运行。启用后，Bash 和 PowerShell 都进入本机 Docker Desktop 的 Linux 容器：项目以只读 `/workspace` 挂载，`/output` 对应项目 `output/sandbox`，容器无网络、无宿主凭据环境，并有进程、内存和 CPU 限制。PowerShell 使用 Linux `pwsh`，无法运行 Windows COM、注册表或桌面应用；MCP、文件工具和桌面自动化不在这项隔离范围内。
+
+先由用户启动 Docker Desktop（Linux 容器模式），手动准备可信镜像，例如 `docker pull mcr.microsoft.com/powershell:lts-debian-12`；应用不会自动启动 Docker 或拉取镜像。然后在**当前账户用户设置**中合并以下字段。普通安装的基目录是 `%USERPROFILE%\.ccagent`；登录后配置通常在 `accounts\<账户哈希>\settings.json`，以 `/config list` 显示的 User 来源路径为准（`CCAGENT_HOME` 可覆盖目录）。
+
+```json
+{"sandbox":{"enabled":true,"docker":{"image":"mcr.microsoft.com/powershell:lts-debian-12"}}}
+```
+
+引擎、镜像或配置未就绪时命令明确失败，不会改在宿主运行；Windows 下模型逃逸标志和排除命令不能绕过已启用隔离。运行 `/doctor` 查看状态；镜像也可替换为预先审核、包含 Bash/pwsh 的组织镜像。配置限制、产物目录和验证命令见 [Windows 隔离说明](docs/windows-shell-isolation.md)。
+
+### 插件接口与专项审批
+
+可信插件的命令 Hook 和 stdio MCP 服务可以从 `CCAGENT_PLUGIN_API` 加载宿主接口。以下代码读取插件内的模板，并保存最近一次读取的长度。
+
+```js
+const { createPluginHost } = await import(process.env.CCAGENT_PLUGIN_API);
+const { files, storage, processes } = createPluginHost();
+const template = await files.readText("templates/report.md");
+await storage.set("last-template", { characters: template.length });
+const previous = await storage.get("last-template");
+```
+
+`files.readText` 只能读取插件目录内的资源。`storage` 在插件数据目录逐键原子替换 JSON。`processes.run(executable, args, { signal, timeout, env })` 按参数数组启动宿主进程，使用精简环境，默认超时 30 秒。集成或测试可向 `createPluginHost` 传入 `adapters` 替换这三个接口。可执行插件以当前宿主用户身份运行，只应安装可信来源。
+
+`processes.run` 保留 UTF-8 `stdout`、`stderr` 返回值，每路最多 1 MiB；失败时错误对象也包含已捕获的两路输出。超时、取消或输出超限会合并为一次清理：Windows 使用系统 `taskkill /T /F`，POSIX 对本次运行的独立进程组先发 TERM、再按需 KILL，尽力终止普通前台父子进程。启动失败不会启动清理命令，预先取消不会创建进程。该接口仍在宿主运行；插件刻意脱离的进程、已退出父进程后的 Windows 后代、系统拒绝终止等情况不保证收回，无法确认时错误对象会带 `cleanupIncomplete: true`，不应把它当作插件沙箱。
+
+插件可以在清单添加 `"approvalRules": [{"tool":"Mail","operation":"send","behavior":"ask","reason":"确认收件人"}]`。省略 `operation` 时规则匹配该工具的所有操作。`deny` 优先，`ask` 在 Full 模式下也要求逐次前台确认。重载、停用插件会更新生效的规则。
+
+### 耗时与中断恢复
+
+输入 `/billing` 可对账本会话最近的官方服务调用，也可使用 `/billing <请求编号>` 核对指定调用。该命令只读查询平台账单。
+
+输入 `/timings` 可查看最近一次模型轮次或手动摘要的分项耗时。Web 完成卡片和无界面 JSON 也提供排队、模型、工具和摘要毫秒数。并行工具按每次调用累计耗时。重启持久会话时，已有回执的工具会恢复结果，缺少回执的调用会标记为结果未知。如果相同的外部写操作再次请求确认，请先核对目标或收据。会话列表优先读取每个会话的摘要索引，旧会话或失效索引从历史重建。
+
 ## 常用方式
 
 ```bash
@@ -611,6 +647,8 @@ git diff | ccagent -p "审查这个补丁"              # 合并 stdin 与 Promp
 - 使用接口：Ink 交互界面、Headless text/JSON/NDJSON、图片与截图、多模型协议
 
 ## 升级与卸载
+
+Windows 桌面版“帮助”菜单支持检查签名更新和手动回退。正式构建所需的签名配置、回退条件和安装验收步骤见[桌面发布指南](docs/signed-desktop-releases.md)。
 
 升级全局包，或重新运行安装脚本：
 

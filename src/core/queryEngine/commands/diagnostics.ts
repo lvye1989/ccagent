@@ -21,10 +21,7 @@ import {
 } from "../../../utils/tokens.js";
 import { resolveProfile } from "../../../services/api/providers/profile.js";
 import {
-  isPlatformSupported as isSandboxPlatformSupported,
-  isSandboxRuntimeReady,
-  getSandboxUnavailableReason,
-  loadSandboxSettings,
+  getShellSandboxStatus,
 } from "../../../sandbox/index.js";
 import { loadSettingsDiagnostics } from "../../../utils/settings.js";
 import {
@@ -214,25 +211,9 @@ export async function* handleDoctorCommand(
   }
 
   // Sandbox
-  let sandboxEnabled = false;
-  try {
-    sandboxEnabled = (await loadSandboxSettings(cwd)).enabled === true;
-  } catch {
-    // treat as disabled
-  }
-  if (!isSandboxPlatformSupported()) {
-    lines.push(
-      `${sandboxEnabled ? ICON.warn : ICON.ok} Sandbox: not supported on ${process.platform}` +
-        (sandboxEnabled ? " (sandbox.enabled has no effect here)" : ""),
-    );
-  } else if (isSandboxRuntimeReady()) {
-    lines.push(
-      `${ICON.ok} Sandbox: sandbox-exec available${sandboxEnabled ? " (enabled)" : " (disabled in settings)"}`,
-    );
-  } else {
-    const reason = getSandboxUnavailableReason(true) ?? "sandbox-exec not found";
-    lines.push(`${sandboxEnabled ? ICON.fail : ICON.warn} Sandbox: ${reason}`);
-  }
+  const sandbox = await getShellSandboxStatus(cwd);
+  lines.push(`${sandbox.state === "ready" ? ICON.ok : sandbox.state === "disabled" ? ICON.warn : ICON.fail} Sandbox: ${sandbox.message}`);
+  lines.push(`  Scope: ${sandbox.scope}`);
 
   // Settings validity
   const settingsErrors = await loadSettingsDiagnostics(cwd).catch(() => [] as string[]);

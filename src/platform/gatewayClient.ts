@@ -22,6 +22,30 @@ export function authorizedPrivateUploadUrl(url: URL, expected: string, accountOr
 export class PlatformServiceError extends Error {
   constructor(message: string, readonly code: string, readonly status = 0, readonly requestId?: string) { super(message); this.name = "PlatformServiceError"; }
 }
+/** Cloud ledger evidence, kept separate from provider tokens or local completion. */
+export interface PlatformCallReceipt {
+  logicalRequestId: string;
+  actualRequestId: string;
+  serverCallId?: string;
+  status: "settled" | "released" | "pending" | "held" | "unverified";
+  authoritative: boolean;
+  chargedMicro?: string;
+}
+const ledgerStatuses = new Set(["settled", "released", "pending", "held"]);
+export function platformReceiptFromStatus(logicalRequestId: string, actualRequestId: string, value: Record<string, unknown> | null): PlatformCallReceipt {
+  const unverified: PlatformCallReceipt = { logicalRequestId, actualRequestId, status: "unverified", authoritative: false };
+  if (!value || typeof value.id !== "string" || !uuid.test(value.id) || typeof value.status !== "string" || !ledgerStatuses.has(value.status)
+    || value.requestId !== undefined && value.requestId !== actualRequestId) return unverified;
+  const charged = typeof value.charged === "string" && /^\d{1,100}$/.test(value.charged) ? value.charged : undefined;
+  return { ...unverified, serverCallId: value.id, status: value.status as PlatformCallReceipt["status"], authoritative: true, ...(charged !== undefined ? { chargedMicro: charged } : {}) };
+}
+export function platformReceiptFromHeaders(logicalRequestId: string, actualRequestId: string, headers: Headers): PlatformCallReceipt {
+  const callId = headers.get("x-ccagent-call-id"), status = headers.get("x-ccagent-billing-status");
+  if (headers.get("x-ccagent-request-id") === actualRequestId) {
+    return platformReceiptFromStatus(logicalRequestId, actualRequestId, { id: callId, requestId: actualRequestId, status, charged: headers.get("x-ccagent-charged-micro") });
+  }
+  return { logicalRequestId, actualRequestId, ...(callId && uuid.test(callId) ? { serverCallId: callId } : {}), status: "unverified", authoritative: false };
+}
 
 async function checked(response: Response): Promise<Response> {
   if (response.ok) return response;
@@ -242,7 +266,7 @@ export async function officialServicesView() {
 
 type CallRecord = { requestId: string; taskId: string; endpoint: Endpoint; model: string; hash: string; keyHash: string;
   state: "sending" | "received" | "unknown" | "rejected"; createdAt: string; callId?: string; requestFileId?: string; priceVersion?: number; priceFingerprint?: string;
-  fallback?: { routeId: string; version: number; fingerprint: string } };
+  fallback?: { routeId: string; version: number; fingerprint: string }; receipt?: PlatformCallReceipt };
 const fingerprintPattern = /^[a-f0-9]{64}$/, routePattern = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
 
 async function journal<T>(action: (records: CallRecord[]) => T): Promise<T> {
@@ -291,6 +315,11 @@ export class PlatformGatewayClient {
     if (response.status === 404) { await response.body?.cancel(); return null; }
     return await (await checked(response)).json() as Record<string, unknown>;
   }
+  /** Explicit read-only reconciliation. Never invoked for every model step. */
+  async reconcileReceipt(logicalRequestId: string, actualRequestId: string): Promise<PlatformCallReceipt> {
+    if (!uuid.test(logicalRequestId) || !uuid.test(actualRequestId)) throw new PlatformServiceError("调用标识无效。", "INVALID_CALL_ID");
+    return platformReceiptFromStatus(logicalRequestId, actualRequestId, await this.callStatus(actualRequestId));
+  }
 
   private async upload(bytes: Uint8Array, signal?: AbortSignal, purpose: "request" | "image" = "request", contentType = "application/json"): Promise<string> {
     const response = await checked(await this.request("/api/files", { method: "POST", body: Buffer.from(JSON.stringify({ purpose, contentType, size: bytes.byteLength })), headers: { "content-type": "application/json" }, maximumBytes: 128 * 1024, signal }));
@@ -324,7 +353,7 @@ export class PlatformGatewayClient {
     return new Uint8Array(await response.arrayBuffer());
   }
 
-  async call(endpoint: Endpoint, input: Record<string, unknown>, options: { requestId?: string; taskId?: string; signal?: AbortSignal } = {}): Promise<Response> {
+  async call(endpoint: Endpoint, input: Record<string, unknown>, options: { requestId?: string; taskId?: string; signal?: AbortSignal; onReceipt?: (receipt: PlatformCallReceipt) => void } = {}): Promise<Response> {
     await this.assertBinding(); options.signal?.throwIfAborted();
     const model = typeof input.model === "string" ? input.model : "";
     const route = this.configuration.routes.find(item => item.id === model);
@@ -354,13 +383,27 @@ export class PlatformGatewayClient {
       records.push(next); return { ...next, reused: false };
     });
     const mark = (update: Partial<CallRecord>) => journal(records => { const current = records.find(item => item.requestId === record.requestId); if (current) Object.assign(current, update); });
+    let receipt: PlatformCallReceipt = { logicalRequestId: requestedId, actualRequestId: record.requestId, ...(record.callId ? { serverCallId: record.callId } : {}), status: "unverified", authoritative: false };
+    const publishReceipt = async (value: PlatformCallReceipt, persist = true) => {
+      // Headerless old deployments must not erase newer evidence obtained from
+      // the authenticated owned-call lookup during recovery.
+      if (!value.authoritative && receipt.authoritative) return;
+      receipt = value;
+      if (persist) await mark({ receipt, ...(receipt.serverCallId ? { callId: receipt.serverCallId } : {}) });
+      try { options.onReceipt?.({ ...receipt }); } catch { /* Observers cannot retry a paid request. */ }
+    };
+    await publishReceipt(receipt, false);
     let requestFile: string | undefined, sent = false;
     const cleanup = async () => {
       if (!requestFile) return;
       try { await (await checked(await this.request(`/api/files/${requestFile}`, { method: "DELETE", timeoutMs: 15000, maximumBytes: 128 * 1024 }))).json(); }
       catch { /* The authenticated TTL maintenance job retries actual deletion. */ }
     };
-    const status = () => this.callStatus(record.requestId);
+    const status = async () => {
+      const value = await this.callStatus(record.requestId);
+      await publishReceipt(platformReceiptFromStatus(requestedId, record.requestId, value));
+      return value;
+    };
     try {
       if (record.reused) {
         const previous = await status();
@@ -379,13 +422,12 @@ export class PlatformGatewayClient {
       catch (error) {
         // A connection failure never authorizes a new paid operation. Query first;
         // only a completed, replayable result may be fetched using the SAME id.
-        const status = await this.callStatus(record.requestId).catch(() => null);
-        if (endpoint !== "images/tasks" && status && ["settled", "released"].includes(String(status.status)) && status.resultAvailable === true && !options.signal?.aborted) response = await send();
+        const previous = await status().catch(() => null);
+        if (endpoint !== "images/tasks" && previous && ["settled", "released"].includes(String(previous.status)) && previous.resultAvailable === true && !options.signal?.aborted) response = await send();
         else throw error;
       }
       await checked(response);
-      const callId = response.headers.get("x-ccagent-call-id");
-      if (callId && uuid.test(callId)) await mark({ callId });
+      await publishReceipt(platformReceiptFromHeaders(requestedId, record.requestId, response.headers));
       if (!response.body) throw new PlatformTransportError();
       const body = recoverableResponseBody(response, {
         signal: options.signal,

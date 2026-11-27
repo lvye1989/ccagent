@@ -1,6 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "./Tool.js";
 import { isMailPowerEnabled, mailPowerForOperation } from "../config/mailPowerSettings.js";
-import { deleteMail, listMail, parseBoundMailMessageId, readMail, saveDraft, searchMail, sendMail } from "./mailBackend.js";
+import { deleteMail, listMail, parseBoundMailMessageId, readMail, saveDraft, searchMail, sendMail, MailBackendError } from "./mailBackend.js";
 import { isSingleMailAddress } from "./mailPolicy.js";
 
 type Account = "qq" | "163";
@@ -153,7 +153,10 @@ export const mailTool: Tool = {
       }
       return { content: JSON.stringify(receipt) };
     } catch (error) {
-      return { content: `Mail ${operation} failed: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+      const uncertain = ["send", "draft", "delete"].includes(operation) && (!(error instanceof MailBackendError)
+        || ["MAIL_TIMEOUT", "MAIL_PROVIDER_ERROR", "MAIL_PARTIAL_DELIVERY", "MAIL_DRAFT_SAVE_FAILED", "MAIL_MOVE_UNCERTAIN"].includes(error.code));
+      return { content: `Mail ${operation} failed: ${error instanceof Error ? error.message : String(error)}`, isError: true,
+        ...(uncertain ? { executionOutcome: "unknown" as const } : {}) };
     }
   },
   isReadOnly(): boolean { return false; },

@@ -587,6 +587,42 @@ This implementation reproduces the observable Codex-style workflow and safety bo
 
 Run `/config list`, `/model list`, or `/doctor` to inspect the effective setup.
 
+### Windows shell process isolation
+
+`sandbox.enabled` defaults to `false`, retaining native Windows shell execution. When enabled, both Bash and PowerShell use Docker Desktop's local Linux engine: the project is read-only at `/workspace`, `/output` maps to project `output/sandbox`, networking is disabled, host application credentials are not passed in, and process/memory/CPU limits apply. PowerShell uses Linux `pwsh`; Windows COM, registry and desktop apps are unavailable. MCP, file tools and desktop automation remain outside this isolation.
+
+Start Docker Desktop in Linux-container mode and manually prepare a trusted image, for example `docker pull mcr.microsoft.com/powershell:lts-debian-12`. CCAGENT never starts Docker or pulls an image automatically. Merge the following into the **current account's user settings**. The normal base is `%USERPROFILE%\.ccagent`; after login the file is typically `accounts\<account-hash>\settings.json`. Use the User source path displayed by `/config list` (`CCAGENT_HOME` can override it).
+
+```json
+{"sandbox":{"enabled":true,"docker":{"image":"mcr.microsoft.com/powershell:lts-debian-12"}}}
+```
+
+Unavailable engines/images or invalid settings block commands without host fallback. Windows model escape flags and command exclusions cannot bypass enabled isolation. Run `/doctor` for readiness; an audited, preinstalled organization image providing Bash/pwsh can replace the default. See [Windows isolation policy and verification](docs/windows-shell-isolation.md) for supported settings, output delivery and tests.
+
+### Plugin host API and approvals
+
+Trusted command hooks and stdio MCP servers receive a module URL in `CCAGENT_PLUGIN_API`. A Node plugin can load its host interfaces directly.
+
+```js
+const { createPluginHost } = await import(process.env.CCAGENT_PLUGIN_API);
+const { files, storage, processes } = createPluginHost();
+const template = await files.readText("templates/report.md");
+await storage.set("last-template", { characters: template.length });
+const previous = await storage.get("last-template");
+```
+
+`files.readText` resolves assets inside the plugin directory. JSON storage uses per-key atomic replacement in the plugin data directory. `processes.run(executable, args, { signal, timeout, env })` starts a host process with an argument array and a minimal environment. The default timeout is 30 seconds. Pass `adapters` to `createPluginHost` to substitute any of the three interfaces in an integration or a test. Install only trusted executable plugins, which run with the current user's host permissions.
+
+`processes.run` retains UTF-8 `stdout`/`stderr`, capped at 1 MiB per stream; rejected errors also carry captured output. Timeout, cancellation and output overflow share one cleanup operation: Windows uses system `taskkill /T /F`, while POSIX sends TERM and then, if needed, KILL to the invocation's independent process group. This best-effort cleanup covers ordinary foreground descendants. Startup failures do not launch cleanup commands, and pre-aborted calls create no process. The API still runs on the host: deliberately detached processes, Windows descendants whose parent has already exited, or OS-denied termination may survive. Errors carry `cleanupIncomplete: true` when cleanup could not be confirmed; this API is not a malicious-plugin sandbox.
+
+A trusted plugin can add `"approvalRules": [{"tool":"Mail","operation":"send","behavior":"ask","reason":"Confirm the recipients"}]` to its manifest. Omit `operation` to match every call to the named tool. `deny` takes priority, and `ask` requires fresh foreground approval for every matching dispatch, including Full mode. Reloading or disabling a plugin updates the active rules.
+
+### Timings and recovery
+
+Run `/billing` to reconcile the latest recorded official platform call, or `/billing <request-id>` for one specific call in this session. This reads the platform account ledger.
+
+Use `/timings` for the latest model turn or manual compaction. The Web completion card and headless JSON expose queue, model, tool and summary milliseconds. Overlapping tool work is counted per invocation. A resumed persistent session restores durable tool results and marks calls without a receipt as unknown. Before approving an identical external write after an interruption, check the target or its receipt. Session lists use per-session summaries and rebuild stale or missing summaries from the transcript.
+
 ## Common usage
 
 ```bash
@@ -637,6 +673,8 @@ Run `ccagent --help` for every startup option. Useful REPL commands include:
 - Interfaces: interactive Ink UI, headless text/JSON/NDJSON output, images and screenshots, and multiple model protocols
 
 ## Upgrade and uninstall
+
+The Windows desktop Help menu supports signed updates and explicit rollback. Formal build credentials and the installation checks are documented in the [desktop release guide](docs/signed-desktop-releases.md).
 
 Upgrade the global package, or re-run the installer:
 

@@ -107,6 +107,15 @@ async function stopWeb() {
   const timeout = setTimeout(() => { if (process.platform === "win32" && exiting.pid) { try { execFileSync("taskkill.exe", ["/PID", String(exiting.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }); } catch { exiting.kill(); } } else exiting.kill(); }, 5000);
   await exited; clearTimeout(timeout);
 }
+async function crashWeb() {
+  const crashing = child;
+  assert.ok(crashing?.pid && crashing.exitCode === null && crashing.pid !== process.pid);
+  const exited = new Promise<void>(resolve => crashing.once("close", () => resolve()));
+  // Kill only this test's spawned process tree, without graceful turn settlement.
+  if (process.platform === "win32") execFileSync("taskkill.exe", ["/PID", String(crashing.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+  else crashing.kill("SIGKILL");
+  await exited;
+}
 const state = (id: string) => json(`/api/sessions/${id}`);
 async function create() { return (await json("/api/sessions", { model: profileId, mode: "default" }, 201)).sessionId as string; }
 async function run(id: string, text: string) {
@@ -153,6 +162,20 @@ try {
     assert.equal(await fs.readFile(path.join(workspace, "approval-gap.txt"), "utf8"), "APPROVED_WRITE_ONCE");
     assert.equal(requests.filter(item => item.user === "SSE_GAP_PERMISSION").length, 2);
     assert.equal((await request(`/api/sessions/${id}/respond`, { id: restored.pending.id, decision: "allow_once" })).status, 409);
+    const final = await state(id);
+    const projects = path.join(home, "projects");
+    let journal = "";
+    for (const project of await fs.readdir(projects)) {
+      journal = await fs.readFile(path.join(projects, project, `${id}.jsonl`), "utf8").catch(() => "");
+      if (journal) break;
+    }
+    assert.ok(journal, "Real source-mode Web worker must persist its execution journal");
+    const execution = journal.trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(entry => entry.type === "execution").map(entry => entry.event);
+    assert.ok(execution.length);
+    assert.ok(execution.every(event => event.turnId === final.execution.id), "Live Web turn ID must match the durable request/tool/approval ID");
+    const tool = execution.find(event => event.phase === "tool_result" && event.toolName === "Write");
+    assert.ok(tool?.requestId); assert.ok(execution.some(event => event.phase === "request_start" && event.requestId === tool.requestId));
+    assert.ok(execution.some(event => event.phase === "tool_approval" && event.toolUseId === tool.toolUseId && event.decision === "allow_once"));
   });
   await test("stopping at a pending approval releases the worker and cannot execute a stale approval or replay the write", async () => {
     const id = await create(); await json(`/api/sessions/${id}/messages`, { text: "SSE_GAP_PERMISSION_STOP" }, 202);
@@ -164,6 +187,18 @@ try {
     assert.equal(await fs.stat(path.join(workspace, "must-not-write.txt")).then(() => true, () => false), false);
     await pause(1100); assert.equal(requests.filter(item => item.user === "SSE_GAP_PERMISSION_STOP").length, 1);
     assert.equal((await run(id, "SEED_HISTORY_after_explicit_stop")).lastTurnReason, "completed");
+  });
+  await test("a hard Web worker crash restores unknown tool outcomes without automatically replaying the task", async () => {
+    const id = await create();
+    await json(`/api/sessions/${id}/messages`, { text: "SSE_GAP_QUESTION_CRASH" }, 202);
+    await waitFor(async () => Boolean((await state(id)).pending), "Crash fixture must reach an in-flight tool");
+    const before = requests.filter(item => item.user === "SSE_GAP_QUESTION_CRASH").length;
+    await crashWeb(); await startWeb();
+    const restored = await state(id);
+    assert.equal(restored.busy, false); assert.equal(restored.pending, null);
+    assert.match(JSON.stringify(restored.messages), /Execution outcome unknown/);
+    assert.equal(requests.filter(item => item.user === "SSE_GAP_QUESTION_CRASH").length, before);
+    assert.equal((await run(id, "SEED_HISTORY_after_unknown_outcome")).lastTurnReason, "completed");
   });
   await test("Web manual compaction survives worker restart and the next request uses the summary rather than old history", async () => {
     const id = await create(); for (let index = 0; index < 12; index++) await run(id, `SEED_HISTORY_${index} preserve the same goal`);

@@ -337,7 +337,7 @@ export async function* streamViaProvider(
   });
 
   let response = profile.platformService ? await (await getPlatformGatewayClient()).call(profile.protocol === "openai-responses" ? "responses" : "chat/completions", prepared.body, {
-    requestId: params.platformRequestId, signal: params.signal,
+    requestId: params.platformRequestId, signal: params.signal, onReceipt: params.onPlatformReceipt,
   }) : await fetch(prepared.url, {
     method: "POST",
     headers: prepared.headers,

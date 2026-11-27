@@ -6,11 +6,15 @@ export function ReleasesPanel({ initial }: { initial: { revision: number; releas
   const [saved, setSaved] = useState(initial), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
   const [version, setVersion] = useState(initial.release?.version || ''), [title, setTitle] = useState(initial.release?.title || 'CCAGENT 版本更新');
   const [notes, setNotes] = useState(initial.release?.notes || ''), [downloadUrl, setDownloadUrl] = useState(initial.release?.downloadUrl || '');
+  const [signedUpdate, setSignedUpdate] = useState(initial.release?.signedUpdate ? JSON.stringify(initial.release.signedUpdate, null, 2) : '');
   const attempt = useRef<{ fingerprint: string; id: string } | null>(null);
   async function send(event: React.FormEvent) {
     event.preventDefault(); if (busy) return;
     setBusy(true); setMessage('正在发送版本通知…');
-    const fields = { revision: saved.revision, version: version.trim(), title: title.trim(), notes: notes.trim(), downloadUrl: downloadUrl.trim() };
+    let manifest: unknown;
+    try { if (signedUpdate.trim()) manifest = JSON.parse(signedUpdate); }
+    catch { setMessage('签名更新清单不是有效 JSON。'); setBusy(false); return; }
+    const fields = { revision: saved.revision, version: version.trim(), title: title.trim(), notes: notes.trim(), downloadUrl: downloadUrl.trim(), ...(manifest ? { signedUpdate: manifest } : {}) };
     const fingerprint = JSON.stringify(fields);
     if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, id: crypto.randomUUID() };
     try {
@@ -32,6 +36,7 @@ export function ReleasesPanel({ initial }: { initial: { revision: number; releas
       <label>通知标题<input required value={title} onChange={event => setTitle(event.target.value)} maxLength={140} /></label>
       <label>版本说明<textarea required value={notes} onChange={event => setNotes(event.target.value)} rows={10} maxLength={12000} placeholder="说明新增功能、问题修复和更新方式" /></label>
       <label>下载链接<input required type="url" value={downloadUrl} onChange={event => setDownloadUrl(event.target.value)} placeholder="https://…" maxLength={2048} /></label>
+      <label>签名更新清单（可选）<textarea value={signedUpdate} onChange={event => setSignedUpdate(event.target.value)} rows={8} maxLength={16384} placeholder="粘贴发布工具生成的 manifest.json；签名与版本校验通过后，桌面版可在帮助菜单安装更新。留空保留普通下载通知。" /></label>
       <div className="inline-actions"><button className="button" type="submit">{busy ? '发送中…' : '发送版本通知'}</button><button className="button secondary" type="button" onClick={reload}>重新载入发布状态</button></div>
     </fieldset></form><p role="status" className="small-text">{message}</p></section>
     <section className="panel"><h2>当前已发布</h2>{saved.release ? <><h3>{saved.release.title} · {saved.release.version}</h3><p className="small-text muted">{new Date(saved.release.publishedAt).toLocaleString('zh-CN')}</p><p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{saved.release.notes}</p><a href={saved.release.downloadUrl} target="_blank" rel="noopener noreferrer">查看下载链接</a></> : <p className="muted">暂无已发布版本通知。</p>}</section></>;

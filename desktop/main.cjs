@@ -15,6 +15,7 @@ if (!locked) app.quit();
 let mainWindow, guideWindow, child, origin, state, stateFile, logFile, backendRoot;
 let ready = false, startupError = '', quitting = false, exitPrompt = false;
 let prerequisites, backendStarting;
+let updating = false;
 const environmentGuideVersion = 1;
 const token = randomBytes(32).toString('hex');
 const guideUrl = pathToFileURL(path.join(__dirname, 'welcome.html')).href;
@@ -203,12 +204,51 @@ function registerIpc() {
   });
   ipcMain.handle('ccagent:logs', async event => { trustedGuide(event); shell.showItemInFolder(logFile); });
 }
+async function installUpdate(fromFile = false) {
+  if (updating) return;
+  updating = true;
+  try {
+    let envelope;
+    if (fromFile) {
+      const selected = await dialog.showOpenDialog(mainWindow || guideWindow, { title: '选择已签名的升级或回退清单', properties: ['openFile'], filters: [{ name: '签名更新清单', extensions: ['json'] }] });
+      if (selected.canceled) return;
+      const content = fs.readFileSync(selected.filePaths[0], 'utf8');
+      if (Buffer.byteLength(content) > 65536) throw new Error('更新清单过大。');
+      envelope = JSON.parse(content);
+    } else {
+      const release = (await api('/api/account/releases', undefined, 15000)).release;
+      if (!release?.signedUpdate) throw new Error('此版本通知没有可信签名更新清单。请等待管理员发布已签名版本；普通下载链接仍可在版本更新页面查看。');
+      envelope = release.signedUpdate;
+    }
+    const trustedKeys = require('./release-keys.json');
+    const { verifyManifest, compareVersions } = require('./update-manifest.cjs');
+    const target = verifyManifest(envelope, trustedKeys), difference = compareVersions(target.version, productVersion);
+    if (!difference) throw new Error('当前已安装此版本。');
+    const busy = ready && (await api('/api/desktop/status')).busy;
+    if (busy) throw new Error('请先停止正在执行的任务，再安装更新或回退。');
+    const approved = await dialog.showMessageBox(mainWindow || guideWindow, { type: difference < 0 ? 'warning' : 'question', title: difference < 0 ? '确认回退版本' : '确认安装更新',
+      message: `${difference < 0 ? '回退' : '升级'} CCAGENT ${productVersion} → ${target.version}？`,
+      detail: '应用将下载并核验签名清单、文件摘要和 Windows 发布者，然后退出并安装。配置和工作文件保留。回退前请备份重要会话；数据格式不兼容时请恢复备份。',
+      buttons: ['取消', difference < 0 ? '下载并回退' : '下载并安装'], defaultId: 0, cancelId: 0 });
+    if (approved.response !== 1) return;
+    const { prepareUpdate, launchUpdate } = require('./updates.cjs');
+    const prepared = await prepareUpdate(envelope, { directory: path.join(app.getPath('userData'), 'updates'), trustedKeys, currentVersion: productVersion });
+    // Tasks can start while the installer is downloading. Check again before exit.
+    if (ready && (await api('/api/desktop/status')).busy) throw new Error('下载期间开始了新任务。请先停止任务，再重试安装。');
+    await launchUpdate(prepared);
+    save({ pendingUpdateVersion: prepared.payload.version });
+    quitting = true; app.quit();
+  } catch (error) {
+    log('Verified update did not start.');
+    await dialog.showMessageBox(mainWindow || guideWindow, { type: 'error', title: '更新未安装', message: '无法完成可信更新或回退。当前版本可继续使用。', detail: String(error.message || '更新核验失败。').slice(0, 300) });
+  } finally { updating = false; }
+}
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: '文件', submenu: [{ label: '开始使用向导', click: () => showGuide() }, { label: '环境检测与安装', click: () => showGuide(true) }, { label: '设置', click: () => { if (ready && state.environmentGuideVersion === environmentGuideVersion) void showMain('settings'); else showGuide(true); } }, { type: 'separator' }, { label: '退出', accelerator: 'Alt+F4', click: () => void requestExit() }] },
     { label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' }, { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' }] },
     { label: '查看', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'resetZoom', label: '实际大小' }, { role: 'zoomIn', label: '放大' }, { role: 'zoomOut', label: '缩小' }, { role: 'togglefullscreen', label: '全屏' }] },
-    { label: '帮助', submenu: [{ label: '使用指南', click: () => showGuide() }, { label: '环境检测与安装', click: () => showGuide(true) }, { label: '打开诊断日志', click: () => shell.showItemInFolder(logFile) },
+    { label: '帮助', submenu: [{ label: '使用指南', click: () => showGuide() }, { label: '环境检测与安装', click: () => showGuide(true) }, { label: '检查并安装可信更新', click: () => void installUpdate() }, { label: '从签名清单升级或回退', click: () => void installUpdate(true) }, { label: '打开已验证更新目录', click: () => { const directory = path.join(app.getPath('userData'), 'updates'); fs.mkdirSync(directory, { recursive: true }); void shell.openPath(directory); } }, { label: '打开诊断日志', click: () => shell.showItemInFolder(logFile) },
       { label: '关于 CCAGENT', click: () => void dialog.showMessageBox(mainWindow || guideWindow, { type: 'info', title: '关于 CCAGENT', message: `CCAGENT ${productVersion}`, detail: 'Windows 桌面版\n任务、模型、MCP、技能与权限均使用 CCAGENT 核心。\n源码优化后重新构建安装包即可升级。\n开源许可：MIT；第三方许可随安装文件提供。' }) }] },
   ]));
 }
@@ -220,6 +260,12 @@ async function launch() {
   backendRoot = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.resolve(__dirname, '../output/desktop/backend');
   prerequisites = createPrerequisiteManager({ backendRoot, openExternal: url => shell.openExternal(url) });
   state = readState(stateFile);
+  if (state.pendingUpdateVersion) {
+    const completed = state.pendingUpdateVersion === productVersion;
+    save({ pendingUpdateVersion: null });
+    if (!completed) await dialog.showMessageBox({ type: 'warning', title: '更新尚未完成', message: '上次更新或回退没有切换到目标版本。当前版本可继续使用。', detail: '可在帮助菜单重新选择有效签名清单恢复安装；重要配置和工作文件会保留。' });
+    log(completed ? 'Verified update completed.' : 'Verified update did not change the installed version.');
+  }
   const defaultWorkspace = path.join(app.getPath('documents'), 'CCAGENT 工作区');
   let workspace = process.env.CCAGENT_DESKTOP_WORKSPACE || state.workspace || defaultWorkspace;
   if (!fs.existsSync(workspace)) workspace = defaultWorkspace;

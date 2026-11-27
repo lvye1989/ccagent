@@ -82,22 +82,17 @@ function getStaticPromptSections(keepCodingInstructions: boolean): string[] {
 }
 
 async function getGitContext(cwd: string): Promise<Pick<RuntimeEnvironmentContext, "gitBranch" | "gitStatus" | "gitRecentCommit">> {
-  try {
-    const [branchResult, statusResult, logResult] = await Promise.all([
-      execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, maxBuffer: 32 * 1024 }),
-      execFileAsync("git", ["status", "--short"], { cwd, maxBuffer: 64 * 1024 }),
-      execFileAsync("git", ["log", "-1", "--pretty=format:%h %s"], { cwd, maxBuffer: 32 * 1024 }),
-    ]);
-
-    const status = statusResult.stdout.trim();
-    return {
-      gitBranch: branchResult.stdout.trim(),
-      gitStatus: status || "clean",
-      gitRecentCommit: logResult.stdout.trim() || undefined,
-    };
-  } catch {
-    return {};
-  }
+  // Await every child even when one probe fails. Windows holds the working
+  // directory while a git process is alive, including in non-repositories.
+  const run = (args: string[], maxBuffer: number) =>
+    execFileAsync("git", args, { cwd, maxBuffer, windowsHide: true }).then(r => r.stdout.trim(), () => undefined);
+  const [branch, status, commit] = await Promise.all([
+    run(["rev-parse", "--abbrev-ref", "HEAD"], 32 * 1024),
+    run(["status", "--short"], 64 * 1024),
+    run(["log", "-1", "--pretty=format:%h %s"], 32 * 1024),
+  ]);
+  if (branch === undefined || status === undefined || commit === undefined) return {};
+  return { gitBranch: branch, gitStatus: status || "clean", gitRecentCommit: commit || undefined };
 }
 
 export async function getRuntimeEnvironmentContext(cwd: string): Promise<RuntimeEnvironmentContext> {

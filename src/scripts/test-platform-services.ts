@@ -6,11 +6,12 @@ import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { startAccountFixture } from "./helpers/accountFixture.js";
 import { enterPlatformAccount } from "../platform/account.js";
-import { authorizedPrivateUploadUrl, forgetOfficialKey, getPlatformGatewayClient, officialRole, officialServicesView, PlatformServiceError, saveOfficialServices } from "../platform/gatewayClient.js";
+import { authorizedPrivateUploadUrl, forgetOfficialKey, getPlatformGatewayClient, officialRole, officialServicesView, PlatformServiceError, saveOfficialServices, platformReceiptFromHeaders, type PlatformCallReceipt } from "../platform/gatewayClient.js";
 import { servicePaths, readServiceBinding } from "../platform/serviceState.js";
 import { loadProfiles, resolveProfile } from "../services/api/providers/profile.js";
 import { streamMessage, createMessage } from "../services/api/streaming.js";
 import { QueryEngine } from "../core/queryEngine.js";
+import { createExecutionRecorder, initSessionStorage, readSessionExecutionEvents } from "../session/storage.js";
 import { analyzeImageFile } from "../services/vision/analyzeImage.js";
 import { callOpenRouterJev } from "../services/jev/openRouterJev.js";
 import { createAdapter, createFallbackAdapters } from "../tools/webSearch/adapters.js";
@@ -126,6 +127,9 @@ fixture = await startAccountFixture(base, { handleService: async (req, res, user
   call = { owner: user.id, body, taskId, status: JSON.stringify(body).includes("PENDING_STREAM_CASE") ? "pending" : "settled", result: resultText, contentType, id: randomUUID() }; calls.set(requestId, call);
   if (JSON.stringify(body).includes("DROP_CONNECTION_CASE")) { req.socket.destroy(); return true; }
   res.setHeader("content-type", contentType); res.setHeader("x-ccagent-call-id", call.id);
+  if (JSON.stringify(body).includes("RECEIPT_CASE")) {
+    res.setHeader("x-ccagent-request-id", requestId); res.setHeader("x-ccagent-billing-status", call.status); res.setHeader("x-ccagent-charged-micro", "13");
+  }
   if (JSON.stringify(body).includes("DROP_PARTIAL_CASE")) {
     res.write(Buffer.from(resultText).subarray(0, 31));
     setTimeout(() => req.socket.destroy(), 20); return true;
@@ -253,6 +257,27 @@ try {
     await assert.rejects(client.call("responses", input, { taskId: "pending-task" }), /原调用仍在执行/);
     assert.equal(modelRequests - before, 1);
   });
+  await test("official receipts bind real reused request IDs and never infer settlement from complete bytes", async () => {
+    const logical = randomUUID(), receipts: PlatformCallReceipt[] = [], beforeLookups = lookups;
+    const response = await client.call("responses", baseInput("RECEIPT_CASE"), { requestId: logical, onReceipt: receipt => receipts.push(receipt) }); await response.text();
+    assert.equal(lookups, beforeLookups, "Normal calls do not add a per-step billing lookup");
+    assert.equal(receipts.at(-1)!.actualRequestId, logical); assert.equal(receipts.at(-1)!.logicalRequestId, logical);
+    assert.equal(receipts.at(-1)!.status, "settled"); assert.equal(receipts.at(-1)!.authoritative, true); assert.equal(receipts.at(-1)!.chargedMicro, "13");
+    const legacy: PlatformCallReceipt[] = [];
+    await (await client.call("responses", baseInput("legacy receipt"), { onReceipt: receipt => legacy.push(receipt) })).text();
+    assert.equal(legacy.at(-1)!.status, "unverified"); assert.equal(legacy.at(-1)!.authoritative, false); assert(legacy.at(-1)!.serverCallId);
+    const mismatch = platformReceiptFromHeaders(logical, logical, new Headers({ 'x-ccagent-call-id': randomUUID(), 'x-ccagent-request-id': randomUUID(), 'x-ccagent-billing-status': 'settled' }));
+    assert.equal(mismatch.authoritative, false);
+    const old = randomUUID(), next = randomUUID(), input = { ...baseInput("PENDING_STREAM_CASE receipt reuse"), stream: true }, taskId = 'receipt-reused-task';
+    await assert.rejects((await client.call("responses", input, { requestId: old, taskId })).text());
+    calls.get(old)!.status = 'settled';
+    const reused: PlatformCallReceipt[] = [], beforeSupplier = suppliers;
+    await (await client.call("responses", input, { requestId: next, taskId, onReceipt: receipt => reused.push(receipt) })).text();
+    assert.equal(suppliers, beforeSupplier); assert.equal(reused.at(-1)!.actualRequestId, old); assert.equal(reused.at(-1)!.logicalRequestId, next);
+    assert.equal(reused.at(-1)!.status, 'settled'); assert.equal(reused.at(-1)!.authoritative, true);
+    const reconcilePosts = modelRequests, verified = await client.reconcileReceipt(next, old);
+    assert.equal(modelRequests, reconcilePosts, 'Explicit reconciliation issues no model POST'); assert.equal(verified.serverCallId, calls.get(old)!.id);
+  });
   await test("a settled partial response resumes its saved bytes once without duplicate content or billing", async () => {
     for (const stream of [false, true]) {
       const before = suppliers, posts = modelRequests, checkedBefore = lookups;
@@ -286,11 +311,34 @@ try {
     const failed: any[] = [], failedBefore = modelRequests;
     for await (const event of streamMessage({ model: "ccagent:official-main", messages: [{ role: "user", content: "INSUFFICIENT_CASE" }] })) failed.push(event);
     const error = failed.find(event => event.type === "error"); assert(error); assert.match(error.error.message, /余额/); assert(!error.error.message.includes(key)); assert.equal(modelRequests - failedBefore, 1);
+    const receipts: PlatformCallReceipt[] = [];
+    for await (const _event of streamMessage({ model: "ccagent:official-main", messages: [{ role: "user", content: "RECEIPT_CASE" }], onPlatformReceipt: receipt => receipts.push(receipt) })) { /* Real translator with receipt callback. */ }
+    assert.equal(receipts.at(-1)!.status, 'settled'); assert.equal(receipts.at(-1)!.serverCallId, calls.get(receipts.at(-1)!.actualRequestId)!.id);
   });
   await test("a real QueryEngine turn attaches the same task identity to its paid model call", async () => {
-    const engine = new QueryEngine({ model: "ccagent:official-main", toolContext: { cwd: workspace, sessionId: "real-engine-task" } });
+    const timestamp = new Date().toISOString();
+    await initSessionStorage({ cwd: workspace, sessionId: "real-engine-task", startedAt: timestamp, updatedAt: timestamp, model: "ccagent:official-main" });
+    const engine = new QueryEngine({ model: "ccagent:official-main", toolContext: { cwd: workspace, sessionId: "real-engine-task",
+      recordExecutionEvent: createExecutionRecorder(workspace, "real-engine-task") } });
     for await (const _event of engine.submitMessage("Reply with PLATFORM_OK")) { /* Run the shared engine. */ }
     assert.equal(sent.at(-1)!.taskId, "real-engine-task");
+    const events = await readSessionExecutionEvents(workspace, "real-engine-task");
+    const request = events.find(event => event.phase === "request_start")!;
+    assert.equal(request.requestId, sent.at(-1)!.requestId, "Durable request ID must be the real gateway idempotency key");
+    assert.equal((await client.callStatus(request.requestId!))?.status, "settled", "The same ID queries the authoritative billing ledger");
+    assert.equal(events.find(event => event.phase === "request_end")?.billingStatus, "unverified", "Local usage alone cannot certify ledger settlement");
+  });
+  await test("a real QueryEngine persists authoritative server evidence separately from local usage", async () => {
+    const sessionId = 'authoritative-receipt-engine', timestamp = new Date().toISOString();
+    await initSessionStorage({ cwd: workspace, sessionId, startedAt: timestamp, updatedAt: timestamp, model: 'ccagent:official-main' });
+    const engine = new QueryEngine({ model: 'ccagent:official-main', toolContext: { cwd: workspace, sessionId, recordExecutionEvent: createExecutionRecorder(workspace, sessionId) } });
+    const beforeLookups = lookups, beforePosts = modelRequests;
+    for await (const _event of engine.submitMessage('RECEIPT_CASE')) { /* Synthetic official provider. */ }
+    const events = await readSessionExecutionEvents(workspace, sessionId), request = events.find(event => event.phase === 'request_start')!, completed = events.find(event => event.phase === 'request_end')!;
+    assert.equal(lookups, beforeLookups, 'Query does not add an automatic ledger lookup'); assert.equal(modelRequests - beforePosts, 1);
+    assert.equal(completed.billingStatus, 'settled'); assert.equal(completed.platformReceipt?.authoritative, true);
+    assert.equal(completed.platformReceipt?.logicalRequestId, request.requestId); assert.equal(completed.platformReceipt?.actualRequestId, sent.at(-1)!.requestId);
+    assert.equal(completed.platformReceipt?.serverCallId, calls.get(sent.at(-1)!.requestId)!.id); assert.equal(completed.platformReceipt?.chargedMicro, '13');
   });
   await saveOfficialServices({ roles, auxiliaryEnabled: true }); client = await getPlatformGatewayClient();
   for (const name of ["OPENROUTER_API_KEY", "TAVILY_API_KEY", "BOCHA_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY"]) process.env[name] = "PRIVATE_KEY_MUST_NOT_BE_USED";

@@ -1,3 +1,4 @@
+import { VERSION } from "../version.js";
 /**
  * Plugin Loader (plan §35.2 / §35.3).
  *
@@ -71,6 +72,9 @@ export interface LoadPluginOptions {
 }
 
 // ─── manifest path helpers ────────────────────────────────────────────
+
+// The CLI bundle lives in dist/, while the source loader lives in src/plugins/.
+const pluginApiUrl = new URL(VERSION === "0.0.0-dev" ? "../../plugin-api.mjs" : "../plugin-api.mjs", import.meta.url).href;
 
 function asPathList(value: unknown): string[] {
   if (typeof value === "string") return [value];
@@ -184,7 +188,7 @@ async function readManifest(opts: LoadPluginOptions): Promise<ManifestResult> {
   const known = new Set([
     "name", "version", "description", "author", "homepage", "repository",
     "license", "keywords", "skills", "agents", "commands", "outputStyles",
-    "hooks", "mcpServers", "lspServers",
+    "hooks", "mcpServers", "lspServers", "approvalRules",
   ]);
   for (const key of Object.keys(parsedJson as Record<string, unknown>)) {
     if (!known.has(key)) warnings.push(`unknown plugin.json field "${key}" (ignored)`);
@@ -266,6 +270,7 @@ function normalizeHookGroup(
       ...(shell ? { shell } : {}),
       env: {
         CCAGENT_PLUGIN_ROOT: vars.root,
+        CCAGENT_PLUGIN_API: pluginApiUrl,
         CCAGENT_PLUGIN_DATA: vars.data,
       },
     });
@@ -342,6 +347,7 @@ function normalizeMcpServer(
     const out: Record<string, string> = includePluginEnv
       ? {
           CCAGENT_PLUGIN_ROOT: vars.root,
+          CCAGENT_PLUGIN_API: pluginApiUrl,
           CCAGENT_PLUGIN_DATA: vars.data,
         }
       : {};

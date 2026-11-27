@@ -41,6 +41,7 @@ export function createVersionUpdates({ accountButton, accountMenu, after }) {
     const notes = document.createElement('div'); notes.className = 'version-release-notes'; notes.textContent = latest.notes;
     const download = document.createElement('a'); download.className = 'version-download'; download.textContent = '下载新版本'; download.href = latest.downloadUrl; download.target = '_blank'; download.rel = 'noopener noreferrer';
     content.append(title, date, notes, download);
+    if (latest.signedUpdate) { const help = document.createElement('p'); help.textContent = '桌面版可通过“帮助 → 检查并安装可信更新”核验并安装；升级和回退均需你确认。'; content.append(help); }
     if (page.open && identity) { read.set(storageKey(), latest.id); try { localStorage.setItem(storageKey(), latest.id); } catch { /* Keep an in-memory acknowledgement when storage is unavailable. */ } badge(); }
   }
   async function refresh(showError = false) {

@@ -314,10 +314,11 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
       clearAdminAccess();
       const accessRevision = adminAccessRevision;
       if (selectedSettings !== "official") void refreshAdminAccess();
-      const [data, service, models] = await Promise.all([
+      const [data, service, models, isolation] = await Promise.all([
         ["general", "execution", "models"].includes(selectedSettings) ? request("settings") : undefined,
         selectedSettings === "official" ? request("official-services") : undefined,
         selectedSettings === "models" ? request("models") : undefined,
+        selectedSettings === "execution" ? request("shell-isolation").catch(() => null) : undefined,
       ]);
       if (revision !== settingsRevision) return;
       root.replaceChildren();
@@ -419,6 +420,12 @@ export function createCustomizationUI({ api, toast, navigate, changed, getModel,
         retention = field(form, "聊天记录保留天数（0 关闭持久化）", "settings-retention", settings.cleanupPeriodDays ?? 30, { type: "number" });
         motion = field(form, "减少动态效果", "settings-motion", settings.prefersReducedMotion ?? false, { type: "checkbox" });
       } else {
+        const isolationLabels = { ready: "可用", disabled: "未启用，命令在本机运行", blocked: "已阻止执行", invalid: "配置有误，已阻止执行" };
+        form.append(el("strong", "", "Shell 进程隔离"),
+          el("p", "editor-hint", isolationLabels[isolation?.state] || "暂时无法查询"));
+        if (isolation?.backend === "docker" && isolation.enabled) form.append(el("p", "editor-hint",
+          "Bash 与 PowerShell 在 Linux 容器中运行。项目目录只读，输出保存到 output/sandbox，容器无法联网。"));
+        if (isolation?.state === "blocked" || isolation?.state === "invalid") form.append(el("p", "editor-hint", isolation.message));
         mode = field(form, "新对话的默认权限", "settings-mode", settings.mode || "default", { choices: [["default", "默认：工具执行按规则确认"], ["plan", "计划：先分析并制定方案"], ["auto", "自动：使用现有自动审批"], ["full", "完全访问权益"]] });
         thinking = field(form, "启用模型思考", "settings-thinking", settings.alwaysThinkingEnabled ?? false, { type: "checkbox" });
         effort = field(form, "思考强度", "settings-effort", settings.effortLevel || "high", { choices: [["low", "低"], ["medium", "中"], ["high", "高"], ["max", "最高"]] });

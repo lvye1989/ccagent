@@ -19,7 +19,7 @@ import { toolResultText } from "../tools/Tool.js";
 import { isSandboxRuntimeReady } from "../sandbox/index.js";
 import { getProjectCCAgentDir } from "../utils/paths.js";
 
-if (!isSandboxRuntimeReady()) {
+if (process.platform !== "darwin" || !isSandboxRuntimeReady()) {
   console.log("[skip] sandbox-exec not ready");
   process.exit(0);
 }

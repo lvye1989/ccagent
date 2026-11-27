@@ -214,6 +214,7 @@ try {
     "LICENSE",
     "README.md",
     "README.zh-CN.md",
+    "plugin-api.mjs",
     "dist/ccagent.js",
     "dist/ccagent.js.map",
     "dist/charts.js",
@@ -274,10 +275,11 @@ try {
     "web/workspace-features.css",
     "web/workspace-files.js",
     "web/workspace-picker.css",
+    "web/version-updates.js",
     "web/workspace-picker.js",
   ].sort();
   const packedFiles = dryRun?.[0]?.files.map((file) => file.path).sort() ?? [];
-  assert(JSON.stringify(packedFiles) === JSON.stringify(expectedFiles), "tarball contains only release files", packedFiles.join(", "));
+  assert(JSON.stringify(packedFiles) === JSON.stringify(expectedFiles), "tarball contains only release files", [...expectedFiles.filter(file => !packedFiles.includes(file)).map(file => "missing: " + file), ...packedFiles.filter(file => !expectedFiles.includes(file)).map(file => "unexpected: " + file)].join(", "));
 
   const pack = parseNpmJson<PackResult[]>(
     runNpm(["pack", "--json", "--ignore-scripts", "--pack-destination", packDir], { env: npmEnv }),

@@ -1,0 +1,67 @@
+name: Prepare signed Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing vMAJOR.MINOR.PATCH tag to verify and package'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ inputs.tag }}
+  signed-windows:
+    needs: verify
+    runs-on: windows-latest
+    environment: windows-release
+    env:
+      CCAGENT_RELEASE_PUBLIC_KEYS: ${{ vars.RELEASE_PUBLIC_KEYS }}
+      CCAGENT_RELEASE_KEY_ID: ${{ vars.RELEASE_KEY_ID }}
+      CCAGENT_RELEASE_DOWNLOAD_BASE: ${{ vars.RELEASE_DOWNLOAD_BASE }}
+      CCAGENT_RELEASE_CERTIFICATE_SHA256: ${{ vars.RELEASE_CERTIFICATE_SHA256 }}
+      REQUESTED_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Require an existing exact release tag
+        shell: pwsh
+        run: |
+          node -e "const run=require('node:child_process').execFileSync;const tag=process.env.REQUESTED_TAG;if(!/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(tag)||tag!=='v'+require('./package.json').version)throw Error('EXACT_RELEASE_TAG_REQUIRED');const resolve=x=>run('git',['rev-parse','--verify',x],{encoding:'utf8'}).trim();if(resolve('refs/tags/'+tag+'^{commit}')!==resolve('HEAD'))throw Error('RELEASE_TAG_COMMIT_MISMATCH');"
+      - run: npm ci
+      - run: npm run verify:release
+      - name: Materialize signing configuration after unprivileged verification
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          CCAGENT_RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
+        run: |
+          node -e "const fs=require('node:fs'),path=require('node:path');for(const n of ['CSC_LINK','CSC_KEY_PASSWORD','CCAGENT_RELEASE_PRIVATE_KEY','CCAGENT_RELEASE_PUBLIC_KEYS'])if(!process.env[n])throw Error('MISSING_SIGNING_CONFIGURATION: '+n);const privateFile=path.join(process.env.RUNNER_TEMP,'ccagent-release-private.pem'),publicFile=path.join(process.env.RUNNER_TEMP,'ccagent-release-public.json');fs.writeFileSync(privateFile,process.env.CCAGENT_RELEASE_PRIVATE_KEY,{mode:384});fs.writeFileSync(publicFile,process.env.CCAGENT_RELEASE_PUBLIC_KEYS);fs.appendFileSync(process.env.GITHUB_ENV,'CCAGENT_RELEASE_PRIVATE_KEY_FILE='+privateFile+'\nCCAGENT_RELEASE_PUBLIC_KEYS_FILE='+publicFile+'\n');"
+      - name: Build signed installer and signed update manifest
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: node scripts/build-desktop.mjs
+      - uses: actions/upload-artifact@v6
+        with:
+          name: signed-windows-release
+          path: |
+            output/desktop/release/CCAGENT-Setup-*.exe
+            output/desktop/release/CCAGENT-Setup-*.exe.manifest.json
+          if-no-files-found: error
+      - name: Remove ephemeral signing files
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($name in @('ccagent-release-private.pem','ccagent-release-public.json')) {
+            $target = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+          }

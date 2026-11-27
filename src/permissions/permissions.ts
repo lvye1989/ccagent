@@ -38,6 +38,8 @@ export interface PermissionSettings extends PermissionRuleSet {
 }
 
 export interface PermissionRequest {
+  /** Runtime recovery confirmation; noninteractive bypass must never approve it. */
+  requiresHumanReview?: boolean;
   toolName: string;
   input: Record<string, unknown>;
   summary: string;

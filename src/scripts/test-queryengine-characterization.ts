@@ -89,6 +89,9 @@ function normalize(text: string): string {
   out = out.replace(/[✓⚠✗] Endpoint (reachable|not reachable)[^\n]*/g, "<ENDPOINT_PROBE>");
   // /doctor: API-auth-token status depends on the ambient environment — collapse it.
   out = out.replace(/[✓✗] (API auth token present|No API auth token)[^\n]*/g, "<AUTH_TOKEN>");
+  // Shell backends legitimately differ across Windows/macOS/Linux; keep the
+  // disabled/ready/blocked verdict while normalizing only its platform scope.
+  out = out.replace(/Scope: (?:Bash and PowerShell only;[^\n]*|Shell execution only;[^\n]*)/g, "Scope: <SHELL_ISOLATION_SCOPE>");
   // Project memory directories contain a hash of this run's temporary path.
   out = out.replace(/projects([\\/])[^\\/\n]+-[a-f0-9]{16}([\\/])memory/g, "projects$1<PROJECT>$2memory");
   // Empty command-output rows are formatted as `"  | "` for readability in

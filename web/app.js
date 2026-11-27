@@ -839,6 +839,8 @@ function elapsedLabel(milliseconds) {
   return `${seconds}秒`;
 }
 
+function stageDuration(ms) { return ms < 1000 ? Math.max(0, Math.round(ms)) + "毫秒" : elapsedLabel(ms); }
+
 function createActivityNode(after) {
   const row = document.createElement("div");
   row.className = "turn-activity";
@@ -908,6 +910,11 @@ function syncExecutionClock() {
   const start = executionTime(execution.startedAt);
   const end = executionTime(execution.completedAt);
   state.executionNode.querySelector(".turn-elapsed").textContent = start === null ? "本轮执行" : `已处理 ${elapsedLabel((end ?? Date.now() + state.serverClockOffset) - start)}`;
+  const timings = execution.timings;
+  if (execution.completedAt && timings) {
+    state.executionNode.querySelector(".turn-elapsed").textContent +=
+      ` · 排队 ${stageDuration(timings.queueMs)} · 模型 ${stageDuration(timings.modelMs)} · 工具 ${stageDuration(timings.toolsMs)} · 摘要 ${stageDuration(timings.summaryMs)}`;
+  }
   const terminal = { aborted: "已停止", completed: "已完成", max_turns: "已达轮数上限", model_error: "模型回复中断" };
   state.executionNode.querySelector(".turn-outcome").textContent = execution.completedAt ? terminal[execution.reason] || "执行失败" : "执行中";
   state.executionNode.classList.toggle("turn-active", !execution.completedAt);
@@ -1140,7 +1147,7 @@ function showInteraction(pending) {
   const question = pending.kind === "question";
   $("interaction-eyebrow").textContent = question ? "需要你的回答" : "需要你的批准";
   $("interaction-title").textContent = question ? "回答问题" : `允许 ${request.toolName}？`;
-  $("interaction-summary").textContent = question ? "请逐项选择回答。" : request.summary;
+  $("interaction-summary").textContent = question ? "请逐项选择回答。" : [request.summary, request.requiresHumanReview && request.risk].filter(Boolean).join("\n");
   $("interaction-detail").textContent = question ? "" : JSON.stringify(request.input, null, 2);
   $("interaction-detail").classList.toggle("hidden", question);
   $("interaction-allow").textContent = question ? "提交回答" : "允许一次";
@@ -1296,6 +1303,7 @@ function handleEvent(event) {
       if (state.execution) {
         state.execution.completedAt = event.completedAt || event.timestamp || new Date(Date.now() + state.serverClockOffset).toISOString();
         state.execution.reason = event.reason;
+        state.execution.timings = event.timings;
         for (const tool of state.execution.tools) updateTool(tool);
       }
       for (const row of state.toolNodes.values()) {

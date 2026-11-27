@@ -3,6 +3,9 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
+import { randomUUID } from "node:crypto";
+import { executionHash, recordExecution, type ExecutionScope } from "../session/execution.js";
+import type { PlatformCallReceipt } from "../platform/gatewayClient.js";
 import { requirePlatformScope } from "../platform/account.js";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages.js";
 import {
@@ -15,6 +18,8 @@ import {
   type PermissionRuleSet,
   type PermissionSettings,
 } from "../permissions/permissions.js";
+import { pluginApprovalRule, pluginMayRequireApproval } from "../plugins/approvalRules.js";
+import { measureStage, currentTurnTimings } from "./turnTimings.js";
 import { streamMessage } from "../services/api/streaming.js";
 import { assertApplicationProtection } from "../permissions/applicationProtection.js";
 import { DEFAULT_MAX_TOKENS, ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT } from "../services/api/client.js";
@@ -41,8 +46,7 @@ import { endComputerUseIndicatorSession } from "../tools/computerUseIndicator.js
 import { preflightRhinoActionWithJev, preflightRhinoInspectWithJev, type RhinoJevPreapproval } from "../tools/rhinoTools.js";
 import { getCachedRhinoObservation } from "../tools/rhinoBackend.js";
 import { canDispatchRhinoFastStep, decideRhinoSequenceBatchWithJev, RHINO_FAST_ACTIONS, type RhinoJevBatchStep, type RhinoJevDecision, type RhinoJevProposedAction } from "../tools/rhinoJev.js";
-import { reserveMailSendAttempt } from "../tools/mailPolicy.js";
-import { isMailPowerEnabled, mailPowerForOperation } from "../config/mailPowerSettings.js";
+import { checkDispatchGuard } from "../permissions/dispatchGuards.js";
 import { validateMailInput } from "../tools/mailTool.js";
 import { validateRhinoFastInput } from "../tools/rhinoSequence.js";
 import {
@@ -117,8 +121,8 @@ export type AgenticLoopEvent =
       input: Record<string, unknown>;
       result: ToolResult;
     }
-  | { type: "assistant_message"; message: MessageParam }
-  | { type: "tool_result_message"; message: MessageParam }
+  | { type: "assistant_message"; message: MessageParam; executionScope?: ExecutionScope }
+  | { type: "tool_result_message"; message: MessageParam; executionScope?: ExecutionScope }
   | { type: "messages_updated"; messages: MessageParam[] }
   | { type: "turn_complete"; reason: LoopTerminationReason; turnCount: number }
   | { type: "token_warning"; warning: TokenWarningResult }
@@ -356,7 +360,7 @@ function partitionToolCalls(blocks: ToolUseBlock[], context: ToolContext): ToolB
   const batches: ToolBatch[] = [];
   for (const block of blocks) {
     const tool = findContextTool(context, block.name);
-    const safe = !!tool?.isConcurrencySafe?.(
+    const safe = !pluginMayRequireApproval(block.name) && !!tool?.isConcurrencySafe?.(
       (block.input as Record<string, unknown>) ?? {},
     );
     const last = batches[batches.length - 1];
@@ -373,6 +377,7 @@ interface RunOneToolReturn {
   execution: ToolExecutionResult;
   permissionRequest?: PermissionRequest;
   rawResult?: ToolResult;
+  persistedResult?: ToolResult;
   rhinoJevDecision?: RhinoJevDecision;
   toolDispatched?: boolean;
 }
@@ -393,8 +398,32 @@ async function runOneToolBlock(
   context: ToolContext,
   options: RunToolsOptions,
 ): Promise<RunOneToolReturn> {
+  const startedAt = Date.now();
+  if (context.recordExecutionEvent) await recordExecution(context, { phase: "tool_call", toolUseId: block.id, toolName: block.name, inputHash: executionHash(block.input) });
+  const returned = await runOneToolBlockImpl(block, context, options);
+  const unchanged = returned.persistedResult?.content === returned.execution.result.content
+    && returned.persistedResult?.isError === returned.execution.result.isError
+    && returned.persistedResult?.executionOutcome === returned.execution.result.executionOutcome;
+  if (!returned.toolDispatched) await recordExecution(context, {
+    phase: "tool_approval", toolUseId: block.id, toolName: block.name, decision: "not_dispatched",
+  });
+  await recordExecution(context, {
+    phase: "tool_settled", toolUseId: block.id, toolName: block.name,
+    status: returned.toolDispatched ? returned.persistedResult && returned.persistedResult.executionOutcome !== "unknown" ? "settled" : "unknown" : "not_dispatched",
+    durationMs: Date.now() - startedAt,
+    ...(!unchanged ? { result: returned.execution.result } : {}),
+  });
+  return returned;
+}
+
+async function runOneToolBlockImpl(
+  block: ToolUseBlock,
+  context: ToolContext,
+  options: RunToolsOptions,
+): Promise<RunOneToolReturn> {
   await requirePlatformScope();
   let toolDispatched = false;
+  let persistedResult: ToolResult | undefined;
   let toolInput = (block.input as Record<string, unknown>) ?? {};
   const tool = findContextTool(context, block.name);
   if (!tool || (context.agentTeamsAllowed === false && (["TeamCreate", "TeamDelete", "SendMessage", "AgentTeamMode"].includes(block.name) || (block.name === "Agent" && Boolean(toolInput.team_name || toolInput.name))))) {
@@ -857,7 +886,7 @@ async function runOneToolBlock(
       !computerRequiresFreshConfirmation &&
       !rhinoRequiresFreshConfirmation &&
       !mailRequiresFreshConfirmation &&
-      !(block.name === "Mail" && permission.behavior === "deny") &&
+      permission.behavior !== "deny" &&
       !browserSearchRequiresFreshConfirmation
     ) {
       permission = {
@@ -873,6 +902,12 @@ async function runOneToolBlock(
       };
     }
 
+    const pluginRule = pluginApprovalRule(block.name, toolInput);
+    if (pluginRule && permission.behavior !== "deny") {
+      const reason = `${pluginRule.pluginId}: ${pluginRule.reason}`;
+      permission = { ...permission, behavior: pluginRule.behavior, reason,
+        request: { ...permission.request, requiresHumanReview: true, risk: [permission.request.risk, reason].filter(Boolean).join(" · ") } };
+    }
     let permissionTrace = permission.behavior === "allow"
       ? effectiveMode === "full" ? "full_access" : "auto_allowed"
       : permission.behavior;
@@ -917,7 +952,12 @@ async function runOneToolBlock(
         // UI can show "Waiting for permission…" on it (not just the prompt).
         setToolStatus(block.id, "waiting-permission");
         decision = options.onPermissionRequest
-          ? await options.onPermissionRequest(permission.request)
+          ? await (async () => {
+              await recordExecution(context, { phase: "tool_approval", toolUseId: block.id, toolName: block.name, decision: "requested" });
+              const answer = await options.onPermissionRequest!(permission.request);
+              await recordExecution(context, { phase: "tool_approval", toolUseId: block.id, toolName: block.name, decision: answer });
+              return answer;
+            })()
           : "deny";
       }
 
@@ -942,7 +982,7 @@ async function runOneToolBlock(
 
       permissionTrace = decision;
 
-      if (decision === "allow_always") {
+      if (decision === "allow_always" && !pluginRule) {
         const allowRules = options.sessionPermissionRules?.allow;
         if (allowRules && !allowRules.includes(permission.request.ruleHint)) {
           allowRules.push(permission.request.ruleHint);
@@ -1053,37 +1093,61 @@ async function runOneToolBlock(
       };
     }
 
-    // A user can close one mailbox power while this call waits on a model or
-    // foreground decision. Re-read the user-owned switch at dispatch time.
-    if (block.name === "Mail" && !(await isMailPowerEnabled(toolInput.account, toolInput.operation))) {
-      const account = typeof toolInput.account === "string" ? toolInput.account : "unknown";
-      const power = mailPowerForOperation(toolInput.operation) ?? "unknown";
-      const result: ToolResult = {
-        content: `Mail ${account}.${power} is closed in /powersetting. Nothing was dispatched.`,
-        isError: true,
-      };
-      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
-    }
-
-    if (block.name === "Mail" && toolInput.operation === "send" && !reserveMailSendAttempt(context.sessionId, context.messageId, toolInput)) {
-      const result: ToolResult = {
-        content: "Mail.send was already attempted for this user turn and identical payload. It was not sent again. Check the earlier receipt or mailbox before asking the user for a new send request.",
-        isError: true,
-      };
-      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
-    }
-
     // A confirmation can remain open while logout/reset/disable revokes login.
     // Recheck immediately before dispatch, including custom and local tools.
     await requirePlatformScope(0);
     await assertApplicationProtection(block.name, toolInput, context);
+    const unresolved = !tool.isReadOnly() && context.findUnresolvedExecutions
+      ? await context.findUnresolvedExecutions(block.name, executionHash(toolInput)) : [];
+    if (unresolved.length) {
+      const request: PermissionRequest = {
+        toolName: block.name, input: toolInput, requiresHumanReview: true,
+        summary: `Review interrupted ${block.name} before repeating`,
+        risk: "An earlier identical operation has an unknown outcome and may already have changed files, sent a message, or charged an account. Inspect the target or receipt first. Approve only after deciding another execution is safe.",
+        ruleHint: "recovery:human-review",
+      };
+      const answer = !options.shouldAvoidPermissionPrompts && options.onPermissionRequest
+        ? await options.onPermissionRequest(request) : "deny";
+      await recordExecution(context, { phase: "tool_approval", toolUseId: block.id, toolName: block.name,
+        decision: answer === "allow_once" || answer === "allow_always" ? "allow_once" : "deny",
+        ...(answer === "allow_once" || answer === "allow_always" ? { reviewedExecutionKeys: unresolved.map(item => item.key) } : {}) });
+      if (answer !== "allow_once" && answer !== "allow_always") return {
+        execution: { toolUseId: block.id, toolName: block.name, toolInput,
+          result: { content: "Blocked automatic repetition: an earlier identical operation has an unknown outcome. No new operation was dispatched. Inspect the target state or receipt and obtain foreground human review before retrying.", isError: true } },
+        permissionRequest: request,
+      };
+    }
+    context.abortSignal?.throwIfAborted();
+    if (findContextTool(context, block.name) !== dispatchTool) throw new Error("The tool changed while interrupted execution was being reviewed; nothing was dispatched.");
+    await requirePlatformScope(0);
+    await assertApplicationProtection(block.name, toolInput, context);
+    const currentPluginRule = pluginApprovalRule(block.name, toolInput);
+    if (currentPluginRule && (currentPluginRule.behavior === "deny" || !pluginRule ||
+        currentPluginRule.pluginId !== pluginRule.pluginId || currentPluginRule.reason !== pluginRule.reason)) {
+      const result: ToolResult = { isError: true, content: `Plugin approval policy changed. Review the action again: ${currentPluginRule.reason}` };
+      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result } };
+    }
+    const blockedReason = await checkDispatchGuard(block.name, toolInput, context);
+    if (blockedReason) {
+      const result: ToolResult = { content: blockedReason, isError: true };
+      return { execution: { toolUseId: block.id, toolName: block.name, toolInput, result }, ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}) };
+    }
+    await recordExecution(context, { phase: "tool_approval", toolUseId: block.id, toolName: block.name, decision: permissionTrace });
+    if (context.recordExecutionEvent) await recordExecution(context, { phase: "tool_start", toolUseId: block.id, toolName: block.name, inputHash: executionHash(toolInput) });
     setToolStatus(block.id, "running");
     toolDispatched = true;
-    const rawResult = await dispatchTool.call(toolInput, callContext);
+    const nativeStartedAt = Date.now();
+    const nativeResult = await measureStage("toolsMs", () => dispatchTool.call(toolInput, callContext));
+    const rawResult: ToolResult = !tool.isReadOnly() && context.abortSignal?.aborted
+      ? { ...nativeResult, executionOutcome: "unknown" } : nativeResult;
     let result: ToolResult = {
       ...rawResult,
       content: truncateToolResult(rawResult.content, tool.maxResultSizeChars),
     };
+    // Commit the real result before hooks or any other tool can wait/crash.
+    await recordExecution(context, { phase: "tool_result", toolUseId: block.id, toolName: block.name,
+      status: result.executionOutcome === "unknown" ? "unknown" : "settled", durationMs: Date.now() - nativeStartedAt, result });
+    persistedResult = result;
 
     if (jevDecision?.configured) {
       result = {
@@ -1167,6 +1231,7 @@ async function runOneToolBlock(
       execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
       ...(surfacedRequest ? { permissionRequest: surfacedRequest } : {}),
       rawResult,
+      persistedResult,
       rhinoJevDecision,
       toolDispatched,
     };
@@ -1181,6 +1246,7 @@ async function runOneToolBlock(
     return {
       execution: { toolUseId: block.id, toolName: block.name, toolInput, result },
       toolDispatched,
+      persistedResult,
     };
   }
 }
@@ -1278,6 +1344,16 @@ export async function* query(
   params: QueryParams,
 ): AsyncGenerator<AgenticLoopEvent, AgenticLoopResult> {
   await requirePlatformScope(0);
+  const executionContext: ToolContext = { ...params.toolContext, executionScope: {
+    turnId: params.toolContext.executionScope && params.toolContext.executionScope.agentSessionId === params.toolContext.sessionId
+      ? params.toolContext.executionScope.turnId : randomUUID(), step: 0, agentSessionId: params.toolContext.sessionId,
+  } };
+  const queryStartedAt = Date.now();
+  let executionStatus: string = "interrupted";
+  let activeRequestStartedAt: number | undefined;
+  let activePlatformReceipt: { current?: PlatformCallReceipt } = {};
+  const finish = (reason: LoopTerminationReason) => { executionStatus = reason; return reason; };
+  await recordExecution(executionContext, { phase: "turn_start", model: params.model });
   const maxTurns = params.maxTurns ?? MAX_TOOL_TURNS;
   let state: LoopState = {
     messages: [...params.messages],
@@ -1334,7 +1410,7 @@ export async function* query(
   while (state.turnCount < maxTurns) {
     if (params.abortSignal?.aborted) {
       const abortedState = { ...state, aborted: true };
-      yield { type: "turn_complete", reason: "aborted", turnCount: state.turnCount };
+      yield { type: "turn_complete", reason: finish("aborted"), turnCount: state.turnCount };
       return { state: abortedState, usage: totalUsage, ...usageSnapshot(), reason: "aborted" };
     }
 
@@ -1351,7 +1427,7 @@ export async function* query(
       } catch (error) {
         const reason = params.abortSignal?.aborted ? "aborted" : "model_error";
         if (reason !== "aborted") yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
-        yield { type: "turn_complete", reason, turnCount: state.turnCount };
+        yield { type: "turn_complete", reason: finish(reason), turnCount: state.turnCount };
         return { state, usage: totalUsage, ...usageSnapshot(), reason };
       }
     }
@@ -1437,12 +1513,19 @@ export async function* query(
           `${failureDetail} Run /compact with a focus instruction, or /clear to start fresh.`,
         ),
       };
-      yield { type: "turn_complete", reason: "blocking_limit", turnCount: nextTurnCount };
+      yield { type: "turn_complete", reason: finish("blocking_limit"), turnCount: nextTurnCount };
       return { state: { ...state, turnCount: nextTurnCount }, usage: totalUsage, ...usageSnapshot(), reason: "blocking_limit" };
     }
 
     await requirePlatformScope(0);
+    executionContext.executionScope = { ...executionContext.executionScope!, requestId: randomUUID(), step: nextTurnCount };
+    activeRequestStartedAt = Date.now();
+    activePlatformReceipt = {};
+    if (executionContext.recordExecutionEvent) await recordExecution(executionContext, { phase: "request_start", model: params.model,
+      contextHash: executionHash(state.messages), systemHash: executionHash(params.systemPrompt), toolsHash: executionHash(currentTools), messageCount: state.messages.length });
     const stream = streamMessage({
+      platformRequestId: executionContext.executionScope.requestId,
+      onPlatformReceipt: receipt => { activePlatformReceipt.current = receipt; },
       messages: [...state.messages],
       model: params.model,
       system: params.systemPrompt,
@@ -1464,7 +1547,7 @@ export async function* query(
       if (done) {
         const streamResult = value;
         if (!streamResult) {
-          yield { type: "turn_complete", reason: "model_error", turnCount: nextTurnCount };
+          yield { type: "turn_complete", reason: finish("model_error"), turnCount: nextTurnCount };
           return {
             state: { ...state, turnCount: nextTurnCount },
             usage: totalUsage,
@@ -1523,6 +1606,13 @@ export async function* query(
       if (streamError) break;
     }
 
+    await recordExecution(executionContext, { phase: "request_end", model: params.model,
+      status: params.abortSignal?.aborted ? "aborted" : streamError ? "error" : "response_complete",
+      billingStatus: activePlatformReceipt.current?.authoritative ? activePlatformReceipt.current.status : "unverified",
+      ...(activePlatformReceipt.current ? { platformReceipt: activePlatformReceipt.current } : {}),
+      durationMs: Date.now() - activeRequestStartedAt, usage: { ...lastCallUsage } });
+    activeRequestStartedAt = undefined;
+
     // ─── Stage 27: stream error handling (reactive compact) ──────────
     if (params.abortSignal?.aborted) continue;
     if (streamError) {
@@ -1568,7 +1658,7 @@ export async function* query(
 
       if (params.abortSignal?.aborted) continue;
       yield { type: "error", error: streamError.error };
-      yield { type: "turn_complete", reason: "model_error", turnCount: nextTurnCount };
+      yield { type: "turn_complete", reason: finish("model_error"), turnCount: nextTurnCount };
       return {
         state: { ...state, turnCount: nextTurnCount },
         usage: totalUsage,
@@ -1659,7 +1749,7 @@ export async function* query(
       aborted: false,
     };
     lastCallUsageAnchorIndex = state.messages.length - 1;
-    yield { type: "assistant_message", message: assistantMessage };
+    yield { type: "assistant_message", message: assistantMessage, executionScope: { ...executionContext.executionScope! } };
     // Per-turn usage event — let downstream consumers (notably
     // runChildAgent → subAgentProgressStore) update live counters
     // without having to wait for the loop's final return value.
@@ -1717,7 +1807,7 @@ export async function* query(
         }
       }
 
-      yield { type: "turn_complete", reason: "completed", turnCount: state.turnCount };
+      yield { type: "turn_complete", reason: finish("completed"), turnCount: state.turnCount };
       return { state, usage: totalUsage, ...usageSnapshot(), reason: "completed" };
     }
 
@@ -1729,7 +1819,7 @@ export async function* query(
     const { toolResultsMessage, executions, permissionRequests } = await runTools(
       assistantContent,
       {
-        ...params.toolContext,
+        ...executionContext,
         abortSignal: params.abortSignal,
       },
       {
@@ -1763,10 +1853,10 @@ export async function* query(
       turnCount: state.turnCount,
       aborted: false,
     };
-    yield { type: "tool_result_message", message: toolResultsMessage };
+    yield { type: "tool_result_message", message: toolResultsMessage, executionScope: { ...executionContext.executionScope! } };
   }
 
-  yield { type: "turn_complete", reason: "max_turns", turnCount: state.turnCount };
+  yield { type: "turn_complete", reason: finish("max_turns"), turnCount: state.turnCount };
   return {
     state,
     usage: totalUsage,
@@ -1774,6 +1864,13 @@ export async function* query(
     reason: "max_turns",
   };
   } finally {
-    await endComputerUseIndicatorSession(params.toolContext.sessionId);
+    try {
+      if (activeRequestStartedAt !== undefined) await recordExecution(executionContext, { phase: "request_end", model: params.model,
+        status: params.abortSignal?.aborted ? "aborted" : "interrupted", durationMs: Date.now() - activeRequestStartedAt,
+        billingStatus: activePlatformReceipt.current?.authoritative ? activePlatformReceipt.current.status : "unverified",
+        ...(activePlatformReceipt.current ? { platformReceipt: activePlatformReceipt.current } : {}) });
+      await recordExecution(executionContext, { phase: "turn_end", status: params.abortSignal?.aborted ? "aborted" : executionStatus,
+        durationMs: Date.now() - queryStartedAt, usage: { ...totalUsage }, timings: currentTurnTimings() });
+    } finally { await endComputerUseIndicatorSession(params.toolContext.sessionId); }
   }
 }

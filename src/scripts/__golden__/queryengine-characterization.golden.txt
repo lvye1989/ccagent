@@ -1,7 +1,7 @@
 ### help
 >>> /help
 command[info]:
-  | Commands: /help /clear /config [list|get|set] /cost /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /powersetting [list|qq|163 <read|write|delete|search|send> on|off] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye
+  | Commands: /help /clear /config [list|get|set] /cost /billing [request-id] /model [name|list|default] /mode [default|plan|auto|full] /think [on|off|<budget>] /effort [low|medium|high|max] /tasks [task|todo|reset] /mcp [list|open <name>|close <name>|auth <name>|tools <name>|reconnect <name>] /powersetting [list|qq|163 <read|write|delete|search|send> on|off] /plugin [install|enable|disable|marketplace|reload ...] /reload-plugins /skills [reload] /agents [list|open <name>|close <name>] /hooks /output-style [name] /history /compact /rewind [n] /status /context /timings /doctor /copy [n] /export [file] /resume [n|id] /diff [n] /init /workfriend /agent-team [open|close] /agent-skill [open|close|status] /permissions [allow|deny|remove <rule>] /memory [edit <n>] /<skill-or-command> [args] /exit /quit /bye
 <<< handled=true
 
 ### cost
@@ -178,11 +178,11 @@ command[info]:
   |
   |   System prompt          ░░░░░░░░░░░░░░░░░░░░   2.1%  4,102 tok
   |   AGENT.md + memory      ░░░░░░░░░░░░░░░░░░░░   0.0%  4 tok
-  |   Tool definitions       ███░░░░░░░░░░░░░░░░░  13.6%  27,109 tok
+  |   Tool definitions       ███░░░░░░░░░░░░░░░░░  13.7%  27,310 tok
   |   Conversation history   ░░░░░░░░░░░░░░░░░░░░   0.0%  42 tok
-  |   Free space             █████████████████░░░  84.4%  168,743 tok
+  |   Free space             █████████████████░░░  84.3%  168,542 tok
   |
-  | Estimated used: 31,257 / 200,000 (15.6%)
+  | Estimated used: 31,458 / 200,000 (15.7%)
 <<< handled=true
 
 ### doctor
@@ -195,7 +195,8 @@ command[info]:
   |   Endpoint: https://api.anthropic.com
   | <ENDPOINT_PROBE>
   | ✓ MCP: none configured
-  | ✓ Sandbox: not supported on win32
+  | ⚠ Sandbox: Process isolation is disabled; shell commands run on the host.
+  |   Scope: <SHELL_ISOLATION_SCOPE>
   | ✓ Settings files valid
   | ✓ Plugins: 0 active, no load errors
 <<< handled=true

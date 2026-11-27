@@ -44,3 +44,5 @@ export {
 } from "./violations.js";
 
 export type { SandboxSettings, SandboxProfile } from "./types.js";
+export { getDockerSandboxStatus, dockerSandboxImage, DEFAULT_DOCKER_SANDBOX_IMAGE, runDockerSandboxCommand } from "./docker.js";
+export { getShellSandboxStatus, type ShellSandboxStatus } from "./status.js";

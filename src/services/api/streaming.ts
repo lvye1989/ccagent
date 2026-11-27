@@ -1,3 +1,4 @@
+import { measureStage } from "../../core/turnTimings.js";
 /**
  * Streaming — AsyncGenerator wrapper over the Anthropic streaming API.
  *
@@ -18,7 +19,7 @@ import {
 import { resolveProfile } from "./providers/profile.js";
 import { streamViaProvider, collectViaProvider } from "./providers/providerStream.js";
 import { randomUUID } from "node:crypto";
-import { PlatformServiceError } from "../../platform/gatewayClient.js";
+import { PlatformServiceError, type PlatformCallReceipt } from "../../platform/gatewayClient.js";
 import type {
   AssistantMessage,
   ContentBlock,
@@ -57,6 +58,7 @@ import {
 export interface StreamRequestParams {
   /** One logical request keeps its identity across retries and result recovery. */
   platformRequestId?: string;
+  onPlatformReceipt?: (receipt: PlatformCallReceipt) => void;
   messages: MessageParam[];
   model?: string;
   maxTokens?: number;
@@ -468,7 +470,7 @@ export async function* streamMessage(
 
     try {
       while (true) {
-        const { value, done } = await inner.next();
+        const { value, done } = await measureStage("modelMs", () => inner.next());
         if (done) {
           return value;
         }

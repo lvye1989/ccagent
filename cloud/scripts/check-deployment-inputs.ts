@@ -29,7 +29,7 @@ let bytes = 0, files = 0;
 for (const file of plan.files) {
   if (!file.sha) continue; // Empty directories have no contents to upload.
   const relative = file.path.replaceAll('\\', '/');
-  const allowed = /^cloud\/(?:src\/.+\.(?:ts|tsx|css|svg)|(?:package(?:-lock)?|tsconfig|vercel)\.json|(?:next\.config|next-env\.d|drizzle\.config)\.ts|\.gitignore)$/.test(relative) || /^src\/platform\/(?:money|zpay|pricingDefinition)\.ts$/.test(relative);
+  const allowed = /^cloud\/(?:src\/.+\.(?:ts|tsx|css|svg)|(?:package(?:-lock)?|tsconfig|vercel)\.json|(?:next\.config|next-env\.d|drizzle\.config)\.ts|\.gitignore)$/.test(relative) || /^src\/platform\/(?:money|zpay|pricingDefinition)\.ts$/.test(relative) || /^desktop\/update-manifest\.(?:cjs|d\.cts)$/.test(relative);
   const absolute = path.resolve(root, relative);
   if (!allowed || !absolute.startsWith(root + path.sep) || /(?:^|\/)(?:\.env[^/]*|\.ccagent|node_modules|\.vercel|\.next)(?:\/|$)/.test(relative)) throw new Error('UNEXPECTED_DEPLOYMENT_FILE');
   const contents = await readFile(absolute);

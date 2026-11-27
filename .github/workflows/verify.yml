@@ -1,0 +1,107 @@
+name: Verify application
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: ''
+  pull_request:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    # Query-engine characterization fixtures include Windows paths/tool output.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:release
+  cloud:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: ccagent_ci
+          POSTGRES_PASSWORD: ci-owner-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ccagent_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgres://ccagent_runtime:ci-runtime-only@localhost:5432/ccagent_ci
+      DATABASE_MIGRATION_URL: postgres://postgres:ci-owner-only@localhost:5432/ccagent_ci
+      AUTH_URL: http://127.0.0.1:4310
+      AUTH_SECRET: ci-only-auth-secret-not-used-by-any-deployment
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: cloud/package-lock.json
+      - name: Enable verified TLS on the disposable database
+        env:
+          DATABASE_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$RUNNER_TEMP/ci-db.key" -out "$RUNNER_TEMP/ci-db.crt" -days 2 -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+          docker cp "$RUNNER_TEMP/ci-db.key" "$DATABASE_CONTAINER:/tmp/ci-db.key"
+          docker cp "$RUNNER_TEMP/ci-db.crt" "$DATABASE_CONTAINER:/tmp/ci-db.crt"
+          docker exec --user root "$DATABASE_CONTAINER" install -o postgres -g postgres -m 600 /tmp/ci-db.key /var/lib/postgresql/server.key
+          docker exec --user root "$DATABASE_CONTAINER" install -o postgres -g postgres -m 644 /tmp/ci-db.crt /var/lib/postgresql/server.crt
+          docker exec "$DATABASE_CONTAINER" psql -U postgres -d ccagent_ci -c "ALTER SYSTEM SET ssl = 'on'"
+          docker exec "$DATABASE_CONTAINER" psql -U postgres -d ccagent_ci -c "ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'"
+          docker exec "$DATABASE_CONTAINER" psql -U postgres -d ccagent_ci -c "ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'"
+          docker exec "$DATABASE_CONTAINER" psql -U postgres -d ccagent_ci -c 'SELECT pg_reload_conf()'
+          printf 'NODE_EXTRA_CA_CERTS=%s/ci-db.crt\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: node scripts/test-ci.mjs offline
+      - run: node --import tsx scripts/setup-ci-db.ts
+      - run: npm run db:migrate
+      - run: node scripts/test-ci.mjs database
+      - run: npm run build
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:desktop-setup
+      - run: node --test scripts/test-signed-updates.mjs
+      - name: Build CLI and Web assets for the desktop payload
+        run: npm run build
+      - name: Build an explicitly unsigned CI installer
+        run: node scripts/build-desktop.mjs --unsigned-development
+      - run: npm run test:desktop
+      - name: Install, launch packaged UI, upgrade and uninstall in isolation
+        run: node scripts/test-desktop-installed.mjs
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: windows-desktop-evidence
+          path: output/desktop/ci-evidence/

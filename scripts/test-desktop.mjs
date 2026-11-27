@@ -37,7 +37,7 @@ assert.equal(manifest.platform, 'win32'); assert.equal(manifest.architecture, 'x
 assert.equal(manifest.minimumWindowsMajor, 10);
 assert(manifest.desktop.some(file => file.path === 'desktop/prerequisites.cjs'));
 for (const file of manifest.desktop) {
-  assert.match(file.path, /^desktop\/[a-z.-]+\.(?:cjs|js|html|css)$/);
+  assert.match(file.path, /^desktop\/[a-z.-]+\.(?:cjs|js|html|css|ps1)$/);
   const preparedFile = path.join(path.dirname(backendRoot), 'app', file.path);
   assert.equal(createHash('sha256').update(await fs.readFile(preparedFile)).digest('hex'), file.sha256, 'Prepared desktop code matches the release manifest');
 }

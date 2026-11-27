@@ -17,6 +17,8 @@ import {
   appendCompactionSnapshot,
   appendTranscriptEntry,
   createSessionId,
+  createExecutionRecorder,
+  createExecutionReplayFence,
   initSessionStorage,
   restoreSession,
   type FileHistorySnapshotRecord,
@@ -230,6 +232,12 @@ export function useAgentSession({
       applicationProtection: true,
       get sessionId() {
         return sessionIdRef.current;
+      },
+      get recordExecutionEvent() {
+        return createExecutionRecorder(process.cwd(), sessionIdRef.current);
+      },
+      get findUnresolvedExecutions() {
+        return createExecutionReplayFence(process.cwd(), sessionIdRef.current);
       },
       // AskUserQuestion bridge: surface the questions to the UI and return a
       // promise resolved by `resolveQuestion` once the user picks (or null on
@@ -514,7 +522,7 @@ export function useAgentSession({
           permissionSettings,
           sessionPermissionRules: sessionRulesRef.current,
           onPermissionRequest: async (request: PermissionRequest) => {
-            const isPlanExit = request.toolName === "ExitPlanMode";
+            const isPlanExit = request.toolName === "ExitPlanMode" && !request.requiresHumanReview;
             setSpinnerLabel(isPlanExit ? "Waiting for plan approval" : "Waiting for permission");
 
             let planContent: string | undefined;
@@ -528,6 +536,7 @@ export function useAgentSession({
               toolName: request.toolName,
               summary: request.summary,
               risk: request.risk,
+              requiresHumanReview: request.requiresHumanReview,
               ruleHint: request.ruleHint,
               input: request.input,
               isPlanExit,
@@ -668,7 +677,7 @@ export function useAgentSession({
     setTranscriptOpen(false);
   }, []);
 
-  const submit = useCallback(async (text: string): Promise<SubmitResult> => {
+  const submit = useCallback(async (text: string, queueMs = 0): Promise<SubmitResult> => {
     const trimmed = text.trim();
     // Stage 20: empty text is valid when the auto-trigger
     // (subscribePendingNotifications below) wakes us up to drain the
@@ -777,7 +786,7 @@ export function useAgentSession({
     );
 
     try {
-      const run = engineRef.current.submitMessage(trimmed);
+      const run = engineRef.current.submitMessage(trimmed, queueMs);
 
       while (true) {
         const { value, done } = await run.next();
@@ -848,6 +857,7 @@ export function useAgentSession({
               toolName: value.request.toolName,
               summary: value.request.summary,
               risk: value.request.risk,
+              requiresHumanReview: value.request.requiresHumanReview,
               ruleHint: value.request.ruleHint,
               input: value.request.input,
             });
@@ -898,6 +908,7 @@ export function useAgentSession({
               timestamp: new Date().toISOString(),
               role: "assistant",
               message: value.message,
+              ...(value.executionScope ? { executionScope: value.executionScope } : {}),
               ...(engineRef.current.getCurrentMessageId()
                 ? { messageId: engineRef.current.getCurrentMessageId()! }
                 : {}),
@@ -924,6 +935,7 @@ export function useAgentSession({
               timestamp: new Date().toISOString(),
               role: "user",
               message: value.message,
+              ...(value.executionScope ? { executionScope: value.executionScope } : {}),
               ...(engineRef.current.getCurrentMessageId()
                 ? { messageId: engineRef.current.getCurrentMessageId()! }
                 : {}),

@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build, Platform, Arch } from 'electron-builder';
+import { releasePolicy, signedManifest } from './release-policy.mjs';
+import { createRequire } from 'node:module';
+const { verifierEnvironment } = createRequire(import.meta.url)('../desktop/updates.cjs');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'output', 'desktop');
@@ -11,12 +14,15 @@ const stage = path.join(output, 'app'), backend = path.join(output, 'backend'), 
 const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
 const nodeVersion = '24.22.2';
 const nodeSha256 = 'ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2';
+const policy = await releasePolicy(process.argv.slice(2), process.env);
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('This release script builds Windows x64 on Windows x64.');
 // Never accept a development-shell TLS bypass in downloaded release assets.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
 process.env.NODE_USE_SYSTEM_CA = '1';
-delete process.env.CSC_LINK; // An unsigned local build never borrows unrelated signing identities.
-process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false';
+if (policy.development) {
+  delete process.env.CSC_LINK; delete process.env.WIN_CSC_LINK;
+  process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false';
+}
 // Detect a running development payload before removing either staging directory.
 try { const handle = await fs.open(path.join(backend, 'runtime', 'node.exe'), 'r+'); await handle.close(); }
 catch (error) { if (error.code !== 'ENOENT') throw new Error('内置 Node 文件正在使用或无法更新。请先退出使用 output/desktop/backend 的测试应用，再重新打包；当前测试载荷未更改。'); }
@@ -49,7 +55,7 @@ if (!await fs.stat(path.join(nodeFolder, 'node.exe')).catch(() => null)) {
 }
 await resetStage(stage); await resetStage(backend);
 // Use the npm package's explicit resource list, never recursively copy the repo.
-const payload = ['dist/ccagent.js', 'dist/charts.js', ...pkg.files.filter(name => name.startsWith('web/') || name.startsWith('rhino/')), 'LICENSE', '.env.example'];
+const payload = ['plugin-api.mjs', 'dist/ccagent.js', 'dist/charts.js', ...pkg.files.filter(name => name.startsWith('web/') || name.startsWith('rhino/')), 'LICENSE', '.env.example'];
 for (const relative of payload) await copy(relative);
 await fs.cp(path.join(root, 'dist', 'whiteboard'), path.join(backend, 'dist', 'whiteboard'), { recursive: true });
 await fs.cp(nodeFolder, path.join(backend, 'runtime'), { recursive: true, filter: source => !['install_tools.bat', 'node_etw_provider.man'].includes(path.basename(source)) });
@@ -57,8 +63,9 @@ const runtimeVersion = execFileSync(path.join(backend, 'runtime', 'node.exe'), [
 if (runtimeVersion !== 'v' + nodeVersion) throw new Error('Unexpected bundled runtime');
 execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts', 'desktop-assets.ps1'), '-Destination', assets], { windowsHide: true, stdio: 'inherit' });
 await fs.mkdir(path.join(stage, 'desktop'), { recursive: true });
-const desktopFiles = ['main.cjs', 'runtime.cjs', 'prerequisites.cjs', 'preload.cjs', 'welcome.html', 'welcome.css', 'welcome.js'];
+const desktopFiles = ['main.cjs', 'runtime.cjs', 'prerequisites.cjs', 'updates.cjs', 'update-manifest.cjs', 'verified-installer.ps1', 'preload.cjs', 'welcome.html', 'welcome.css', 'welcome.js'];
 for (const filename of desktopFiles) await copy('desktop/' + filename, stage);
+await fs.writeFile(path.join(stage, 'desktop', 'release-keys.json'), JSON.stringify(policy.keys, null, 2));
 await fs.copyFile(path.join(assets, 'icon.ico'), path.join(stage, 'desktop', 'icon.ico'));
 await copy('LICENSE', stage);
 await fs.writeFile(path.join(stage, 'package.json'), JSON.stringify({ name: 'ccagent-desktop', version: pkg.version, private: true, description: 'CCAGENT AI 桌面工作区', author: 'CCAGENT', license: 'MIT', main: 'desktop/main.cjs' }, null, 2));
@@ -79,7 +86,7 @@ for (const relative of Object.keys(lock.packages)) {
   }
 }
 await fs.writeFile(path.join(backend, 'THIRD-PARTY-NOTICES.txt'), notices.join('\n'));
-const manifest = { version: pkg.version, nodeVersion, nodeArchiveSha256: nodeSha256, builtAt: new Date().toISOString(),
+const manifest = { version: pkg.version, nodeVersion, nodeArchiveSha256: nodeSha256, builtAt: new Date().toISOString(), releaseMode: policy.development ? 'development' : 'signed',
   environmentGuideVersion: 1, platform: 'win32', architecture: 'x64', minimumWindowsMajor: 10, desktop: [], payload: [] };
 for (const filename of desktopFiles) manifest.desktop.push({ path: 'desktop/' + filename, sha256: await hashFile(path.join(stage, 'desktop', filename)) });
 for (const relative of payload) manifest.payload.push({ path: relative, sha256: await hashFile(path.join(backend, relative)) });
@@ -88,8 +95,10 @@ console.log(`Prepared desktop payload: ${payload.length} application files, Node
 if (process.argv.includes('--prepare-only')) process.exit(0);
 const artifacts = await build({ projectDir: stage, targets: Platform.WINDOWS.createTarget(process.argv.includes('--dir') ? ['dir'] : ['nsis'], Arch.x64), config: {
   appId: 'pro.ccagent.desktop', productName: 'CCAGENT', copyright: 'CCAGENT contributors · MIT',
+  forceCodeSigning: !policy.development,
   directories: { output: path.join(output, 'release'), buildResources: assets },
   asar: true, npmRebuild: false, compression: 'normal', electronVersion: pkg.devDependencies.electron,
+  asarUnpack: ['desktop/verified-installer.ps1'],
   electronFuses: { runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true },
   files: ['package.json', 'desktop/**', 'LICENSE'],
   extraResources: [{ from: backend, to: 'backend', filter: ['**/*'] }],
@@ -105,6 +114,14 @@ const artifacts = await build({ projectDir: stage, targets: Platform.WINDOWS.cre
   publish: null,
 } });
 console.log('Desktop build completed:', artifacts);
+if (!policy.development) {
+  const installer = artifacts.find(file => file.endsWith('.exe') && path.basename(file).startsWith('CCAGENT-Setup-'));
+  if (!installer) throw new Error('Formal release installer missing');
+  const sha256 = await hashFile(installer), size = (await fs.stat(installer)).size;
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'desktop', 'verified-installer.ps1'), '-Installer', installer, '-Sha256', sha256, '-CertificateSha256', policy.certificate], { windowsHide: true, stdio: 'inherit', env: verifierEnvironment() });
+  const update = signedManifest(policy, { version: pkg.version, artifactName: path.basename(installer), size, sha256 });
+  await fs.writeFile(installer + '.manifest.json', JSON.stringify(update, null, 2));
+}
 if (process.argv.includes('--copy-desktop')) {
   const desktop = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "[Environment]::GetFolderPath('Desktop')"], { windowsHide: true, encoding: 'utf8' }).trim();
   const installer = artifacts.find(file => file.endsWith('.exe') && path.basename(file).startsWith('CCAGENT-Setup-'));

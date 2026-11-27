@@ -198,9 +198,11 @@ function actionQuestion(toolName: string): string {
 }
 
 function PermissionOptions({
+  onceOnly,
   toolName,
   selectedIndex,
 }: {
+  onceOnly?: boolean;
   toolName: string;
   selectedIndex: number;
 }): React.ReactNode {
@@ -209,7 +211,7 @@ function PermissionOptions({
     : "Yes, allow this tool during this session";
   const options = [
     { label: "Yes", shortcut: "y" },
-    { label: sessionLabel, shortcut: "a" },
+    ...(onceOnly ? [] : [{ label: sessionLabel, shortcut: "a" }]),
     { label: "No", shortcut: "n" },
   ];
 
@@ -253,8 +255,9 @@ export function PermissionRequestCard({
         <PermissionPreview toolName={prompt.toolName} input={prompt.input} summary={prompt.summary} />
 
         <Box marginTop={1} flexDirection="column" paddingX={1}>
+          {prompt.requiresHumanReview && <Text>{prompt.risk}</Text>}
           <Text>{actionQuestion(prompt.toolName)}</Text>
-          <PermissionOptions toolName={prompt.toolName} selectedIndex={selectedOptionIndex} />
+          <PermissionOptions onceOnly={prompt.requiresHumanReview} toolName={prompt.toolName} selectedIndex={selectedOptionIndex} />
         </Box>
       </Box>
       <Box paddingX={1} marginTop={1}>

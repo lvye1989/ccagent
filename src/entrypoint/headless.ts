@@ -25,7 +25,7 @@ import {
 } from "../permissions/permissions.js";
 import type { ToolContext } from "../tools/Tool.js";
 import type { Usage } from "../types/message.js";
-import { createSessionId } from "../session/storage.js";
+import { createSessionId, createExecutionRecorder, createExecutionReplayFence, initSessionStorage, appendTranscriptEntry, appendCompactionSnapshot } from "../session/storage.js";
 import { DEFAULT_MODEL } from "../services/api/client.js";
 import { readMergedStringSetting } from "../utils/settings.js";
 import { getToolsApiParams } from "../tools/index.js";
@@ -60,6 +60,7 @@ export function headlessPermissionDecision(
   request: PermissionRequest,
   autoApprove: boolean,
 ): PermissionDecision {
+  if (request.requiresHumanReview) return "deny";
   if (request.toolName === "Mail" && request.input.operation === "send") return "deny";
   return autoApprove ? "allow_once" : "deny";
 }
@@ -73,6 +74,7 @@ interface ResultMessage {
   session_id: string;
   num_turns: number;
   duration_ms: number;
+  timings?: import("../core/turnTimings.js").TurnTimings;
   total_cost_usd: number;
   usage: Usage;
 }
@@ -193,6 +195,8 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
   const toolContext: ToolContext = {
     cwd,
     sessionId,
+    recordExecutionEvent: createExecutionRecorder(cwd, sessionId),
+    findUnresolvedExecutions: createExecutionReplayFence(cwd, sessionId),
     applicationProtection: true,
     // No interactive frontend in headless mode: AskUserQuestion resolves null
     // so the awaiting tool call unblocks instead of hanging.
@@ -225,6 +229,10 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
     permissionSettings,
     onPermissionRequest,
   });
+  const timestamp = new Date().toISOString();
+  await initSessionStorage({ sessionId, cwd, startedAt: timestamp, updatedAt: timestamp, model: resolvedModel });
+  const messageId = engine.beginUserTurn();
+  await appendTranscriptEntry(cwd, sessionId, { type: "message", timestamp, role: "user", message: { role: "user", content: input }, messageId });
 
   const format = options.outputFormat ?? "text";
   const startedAt = Date.now();
@@ -253,19 +261,25 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
       }
       switch (value.type) {
         case "assistant_message": {
+          await appendTranscriptEntry(cwd, sessionId, { type: "message", timestamp: new Date().toISOString(), role: "assistant", message: value.message, messageId, executionScope: value.executionScope });
           const text = extractAssistantText(value.message);
           if (text.trim()) finalText = text;
           if (streaming) writeJsonLine({ type: "assistant", session_id: sessionId, message: value.message });
           break;
         }
         case "tool_result_message":
+          await appendTranscriptEntry(cwd, sessionId, { type: "message", timestamp: new Date().toISOString(), role: "user", message: value.message, messageId, executionScope: value.executionScope });
           if (streaming) writeJsonLine({ type: "user", session_id: sessionId, message: value.message });
           break;
         case "turn_complete":
           numTurns = value.turnCount;
           break;
         case "usage_updated":
+          await appendTranscriptEntry(cwd, sessionId, { type: "usage", timestamp: new Date().toISOString(), turn: value.turnUsage, total: value.totalUsage });
           totalUsage = value.totalUsage;
+          break;
+        case "compacted":
+          if (value.trigger !== "micro") await appendCompactionSnapshot(cwd, sessionId, value.trigger, engine.getState().messages);
           break;
         case "error":
           // Always to stderr so it never corrupts the stdout result payload.
@@ -289,6 +303,7 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
         session_id: sessionId,
         num_turns: numTurns,
         duration_ms: Date.now() - startedAt,
+        timings: engine.getTurnTimings(),
         total_cost_usd: 0,
         usage: totalUsage,
       };
@@ -311,6 +326,7 @@ export async function runHeadless(options: RunHeadlessOptions): Promise<void> {
       session_id: sessionId,
       num_turns: numTurns,
       duration_ms: Date.now() - startedAt,
+        timings: engine.getTurnTimings(),
       // We don't price tokens yet; surface 0 to keep the field stable for
       // consumers (a later stage can wire real cost accounting).
       total_cost_usd: 0,

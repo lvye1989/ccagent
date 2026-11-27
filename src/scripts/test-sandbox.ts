@@ -136,8 +136,13 @@ async function main(): Promise<void> {
   );
 
   section("[4] shouldUseSandbox decision tree");
-  if (!isPlatformSupported()) {
-    console.log("    [skip] non-macOS host — shouldUseSandbox always returns false");
+  if (process.platform === "win32") {
+    assert(shouldUseSandbox({ command: "ls" }, makeSettings()), "Windows isolation policy is retained even while Docker is unavailable");
+    assert(shouldUseSandbox({ command: "ls", dangerouslyDisableSandbox: true }, makeSettings()), "Windows model escape does not disable isolation");
+    assert(shouldUseSandbox({ command: "docker ps" }, makeSettings({ excludedCommands: ["docker:*"] })), "Windows command exclusions do not disable isolation");
+    assert(!shouldUseSandbox({ command: "ls" }, makeSettings({ enabled: false })), "Windows default disabled policy remains compatible");
+  } else if (!isPlatformSupported()) {
+    assert(shouldUseSandbox({ command: "ls" }, makeSettings()), "Unsupported hosts retain isolation intent and fail at execution");
   } else {
     _resetAvailabilityCache();
     const ready = isSandboxRuntimeReady();

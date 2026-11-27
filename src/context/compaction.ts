@@ -1,3 +1,4 @@
+import { measureStage } from "../core/turnTimings.js";
 import { createMessage } from "../services/api/streaming.js";
 import { debugLog } from "../utils/log.js";
 import {
@@ -245,7 +246,7 @@ async function summarizeMessages(messages: MessageParam[], focus?: string, model
   const extraInstruction = focus ? `\n\n## Compact Instructions\n${focus}` : "";
   debugLog("compact", "summary_request", { messageCount: messages.length, focus: focus ?? null, model: model ?? null });
 
-  const response = await createMessage({
+  const response = await measureStage("summaryMs", () => createMessage({
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
     querySource: "background",
     model: model ?? process.env.ANTHROPIC_MODEL,
@@ -258,7 +259,7 @@ async function summarizeMessages(messages: MessageParam[], focus?: string, model
         content: `Conversation to summarize:\n${JSON.stringify(messages, null, 2)}`,
       },
     ],
-  });
+  }));
 
   const text = response.content
     .filter((block) => block.type === "text")

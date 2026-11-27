@@ -1,27 +1,20 @@
 /**
  * Detect whether the sandbox can actually run on the current host.
  *
- * Why this exists (security footgun, mirroring source code's
- * `getSandboxUnavailableReason`):
- *
- *   The user opts in by writing `sandbox.enabled: true` in settings.json.
- *   If the host can't run sandbox-exec — e.g. they're on Windows or
- *   Linux, or sandbox-exec was removed by some MDM tool — and we
- *   silently fall back to "no sandbox", the user thinks they're
- *   protected and they aren't. So we surface the reason loudly at
- *   startup and let the user decide.
- *
- * CCAGENT only ships the macOS backend (see DEVELOPMENT-PLAN
- * stage 18.6). Linux/WSL is explicitly out of scope for the tutorial.
+ * macOS uses sandbox-exec. Windows uses Docker Desktop's local Linux
+ * engine and a preinstalled image. Execution fails closed if an enabled
+ * backend is unavailable; availability reporting never selects host execution.
  */
 
 import { execFileSync } from "node:child_process";
+import { getDockerSandboxStatus } from "./docker.js";
+import type { ResolvedSandboxSettings } from "./settings.js";
 
 let cachedSupported: boolean | undefined;
 let cachedReason: string | undefined;
 
 export function isPlatformSupported(): boolean {
-  return process.platform === "darwin";
+  return process.platform === "darwin" || process.platform === "win32";
 }
 
 function isSandboxExecAvailable(): boolean {
@@ -43,20 +36,22 @@ function isSandboxExecAvailable(): boolean {
  * cannot run; returns undefined otherwise. Caller should print this
  * once at CLI startup, NOT on every Bash command (it would spam).
  *
- * Result is cached after the first call — sandbox availability does
- * not change during a process lifetime.
+ * macOS availability is cached; Windows checks the live daemon and image so
+ * starting Docker Desktop after application startup does not require a restart.
  */
 export function getSandboxUnavailableReason(
   enabledInSettings: boolean,
+  settings?: ResolvedSandboxSettings,
 ): string | undefined {
   if (!enabledInSettings) return undefined;
+  if (process.platform === "win32") return getDockerSandboxStatus(settings).reason;
 
   if (cachedReason !== undefined) return cachedReason || undefined;
   if (cachedSupported === true) return undefined;
 
   if (!isPlatformSupported()) {
     cachedSupported = false;
-    cachedReason = `sandbox.enabled is true but ${process.platform} is not supported (ccagent only sandboxes on macOS).`;
+    cachedReason = `Sandbox is enabled but ${process.platform} has no supported isolation backend. Shell execution is blocked.`;
     return cachedReason;
   }
 
@@ -72,10 +67,11 @@ export function getSandboxUnavailableReason(
 }
 
 /**
- * "Can the sandbox actually run right now?" — fast, cached, no I/O after
- * the first call. Used by `shouldUseSandbox()` on every Bash invocation.
+ * "Can the sandbox actually run right now?" Readiness is separate from the
+ * policy decision in shouldUseSandbox; an unavailable backend must not bypass it.
  */
-export function isSandboxRuntimeReady(): boolean {
+export function isSandboxRuntimeReady(settings?: ResolvedSandboxSettings): boolean {
+  if (process.platform === "win32") return getDockerSandboxStatus(settings).ready;
   if (cachedSupported !== undefined) return cachedSupported;
   cachedSupported = isPlatformSupported() && isSandboxExecAvailable();
   return cachedSupported;

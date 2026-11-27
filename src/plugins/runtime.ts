@@ -21,6 +21,7 @@
  * always runs.
  */
 
+import { setPluginApprovalRules } from "./approvalRules.js";
 import * as path from "node:path";
 import { loadAllSkills } from "../services/skills/loadSkillsDir.js";
 import { setSkills } from "../services/skills/registry.js";
@@ -98,6 +99,7 @@ export function getActivePluginHooks(): HooksSettings {
 
 /** Test seam: forget all applied plugin state (does NOT touch registries). */
 export function _resetPluginRuntimeForTesting(): void {
+  setPluginApprovalRules([], new Map());
   activePlugins = [];
   activeErrors = [];
   activeHooks = {};
@@ -320,6 +322,7 @@ async function performRefresh(
       message: "The active output style disappeared during reload; reset to default.",
     });
   }
+  setPluginApprovalRules(plugins, trustedById);
   activePlugins = plugins;
   activeErrors = nextErrors;
   activeHooks = nextHooks;

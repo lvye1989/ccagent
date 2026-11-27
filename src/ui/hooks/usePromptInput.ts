@@ -36,6 +36,7 @@ export interface TaskModeSuggestion {
 interface UsePromptInputOptions {
   isLoading: boolean;
   hasPermissionPrompt: boolean;
+  requiresHumanReview?: boolean;
   /** True while an AskUserQuestion dialog owns the keyboard. */
   hasQuestionPrompt?: boolean;
   /** True while the Ctrl+O transcript overlay owns the keyboard. */
@@ -67,7 +68,7 @@ interface UsePromptInputOptions {
   extraCommands?: CommandSuggestion[];
   /** Working directory used to resolve `@` file-reference typeahead. */
   cwd?: string;
-  onSubmit: (text: string) => Promise<unknown> | unknown;
+  onSubmit: (text: string, queueMs?: number) => Promise<unknown> | unknown;
   onExit: () => void;
   onInterrupt: () => boolean;
   onPermissionDecision: (decision: PermissionDecision) => boolean;
@@ -100,6 +101,8 @@ const BUILTIN_COMMANDS: CommandSuggestion[] = [
   { name: "/rewind", description: "Restore files to a previous turn (alias: /checkpoint)" },
   { name: "/status", description: "Show a snapshot of the current session config" },
   { name: "/context", description: "Visualize context window usage by category" },
+  { name: "/billing", description: "Reconcile an official call receipt" },
+  { name: "/timings", description: "Show stage durations for the previous turn" },
   { name: "/doctor", description: "Run an environment health check" },
   { name: "/copy", description: "Copy an assistant reply to the clipboard (/copy [n])" },
   { name: "/export", description: "Export the conversation to a Markdown file (/export [file])" },
@@ -218,6 +221,7 @@ function computeFileSuggestions(query: string, cwd: string): FileSuggestion[] {
 export function usePromptInput({
   isLoading,
   hasPermissionPrompt,
+  requiresHumanReview = false,
   hasQuestionPrompt,
   hasTranscript,
   hasCommandPanel,
@@ -268,7 +272,7 @@ export function usePromptInput({
 
   // Run-time input queue: while a turn is running the user can keep typing and
   // hit Enter; the message is parked here and auto-sent when the turn ends.
-  const [queued, setQueued] = useState<string[]>([]);
+  const [queued, setQueued] = useState<Array<{ text: string; queuedAt: number }>>([]);
   const isLoadingRef = useRef(isLoading);
   isLoadingRef.current = isLoading;
 
@@ -292,7 +296,7 @@ export function usePromptInput({
       textInput.clear();
       if (isLoadingRef.current) {
         // A turn is in flight — park the message; the drain effect sends it.
-        setQueued((q) => [...q, text]);
+        setQueued((q) => [...q, { text, queuedAt: performance.now() }]);
         return;
       }
       void onSubmit(text);
@@ -309,7 +313,7 @@ export function usePromptInput({
     if (prevLoadingRef.current && !isLoading && queued.length > 0) {
       const [next, ...rest] = queued;
       setQueued(rest);
-      if (next !== undefined) void onSubmit(next);
+      if (next !== undefined) void onSubmit(next.text, performance.now() - next.queuedAt);
     }
     prevLoadingRef.current = isLoading;
   }, [isLoading, queued, onSubmit]);
@@ -369,10 +373,10 @@ export function usePromptInput({
   const choosePermissionOption = useCallback(
     (index: number) => {
       if (index === 0) onPermissionDecision("allow_once");
-      else if (index === 1) onPermissionDecision("allow_always");
+      else if (index === 1 && !requiresHumanReview) onPermissionDecision("allow_always");
       else onPermissionDecision("deny");
     },
-    [onPermissionDecision],
+    [onPermissionDecision, requiresHumanReview],
   );
 
   // Splice text in at the current caret, mirroring what the user sees. Reads
@@ -594,16 +598,16 @@ export function usePromptInput({
         if (key.escape) {
           onPermissionDecision("deny");
         } else if (key.upArrow) {
-          setSelectedPermissionIndex((prev) => (prev <= 0 ? 2 : prev - 1));
+          setSelectedPermissionIndex((prev) => (prev <= 0 ? (requiresHumanReview ? 1 : 2) : prev - 1));
         } else if (key.downArrow) {
-          setSelectedPermissionIndex((prev) => (prev >= 2 ? 0 : prev + 1));
+          setSelectedPermissionIndex((prev) => (prev >= (requiresHumanReview ? 1 : 2) ? 0 : prev + 1));
         } else if (key.return) {
           choosePermissionOption(selectedPermissionIndex);
         } else if (normalized === "y" || normalized === "1") {
           onPermissionDecision("allow_once");
-        } else if (normalized === "a" || normalized === "2") {
+        } else if (!requiresHumanReview && (normalized === "a" || normalized === "2")) {
           onPermissionDecision("allow_always");
-        } else if (normalized === "n" || normalized === "3") {
+        } else if (normalized === "n" || normalized === (requiresHumanReview ? "2" : "3")) {
           onPermissionDecision("deny");
         }
       }
@@ -1027,6 +1031,6 @@ export function usePromptInput({
     effortSuggestions,
     fileSuggestions,
     selectedPermissionIndex,
-    queued,
+    queued: queued.map(item => item.text),
   };
 }

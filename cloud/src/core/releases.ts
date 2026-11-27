@@ -5,6 +5,7 @@ import { database, type DatabaseReader } from './db';
 import { audit, settings } from './db/schema';
 import { lockAdministration } from './database-locks';
 import { HttpError } from './http';
+import { signedUpdateInput, validateSignedRelease } from './signed-release';
 
 const key = 'client_latest_release';
 const fields = {
@@ -14,6 +15,7 @@ const fields = {
   downloadUrl: z.string().trim().max(2048).refine(value => {
     try { const url = new URL(value); return url.protocol === 'https:' && !!url.hostname && !url.username && !url.password; } catch { return false; }
   }, '请填写 HTTPS 下载链接'),
+  signedUpdate: signedUpdateInput.optional(),
 };
 export const releaseInput = z.object({ ...fields, id: z.uuid(), revision: z.number().int().min(0) }).strict();
 const releaseSchema = z.object({ ...fields, id: z.uuid(), publishedAt: z.iso.datetime() }).strict();
@@ -27,6 +29,7 @@ export async function readRelease(reader: DatabaseReader = database().db): Promi
 }
 export async function publishRelease(actorId: string, input: z.infer<typeof releaseInput>) {
   const checked = releaseInput.parse(input);
+  if (checked.signedUpdate) validateSignedRelease(checked.signedUpdate, checked.version, checked.downloadUrl);
   return database().db.transaction(async tx => {
     await lockAdministration(tx, 804714035);
     const current = await readRelease(tx);

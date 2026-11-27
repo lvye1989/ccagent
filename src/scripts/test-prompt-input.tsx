@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import React from "react";
 import { render, Text } from "ink";
+import { PermissionRequestCard } from "../ui/components/PermissionRequestCard.js";
 import { usePromptInput } from "../ui/hooks/usePromptInput.js";
 import type { CommandSuggestion } from "../ui/types.js";
 
@@ -48,21 +49,26 @@ let snapshot: ReturnType<typeof usePromptInput> | undefined;
 let renderCount = 0;
 let renderError: Error | undefined;
 let questionActive = false;
+let humanReview = false;
+const decisions: string[] = [];
 const submitted: string[] = [];
 let commands: CommandSuggestion[] = [{ name: "/fixture-skill", description: "Live skill" }];
 
 function Harness(): React.ReactNode {
   renderCount++;
   const prompt = usePromptInput({
-    isLoading: false, hasPermissionPrompt: false, hasQuestionPrompt: questionActive,
+    isLoading: false, hasPermissionPrompt: humanReview, requiresHumanReview: humanReview, hasQuestionPrompt: questionActive,
     isPlanExitPrompt: false, permissionMode: "default", taskMode: "task", cwd: root,
     // App intentionally rebuilds live skill commands on EVERY render. A stable
     // test prop hides the render-phase setState loop that breaks startup.
     extraCommands: commands.map((command) => ({ ...command })),
     onSubmit: (text) => { submitted.push(text); }, onExit() {},
-    onInterrupt: () => false, onPermissionDecision: () => false, onToggleTranscript() {},
+    onInterrupt: () => false, onPermissionDecision: decision => { decisions.push(decision); return true; }, onToggleTranscript() {},
   });
   React.useLayoutEffect(() => { snapshot = prompt; });
+  if (humanReview) return <PermissionRequestCard selectedOptionIndex={prompt.selectedPermissionIndex} prompt={{
+    toolName: "Fixture", summary: "Review the operation", risk: "Verify the earlier receipt", ruleHint: "fixture", requiresHumanReview: true,
+  }} />;
   return <Text>{prompt.inputValue || "Ready"}</Text>;
 }
 
@@ -128,6 +134,11 @@ try {
   await pause();
   await key("1");
   check(snapshot!.inputValue === "", "Question card keystrokes do not leak into the hidden prompt");
+  questionActive = false; humanReview = true;
+  instance.rerender(element()); await pause();
+  check(tty.output().includes("Verify the earlier receipt") && !tty.output().includes("during this session"), "Fresh human approval shows the reason and only offers one-time choices");
+  await key("a"); await key("2"); await key("1");
+  check(decisions.join(",") === "deny,allow_once", "Fresh human approval keyboard shortcuts cannot create session grants");
   instance.unmount(); instance.cleanup(); renders.pop();
 
   // Cover the actual App tree, not only a simplified hook harness.

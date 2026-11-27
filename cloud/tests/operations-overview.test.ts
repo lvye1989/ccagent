@@ -22,8 +22,10 @@ test('operational overview counts, bounded pending queues, overdue filters and s
     const extraCalls = [past, future].map((deadline, index) => ({ id: randomUUID(), userId: data.users[0]!.id, keyId: data.keyIds[0]!, routeId: data.routes[0]!.id,
       taskId: `extra-task-${index}`, idempotencyKey: randomUUID(), requestHash: 'a'.repeat(64), authorized: 1000n, priceSnapshot: {}, status: 'held', reconcileAt: deadline }));
     await database().db.insert(tables.reservations).values(extraCalls);
+    // These must predate the fixed historical seed on every execution date.
+    const seedDay = Date.parse(data.day + 'T00:00:00Z');
     const extraOrders = Array.from({ length: 7 }, (_, index) => ({ id: `20261108${String(index).padStart(12, '0')}`, userId: data.users[0]!.id, amountFen: 100n, merchantId: 'fixture',
-      createdAt: new Date(now - (10 - index) * 86400000) }));
+      createdAt: new Date(seedDay - (10 - index) * 86400000) }));
     await database().db.insert(tables.orders).values(extraOrders);
     for (const [index, status] of ['held', 'submitting', 'success', 'rejected'].entries()) {
       const id = `20261109${String(index).padStart(12, '0')}`;

@@ -25,7 +25,7 @@ import {
   DEFAULT_RESOLVED_SANDBOX_SETTINGS,
 } from "../sandbox/index.js";
 
-if (!isPlatformSupported() || !isSandboxRuntimeReady()) {
+if (process.platform !== "darwin" || !isPlatformSupported() || !isSandboxRuntimeReady()) {
   console.log("[skip] sandbox-exec not available — smoke test only runs on macOS with sandbox-exec.");
   process.exit(0);
 }
